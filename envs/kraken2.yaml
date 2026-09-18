@@ -1,0 +1,9 @@
+# Taxonomy module tools (metawrap2 kraken2). Kraken2 plus Krona for the
+# krona text import step (ktImportText).
+name: metawrap2-kraken2
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - kraken2 >=2.1.2
+  - krona >=2.8

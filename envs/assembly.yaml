@@ -1,0 +1,11 @@
+# Assembly module tools (metawrap2 assembly).
+# Isolated so SPAdes/MEGAHIT/QUAST resolve on their own.
+name: metawrap2-assembly
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - spades >=3.15
+  - megahit >=1.2.9
+  - quast >=5.2.0
+  - bwa >=0.7.17

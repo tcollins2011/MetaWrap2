@@ -1,0 +1,13 @@
+# Binning module tools (metawrap2 binning).
+# metabat2 / maxbin2 / concoct plus the aligners they need.
+name: metawrap2-binning
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - metabat2 >=2.15
+  - maxbin2 >=2.2.7
+  - concoct >=1.1.0
+  - bowtie2 >=2.5
+  - bwa >=0.7.17
+  - samtools >=1.15

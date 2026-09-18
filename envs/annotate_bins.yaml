@@ -1,0 +1,8 @@
+# Bin annotation module tools (metawrap2 annotate_bins), default prokka path.
+# For the modern annotator, use annotate_bins-bakta.yaml instead.
+name: metawrap2-annotate_bins
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - prokka >=1.14

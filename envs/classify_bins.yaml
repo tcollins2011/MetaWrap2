@@ -1,0 +1,9 @@
+# Bin classification module tools (metawrap2 classify_bins), default taxator-tk path.
+# For modern GTDB-based classification, use classify_bins-gtdbtk.yaml and the
+# module's --gtdbtk option instead.
+name: metawrap2-classify_bins
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - taxator-tk >=1.3.3e

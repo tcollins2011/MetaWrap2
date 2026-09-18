@@ -1,0 +1,23 @@
+# Run `pre-commit install` once, then these checks run on every commit.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+  - repo: local
+    hooks:
+      - id: no-legacy-scripts
+        name: no .sh/.pl/.R (MetaWrap2 is Python-only)
+        entry: bash -c 'if find . -path ./.git -prune -o \( -name "*.sh" -o -name "*.pl" -o -name "*.R" \) -print | grep .; then exit 1; fi'
+        language: system
+        pass_filenames: false

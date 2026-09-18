@@ -1,0 +1,19 @@
+# MetaWrap2 configuration. Copy to ~/.metawrap2/config.toml (or pass with --config).
+# Anything you don't set falls back to the in-code defaults documented in each module.
+
+[settings]
+# Default thread count when a module isn't given -t.
+threads = 1
+# Set false to run tools directly off your PATH instead of per-module conda envs.
+use_conda_envs = true
+
+[databases]
+# Point these at your own downloaded databases.
+KRAKEN2_DB = "/path/to/my/kraken2_database"
+BMTAGGER_DB = "/path/to/my/bmtagger_database"
+BLASTDB = "/path/to/my/NCBI_nt"
+TAXDUMP = "/path/to/my/NCBI_tax"
+
+# Optional: override any surfaced module constant without editing the source.
+# [modules.binning]
+# MIN_CONTIG_LEN = 2000

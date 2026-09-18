@@ -1,0 +1,9 @@
+# Optional CheckM2 environment for bin refinement (metawrap2 bin_refinement --checkm2).
+# CheckM2 is fast and low-memory (no pplacer), so it avoids the CheckM1 RAM wall.
+# Opt-in: scores differ from CheckM1, so the default stays bin_refinement.yaml.
+name: metawrap2-bin_refinement-checkm2
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - checkm2 >=1.0.2

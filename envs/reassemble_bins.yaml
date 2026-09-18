@@ -1,0 +1,10 @@
+# Bin reassembly module tools (metawrap2 reassemble_bins).
+name: metawrap2-reassemble_bins
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - spades >=3.15
+  - bwa >=0.7.17
+  - samtools >=1.15
+  - minimap2 >=2.24   # --nanopore read recruitment

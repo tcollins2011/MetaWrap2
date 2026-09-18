@@ -1,0 +1,11 @@
+# Bin refinement module tools (metawrap2 bin_refinement), default CheckM1 path.
+# CheckM1 still needs pplacer, which is memory-hungry on large trees; if the
+# env is hard to solve or the RAM cost is a problem, use
+# bin_refinement-checkm2.yaml instead and pass the module's --checkm2 option.
+name: metawrap2-bin_refinement
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - checkm-genome >=1.2.0
+  - pplacer

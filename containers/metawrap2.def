@@ -1,0 +1,44 @@
+# Apptainer/Singularity definition for MetaWrap2.
+#
+# Builds the lightweight MetaWrap2 core (python3 + biopython + the metawrap2
+# package) on a micromamba base. Per-module tools live in the environments
+# under envs/ and can be added on top (see the note at the bottom).
+#
+# Build:
+#   apptainer build metawrap2.sif containers/metawrap2.def
+#   # (or: singularity build metawrap2.sif containers/metawrap2.def)
+#
+# Run:
+#   apptainer run metawrap2.sif metawrap2 --help
+
+Bootstrap: docker
+From: mambaorg/micromamba:1.5-jammy
+
+%files
+    . /opt/metawrap2
+
+%post
+    # Core runtime only; heavy tools come from the per-module envs.
+    micromamba install -y -n base -c conda-forge -c bioconda \
+        "python>=3.8" "biopython>=1.79" pip
+    micromamba clean --all --yes
+
+    # Install the metawrap2 package and its `metawrap2` console command on PATH.
+    micromamba run -n base pip install --no-cache-dir /opt/metawrap2
+
+%environment
+    export PATH=/opt/conda/bin:$PATH
+
+%runscript
+    exec "$@"
+
+%help
+    MetaWrap2 core container.
+
+    This image carries the metawrap2 package plus the lightweight python core.
+    Each module's heavy tools live in the per-module conda environments under
+    envs/. To include a module's tools, add its YAML in the %post section, e.g.:
+
+        micromamba install -y -n base -f /opt/metawrap2/envs/binning.yaml
+
+    or create separate per-module images to keep each one small.

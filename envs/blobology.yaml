@@ -1,0 +1,18 @@
+# Blobology module tools (metawrap2 blobology).
+# This module drives external aligners plus bundled Python helpers, so it also
+# carries python + the scientific-Python libs and the metawrap2 package itself.
+name: metawrap2-blobology
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python >=3.8
+  - blast >=2.13
+  - bowtie2 >=2.5
+  - samtools >=1.15
+  - biopython >=1.79
+  - pandas >=1.3
+  - matplotlib-base >=3.5
+  - pip
+  - pip:
+      - metawrap2

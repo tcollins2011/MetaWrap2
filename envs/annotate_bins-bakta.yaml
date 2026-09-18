@@ -1,0 +1,9 @@
+# Optional Bakta environment for bin annotation (metawrap2 annotate_bins --bakta).
+# Opt-in modern annotator; the default stays prokka in annotate_bins.yaml. Needs
+# the Bakta database downloaded separately.
+name: metawrap2-annotate_bins-bakta
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bakta >=1.9

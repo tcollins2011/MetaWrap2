@@ -1,0 +1,10 @@
+# Optional GTDB-Tk environment for bin classification
+# (metawrap2 classify_bins --gtdbtk). Opt-in modern classifier; the default
+# stays taxator-tk in classify_bins.yaml. Needs the GTDB reference data
+# downloaded separately.
+name: metawrap2-classify_bins-gtdbtk
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - gtdbtk >=2.4.0

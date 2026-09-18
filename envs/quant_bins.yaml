@@ -1,0 +1,9 @@
+# Quantification module tools (metawrap2 quant_bins).
+name: metawrap2-quant_bins
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - salmon >=1.10
+  - bwa >=0.7.17
+  - samtools >=1.15

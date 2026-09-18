@@ -1,0 +1,10 @@
+# Read QC module tools (metawrap2 read_qc).
+name: metawrap2-read_qc
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - trim-galore >=0.6.10
+  - fastqc >=0.12.1
+  - bmtagger >=3.101
+  - bowtie2 >=2.5

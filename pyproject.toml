@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metawrap2"
+version = "2.0.0"
+description = "MetaWrap2 - a flexible, Python-native pipeline for genome-resolved metagenomic data analysis"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Gherman Uritskiy" },
+]
+dependencies = [
+    "biopython>=1.79",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+    "pre-commit>=3.0",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.0",
+]
+
+[project.scripts]
+metawrap2 = "metawrap2.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
