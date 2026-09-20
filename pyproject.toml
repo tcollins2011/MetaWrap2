@@ -46,10 +46,12 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff>=0.1",
-    "black>=24.1",
-    "isort>=5.13",
-    "mypy>=1.8",
+    # Lint/type tools are pinned exactly so CI, the pre-push hooks, and local runs all use the
+    # same versions (unpinned ranges drift, and a newer tool with new rules breaks CI).
+    "ruff==0.16.8",
+    "black==26.5.1",
+    "isort==5.13.2",
+    "mypy==2.3.1",
     "pre-commit>=3.0",
 ]
 docs = [
@@ -129,6 +131,12 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 show_error_codes = true
+
+[[tool.mypy.overrides]]
+# Don't parse numpy's type stubs: recent numpy stubs use PEP 695 `type` aliases that mypy
+# rejects under our 3.10 target, and we only touch numpy in already-untyped plotting scripts.
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 # The ported helper scripts are procedural module-level scripts, not typed libraries: they run
