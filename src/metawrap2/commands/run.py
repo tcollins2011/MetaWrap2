@@ -60,10 +60,10 @@ from ..io import reads as _reads
 from ..logging import announcement, comm, error, warning
 from ..manifest import COMPLETED, FAILED, INTERRUPTED, MANIFEST_NAME, Manifest
 
-try:  # Python 3.11+
+if sys.version_info >= (3, 11):
     import tomllib as _toml
-except ModuleNotFoundError:  # pragma: no cover - exercised on <3.11
-    import tomli as _toml  # only reachable on Python < 3.11
+else:  # pragma: no cover - exercised on <3.11
+    import tomli as _toml
 
 #: Steps in pipeline order. Each is a module name; the driver knows how to wire each one.
 ALL_STEPS: Tuple[str, ...] = (

@@ -20,10 +20,10 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-try:  # Python 3.11+
+if sys.version_info >= (3, 11):
     import tomllib as _toml
-except ModuleNotFoundError:  # pragma: no cover - exercised on <3.11
-    import tomli as _toml  # only reachable on Python < 3.11
+else:  # pragma: no cover - exercised on <3.11
+    import tomli as _toml
 
 # One conda env per module (see envs/<module>.yaml), holding only that module's tools.
 MODULE_ENVS: Dict[str, str] = {
