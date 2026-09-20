@@ -119,7 +119,9 @@ known_first_party = ["metawrap2"]
 extend_skip_glob = ["src/metawrap2/vendor/*"]
 
 [tool.mypy]
-python_version = "3.10"
+# No fixed python_version: each CI matrix job runs mypy under its own interpreter, so it both
+# checks that Python version and parses third-party stubs (e.g. numpy's PEP 695 `type` aliases)
+# with a matching grammar. Pinning to 3.10 made mypy reject newer numpy stubs on 3.12/3.13.
 files = ["src/metawrap2"]
 exclude = "src/metawrap2/vendor"
 # Pragmatic settings for a codebase with untyped scientific dependencies: annotations are
@@ -131,12 +133,6 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 show_error_codes = true
-
-[[tool.mypy.overrides]]
-# Don't parse numpy's type stubs: recent numpy stubs use PEP 695 `type` aliases that mypy
-# rejects under our 3.10 target, and we only touch numpy in already-untyped plotting scripts.
-module = ["numpy", "numpy.*"]
-follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 # The ported helper scripts are procedural module-level scripts, not typed libraries: they run
