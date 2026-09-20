@@ -17,15 +17,20 @@ def test_shorten_contig_names_latches(tmp_path):
     )
     out = list(shorten_contig_names.shorten_lines(str(fa)))
     assert out == [
-        ">short_name", "ACGT",
-        ">NODE_1_length_5000", "GGGG",
-        ">NODE_2_length_10", "TTTT",  # shorten latched on -> this short-ish header also trimmed
+        ">short_name",
+        "ACGT",
+        ">NODE_1_length_5000",
+        "GGGG",
+        ">NODE_2_length_10",
+        "TTTT",  # shorten latched on -> this short-ish header also trimmed
     ]
 
 
 def test_grep_product(tmp_path):
     gff = tmp_path / "in.gff"
-    gff.write_text("##gff\nc1\tProdigal\tCDS\t1\t9\t.\t+\t0\tID=1;product=hypothetical\nc1\tfoo\tbar\n")
+    gff.write_text(
+        "##gff\nc1\tProdigal\tCDS\t1\t9\t.\t+\t0\tID=1;product=hypothetical\nc1\tfoo\tbar\n"
+    )
     out = tmp_path / "out.gff"
     annotate_bins._grep_product(str(gff), str(out))
     text = out.read_text()

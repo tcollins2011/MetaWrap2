@@ -52,8 +52,9 @@ def test_subsample_pairs(tmp_path):
 def test_kraken_to_krona_weights(tmp_path):
     # a contig line (length*cov weight) and a read line (weight 1)
     kfile = tmp_path / "s.kraken2"
-    kfile.write_text("NODE_1_length_100_cov_2.0\tBacteria;Firmicutes\n"
-                     "read1\tBacteria;Firmicutes\n")
+    kfile.write_text(
+        "NODE_1_length_100_cov_2.0\tBacteria;Firmicutes\n" "read1\tBacteria;Firmicutes\n"
+    )
     out = io.StringIO()
     kraken_to_krona.to_krona(str(kfile), out)
     row = out.getvalue().strip().split("\t")

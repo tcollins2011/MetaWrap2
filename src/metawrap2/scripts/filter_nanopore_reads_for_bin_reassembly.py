@@ -1,69 +1,110 @@
-#!/usr/bin/env python
-from __future__ import print_function
-import sys, os
+"""Route long (nanopore) reads to the bin they align to, for reassembly.
 
-complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'a':'t', 't':'a', 'c':'g', 'g':'c', 'N':'N', 'n':'n', '*':'*'} 
-def rev_comp(seq):
-	rev_comp=""
-	for n in seq:
-		rev_comp+=complement[n]
-	return rev_comp[::-1]
+The long-read counterpart of :mod:`metawrap2.scripts.filter_reads_for_bin_reassembly`. Reads a
+SAM stream on stdin (``minimap2 -ax map-ont`` against all bins concatenated) and writes one
+``<bin>.nanopore.fastq`` per bin containing the reads that aligned to that bin's contigs.
 
-# load bin contigs
-print("loading contig to bin mappings...")
-contig_bins={}
-for bin_file in os.listdir(sys.argv[1]):
-	if bin_file.endswith(".fa") or bin_file.endswith(".fasta"): 
-		bin_name=".".join(bin_file.split("/")[-1].split(".")[:-1])
-		for line in open(sys.argv[1]+"/"+bin_file):
-			if line[0]!=">": continue
-			contig_bins[line[1:-1]]=bin_name
+There is no strict/permissive split here: long reads carry far more mismatches than a
+short-read SNP cutoff would tolerate, so any aligned read is recruited and the mismatch count
+is not used. ``reassemble_bins`` passes these to SPAdes as ``--nanopore`` alongside the
+short-read pairs.
 
-# store the read names and what bins they belong in in these dictionaries
-# strict stores only perfectly aligning reads and permissive stores any aligned reads
+Usage (``reassemble_bins`` does this for you)::
 
-print("Parsing sam file and writing reads to appropriate files depending what bin they alligned to...")
-files={}
-opened_bins={}
-for line in sys.stdin:
-	if line[0]=="@": continue
-	cut = line.strip().split("\t")
-	binary_flag = bin(int(cut[1]))
+    minimap2 -ax map-ont assembly.fa nanopore.fastq \\
+      | python -m metawrap2.scripts.filter_nanopore_reads_for_bin_reassembly \\
+            original_bins/ reads_for_reassembly/
 
-	# skip non aligned reads
-	if cut[2]=="*": continue
+Rewritten from the original tab-indented script. As with the short-read version, SAM flags are
+now tested with a bitwise mask instead of by indexing into ``bin(flag)`` (which the original
+had to wrap in ``try/except IndexError`` precisely because it broke on small flags), and
+contigs are matched on their id rather than their whole header.
+"""
 
-	# make sure the R and F reads aligned to the same bin
-	if cut[2] not in contig_bins: continue
+from __future__ import annotations
 
-	# make sure the reads aligned again
-	if "NM:i:" not in line: continue
+import os
+import sys
+from typing import Dict, Iterator, List, Optional, TextIO
 
-	bin_name = contig_bins[cut[2]]
-	# open the revelant output files
-	if bin_name not in opened_bins:
-		opened_bins[bin_name]=None
-		files[sys.argv[2]+"/"+bin_name+".nanopore.fastq"]=open(sys.argv[2]+"/"+bin_name+".nanopore.fastq", "w")
+from ..progress import bar
+from .filter_reads_for_bin_reassembly import (
+    FLAG_REVERSE,
+    has_nm_tag,
+    load_contig_bins,
+    reverse_complement,
+)
 
-	# determine alignment type from bitwise FLAG
-	binary_flag = bin(int(cut[1]))
-
-	# if the reads are reversed, fix them
-	try:
-		if binary_flag[-5]=='1':
-			cut[9] = rev_comp(cut[9])
-			cut[10] = cut[10][::-1]
-	except IndexError:
-		pass
+__all__ = ["filter_reads", "main"]
 
 
-	# strict assembly
-	files[sys.argv[2]+"/"+bin_name+".nanopore.fastq"].write('@' + cut[0] + "/1" + "\n" + cut[9] + "\n+\n" + cut[10] + "\n")
+def _records(stream: Iterator[str], contig_bins: Dict[str, str]) -> Iterator[List[str]]:
+    """Yield the SAM records that aligned to a contig belonging to a known bin."""
+    for line in stream:
+        if not line or line[0] == "@":
+            continue
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) < 11 or fields[2] == "*":
+            continue
+        if fields[2] not in contig_bins:
+            continue
+        if not has_nm_tag(fields):
+            continue
+        yield fields
 
 
-print("closing files")
-for f in files:
-	files[f].close()
+def filter_reads(sam_stream: Iterator[str], bin_folder: str, out_dir: str) -> Dict[str, int]:
+    """Route long reads from *sam_stream* into per-bin FASTQ files. Returns simple counts."""
+    print("loading contig to bin mappings...")
+    contig_bins = load_contig_bins(bin_folder)
+    print("%d contigs across %d bins" % (len(contig_bins), len(set(contig_bins.values()))))
+
+    os.makedirs(out_dir, exist_ok=True)
+    handles: Dict[str, TextIO] = {}
+    counts = {"reads": 0, "recruited": 0}
+
+    print("Parsing the sam stream and routing reads to the bin they aligned to...")
+    try:
+        for fields in bar(
+            _records(sam_stream, contig_bins), desc="recruiting nanopore reads", unit=" read"
+        ):
+            counts["reads"] += 1
+            bin_name = contig_bins[fields[2]]
+            handle = handles.get(bin_name)
+            if handle is None:
+                path = os.path.join(out_dir, "%s.nanopore.fastq" % bin_name)
+                handle = open(path, "w")  # noqa: SIM115 - held open for the whole stream
+                handles[bin_name] = handle
+
+            seq, qual = fields[9], fields[10]
+            if int(fields[1]) & FLAG_REVERSE:
+                seq = reverse_complement(seq)
+                qual = qual[::-1]
+            handle.write("@%s/1\n%s\n+\n%s\n" % (fields[0], seq, qual))
+            counts["recruited"] += 1
+    finally:
+        print("closing files")
+        for handle in handles.values():
+            handle.close()
+
+    print(
+        "Finished splitting reads! %d reads recruited across %d bins"
+        % (counts["recruited"], len(handles))
+    )
+    return counts
 
 
-print("Finished splitting reads!")
+def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) != 2:
+        sys.stderr.write(
+            "usage: minimap2 -ax map-ont ... | python -m metawrap2.scripts."
+            "filter_nanopore_reads_for_bin_reassembly <bin folder> <output dir>\n"
+        )
+        return 2
+    filter_reads(sys.stdin, argv[0], argv[1])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

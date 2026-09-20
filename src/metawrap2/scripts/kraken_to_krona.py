@@ -9,12 +9,12 @@ separators as ``ktImportText`` expects.
 from __future__ import annotations
 
 import sys
-from typing import IO
+from typing import IO, Dict
 
 
 def to_krona(kraken2_file: str, out: IO) -> None:
     """Summarize *kraken2_file* into KRONA text rows written to *out*."""
-    data = {}
+    data: Dict[str, float] = {}
     with open(kraken2_file) as fh:
         for line in fh:
             cut = line.strip().split("\t")
@@ -28,8 +28,8 @@ def to_krona(kraken2_file: str, out: IO) -> None:
                 weight = 1
             data[tax] = data.get(tax, 0) + weight
 
-    for tax in data:
-        out.write(str(data[tax]) + "\t" + tax + "\n")
+    for tax, weight in data.items():
+        out.write(str(weight) + "\t" + tax + "\n")
 
 
 def main(argv) -> int:

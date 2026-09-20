@@ -21,14 +21,15 @@ import zlib
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import Ellipse, FancyArrowPatch, FancyBboxPatch  # noqa: E402
+import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse, FancyArrowPatch, FancyBboxPatch
 
 
 def decode_diagram(path: str) -> str:
     """Return the decompressed mxGraphModel XML from a draw.io .xml file."""
-    text = open(path).read()
-    m = re.search(r"<diagram[^>]*>(.*?)</diagram>", text, re.S)
+    with open(path) as fh:
+        text = fh.read()
+    m = re.search(r"<diagram[^>]*>(.*?)</diagram>", text, re.DOTALL)
     if not m:  # already-plain mxGraphModel
         return text
     raw = base64.b64decode(m.group(1))
@@ -37,7 +38,7 @@ def decode_diagram(path: str) -> str:
 
 def _clean_label(value: str) -> str:
     value = value.replace("<br>", "\n").replace("<br/>", "\n")
-    value = re.sub(r"<[^>]+>", "", value)            # strip HTML tags
+    value = re.sub(r"<[^>]+>", "", value)  # strip HTML tags
     value = value.replace("&nbsp;", " ")
     value = html.unescape(value)
     return value.strip()
@@ -102,7 +103,7 @@ def _draw_orthogonal(ax, src, tgt) -> None:
         y1 = tgt["y"] if dy > 0 else tgt["y"] + tgt["h"]
         mid = (y0 + y1) / 2
         pts = [(scx, y0), (scx, mid), (tcx, mid), (tcx, y1)]
-    else:                   # horizontal flow: exit left/right, enter opposite
+    else:  # horizontal flow: exit left/right, enter opposite
         x0 = src["x"] + src["w"] if dx > 0 else src["x"]
         x1 = tgt["x"] if dx > 0 else tgt["x"] + tgt["w"]
         mid = (x0 + x1) / 2
@@ -110,8 +111,19 @@ def _draw_orthogonal(ax, src, tgt) -> None:
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     ax.plot(xs, ys, color="#555555", lw=1.2, zorder=2, solid_capstyle="projecting")
-    ax.add_patch(FancyArrowPatch(pts[-2], pts[-1], arrowstyle="-|>", mutation_scale=13,
-                                 color="#555555", lw=1.2, shrinkA=0, shrinkB=0, zorder=2))
+    ax.add_patch(
+        FancyArrowPatch(
+            pts[-2],
+            pts[-1],
+            arrowstyle="-|>",
+            mutation_scale=13,
+            color="#555555",
+            lw=1.2,
+            shrinkA=0,
+            shrinkB=0,
+            zorder=2,
+        )
+    )
 
 
 def render(path: str) -> str:
@@ -128,7 +140,7 @@ def render(path: str) -> str:
     fig, ax = plt.subplots(figsize=(W / 100.0, H / 100.0), dpi=150)
     ax.set_xlim(minx - pad, maxx + pad)
     ax.set_ylim(miny - pad, maxy + pad)
-    ax.invert_yaxis()          # draw.io y grows downward
+    ax.invert_yaxis()  # draw.io y grows downward
     ax.set_aspect("equal")
     ax.axis("off")
 
@@ -148,16 +160,36 @@ def render(path: str) -> str:
         edge = n["stroke"] if n["stroke"] != "none" else "#333333"
         cx, cy = n["x"] + n["w"] / 2, n["y"] + n["h"] / 2
         if n["ellipse"]:
-            ax.add_patch(Ellipse((cx, cy), n["w"], n["h"], facecolor=fill,
-                                 edgecolor=edge, linewidth=1.3, zorder=3))
+            ax.add_patch(
+                Ellipse(
+                    (cx, cy),
+                    n["w"],
+                    n["h"],
+                    facecolor=fill,
+                    edgecolor=edge,
+                    linewidth=1.3,
+                    zorder=3,
+                )
+            )
         else:
             style = "round,pad=0,rounding_size=8" if n["rounded"] else "square,pad=0"
-            ax.add_patch(FancyBboxPatch(
-                (n["x"], n["y"]), n["w"], n["h"], boxstyle=style,
-                facecolor=fill, edgecolor=edge, linewidth=1.3, zorder=3, mutation_aspect=1))
+            ax.add_patch(
+                FancyBboxPatch(
+                    (n["x"], n["y"]),
+                    n["w"],
+                    n["h"],
+                    boxstyle=style,
+                    facecolor=fill,
+                    edgecolor=edge,
+                    linewidth=1.3,
+                    zorder=3,
+                    mutation_aspect=1,
+                )
+            )
         if n["label"]:
-            ax.text(cx, cy, _wrap(n["label"], n["w"]),
-                    ha="center", va="center", fontsize=10, zorder=4)
+            ax.text(
+                cx, cy, _wrap(n["label"], n["w"]), ha="center", va="center", fontsize=10, zorder=4
+            )
 
     out = os.path.splitext(path)[0] + ".png"
     fig.savefig(out, dpi=150, bbox_inches="tight", pad_inches=0.1)

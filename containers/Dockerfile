@@ -23,9 +23,11 @@ WORKDIR /opt/metawrap2
 # Copy the repository into the image.
 COPY --chown=$MAMBA_USER:$MAMBA_USER . /opt/metawrap2
 
-# Core runtime: python + biopython + pip, then the metawrap2 package itself.
+# Core runtime, from conda rather than pip so the compiled stack comes from one solver.
+# Keep in step with [project].dependencies in pyproject.toml.
 RUN micromamba install -y -n base -c conda-forge -c bioconda \
-        "python>=3.8" "biopython>=1.79" pip && \
+        "python>=3.10" "biopython>=1.79" "numpy>=1.20" "pandas>=1.3" \
+        "matplotlib-base>=3.5" "seaborn>=0.11" "scipy>=1.7" "tqdm>=4.60" pip && \
     micromamba clean --all --yes
 
 ARG MAMBA_DOCKERFILE_ACTIVATE=1

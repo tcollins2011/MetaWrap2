@@ -12,11 +12,14 @@ def test_success_and_stdout_redirect(tmp_path):
 
 def test_failure_raises_toolerror_with_stderr_tail():
     with pytest.raises(ToolError) as exc:
-        run(["python3", "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"],
-            tool="thing", hint="check inputs")
+        run(
+            ["python3", "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"],
+            tool="thing",
+            hint="check inputs",
+        )
     err = exc.value
     assert err.returncode == 3
-    assert "boom" in err.log_tail          # stderr is captured for the error message
+    assert "boom" in err.log_tail  # stderr is captured for the error message
     assert "check inputs" in str(err) and "thing failed" in str(err)
 
 
@@ -24,25 +27,70 @@ def test_check_false_returns_code():
     assert run(["python3", "-c", "import sys; sys.exit(7)"], check=False) == 7
 
 
-def test_env_prefix_uses_mamba():
+def test_env_prefix_uses_mamba(monkeypatch):
+    # --no-capture-output is conda-only; mamba 2.x mis-parses it and every command dies with
+    # "exec: --: invalid option". So the flag is included only when `run --help` advertises it.
+    from metawrap2 import command as command_mod
+
     r = CommandRunner(env_manager="mamba")
-    assert r.env_prefix("metawrap2-binning") == ["mamba", "run", "--no-capture-output", "-n", "metawrap2-binning"]
+    monkeypatch.setattr(command_mod, "_run_flags", lambda mgr: ["--no-capture-output"])
+    assert r.env_prefix("metawrap2-binning") == [
+        "mamba",
+        "run",
+        "--no-capture-output",
+        "-n",
+        "metawrap2-binning",
+    ]
+
+    monkeypatch.setattr(command_mod, "_run_flags", lambda mgr: [])
+    assert r.env_prefix("metawrap2-binning") == ["mamba", "run", "-n", "metawrap2-binning"]
     assert r.env_prefix(None) == []
+
+
+def test_run_flags_detect_no_capture_output_support(monkeypatch):
+    import subprocess as sp
+
+    from metawrap2 import command as command_mod
+
+    command_mod._RUN_FLAGS_CACHE.clear()
+
+    class Result:
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Result("usage: --no-capture-output ..."))
+    assert command_mod._run_flags("conda-like") == ["--no-capture-output"]
+
+    command_mod._RUN_FLAGS_CACHE.clear()
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Result("usage: mamba run [-n NAME] ..."))
+    assert command_mod._run_flags("mamba-like") == []
+
+    # A missing env manager must not raise - it just means no extra flags.
+    command_mod._RUN_FLAGS_CACHE.clear()
+
+    def boom(*a, **k):
+        raise OSError("no such program")
+
+    monkeypatch.setattr(sp, "run", boom)
+    assert command_mod._run_flags("nope") == []
 
 
 def test_dry_run_records_but_does_not_execute(tmp_path):
     r = CommandRunner(dry_run=True)
 
     class Rec:
-        def __init__(self): self.cmds = []
-        def record_command(self, c): self.cmds.append(c)
+        def __init__(self):
+            self.cmds = []
+
+        def record_command(self, c):
+            self.cmds.append(c)
 
     rec = Rec()
     r.configure(recorder=rec)
     sentinel = tmp_path / "should_not_exist"
     rc = r.run(["python3", "-c", "open(%r,'w').close()" % str(sentinel)], tool="py")
     assert rc == 0
-    assert not sentinel.exists()           # not executed
+    assert not sentinel.exists()  # not executed
     assert rec.cmds and "python3" in rec.cmds[0]  # but recorded
 
 
@@ -51,15 +99,21 @@ def test_run_logs_tee_stdout_and_stderr(tmp_path):
     so = tmp_path / "run.stdout"
     se = tmp_path / "run.stderr"
     r.configure(run_stdout_path=str(so), run_stderr_path=str(se))
-    r.run(["python3", "-c", "import sys; print('to-out'); sys.stderr.write('to-err\\n')"], tool="py")
+    r.run(
+        ["python3", "-c", "import sys; print('to-out'); sys.stderr.write('to-err\\n')"], tool="py"
+    )
     assert "to-out" in so.read_text()
     assert "to-err" in se.read_text()
 
 
 def test_recorder_notes_redirect(tmp_path):
     class Rec:
-        def __init__(self): self.cmds = []
-        def record_command(self, c): self.cmds.append(c)
+        def __init__(self):
+            self.cmds = []
+
+        def record_command(self, c):
+            self.cmds.append(c)
+
     r = CommandRunner(dry_run=True)
     rec = Rec()
     r.configure(recorder=rec)

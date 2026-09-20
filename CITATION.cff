@@ -3,7 +3,7 @@ message: "If you use MetaWrap2, please cite it using the metadata below."
 title: "MetaWrap2"
 abstract: "A flexible, Python-native pipeline for genome-resolved metagenomic data analysis."
 type: software
-version: "2.0.0"
+version: "2.0.1"
 authors:
   - family-names: "Uritskiy"
     given-names: "Gherman"

@@ -7,3 +7,4 @@ channels:
   - bioconda
 dependencies:
   - taxator-tk >=1.3.3e
+  - blast >=2.13

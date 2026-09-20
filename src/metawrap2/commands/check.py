@@ -1,7 +1,12 @@
 """`metawrap2 check [module ...]` — preflight tools, conda envs, and databases.
 
-Reports what's missing before a run starts. Exits non-zero if anything a selected module
-needs is unavailable.
+Reports what's missing before a run starts, and exits non-zero if a selected module is
+missing its conda env or a database it cannot run without.
+
+The "External tools" section is informational only: with conda envs enabled (the default)
+each module's tools live inside its env and are *expected* to be absent from the host PATH,
+so their status cannot be part of the verdict. Use ``metawrap2 test`` to probe the tools
+where they actually live, inside each env.
 """
 
 from __future__ import annotations
@@ -10,8 +15,10 @@ import argparse
 from typing import List
 
 from ..config import (
+    DB_KEYS,
     MODULE_ENVS,
     MODULE_TOOLS,
+    OPTIONAL_DB_KEYS,
     check_databases,
     check_tools,
     conda_env_exists,
@@ -48,21 +55,41 @@ def main(argv: List[str]) -> int:
         note = "" if settings.use_conda_envs else " (conda envs disabled; using PATH)"
         print("  [%s]  %-28s %s%s" % (_status(exists), env, module, note))
 
-    print("\nExternal tools (on PATH):\n")
+    print("\nExternal tools (on PATH -- informational; see `metawrap2 test`):\n")
     for tool, module, present in check_tools(modules):
-        # A tool absent from PATH is fine if it lives in the module's conda env.
+        # A tool absent from PATH is fine (expected, even) if it lives in the module's env.
         print("  [%s]  %-18s (%s)" % (_status(present), tool, module))
 
+    # Only databases a *selected* module actually reads count towards the verdict, and
+    # opt-in-path databases (Bakta, GTDB-Tk, ...) never do.
+    needed = {
+        key
+        for key, used_by in DB_KEYS.items()
+        if key not in OPTIONAL_DB_KEYS and any(m in used_by for m in modules)
+    }
+    missing_dbs = []
     print("\nDatabases:\n")
     for key, path, present, used_by in check_databases(settings):
         shown = path if path else "<not set>"
-        print("  [%s]  %-12s %-40s used by %s" % (_status(present), key, shown, used_by))
+        required = key in needed
+        note = "" if required else "  (optional for the selected modules)"
+        print("  [%s]  %-16s %-40s used by %s%s" % (_status(present), key, shown, used_by, note))
+        if required and not present:
+            missing_dbs.append(key)
 
     if missing:
         print(
-            "\n%d conda env(s) missing. Create them with:  metawrap2 install-env %s\n"
+            "\n%d conda env(s) missing. Create them with:  metawrap2 install-env %s"
             % (missing, " ".join(modules))
         )
+    if missing_dbs:
+        print(
+            "\n%d database(s) the selected modules need are not set or not present: %s"
+            "\nSet them under [databases] in metawrap2.toml (see "
+            "installation/database_installation.md)." % (len(missing_dbs), ", ".join(missing_dbs))
+        )
+    if missing or missing_dbs:
+        print()
         return 1
     print("\nPreflight OK for: %s\n" % ", ".join(modules))
     return 0

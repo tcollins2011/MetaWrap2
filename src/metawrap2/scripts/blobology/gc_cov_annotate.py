@@ -14,11 +14,39 @@ import re
 import subprocess
 import sys
 
-from metawrap2.io.seqio import iter_fasta  # noqa: E402
+from metawrap2.io.seqio import iter_fasta
 
 _NODE_RE = re.compile(r"^(\d+)\s*\|\s*(\d+)\s*\|\s*(.+?)\s*\|")
 _NAME_RE = re.compile(r"^(\d+)\s*\|\s*(.+?)\s*\|.+scientific name")
 _CIGAR_RE = re.compile(r"(\d+)[MIDNP]")
+
+
+# NCBI renamed the top-level rank "superkingdom" to "domain": a current taxdump contains no
+# "superkingdom" nodes at all, so asking for that rank silently yielded "Not annotated" for
+# every contig - losing exactly the Bacteria/Archaea/Eukaryota split a blobplot is for.
+# Treat the two as the same rank, in both directions, so old and new taxdumps both work.
+RANK_SYNONYMS = {
+    "superkingdom": ("superkingdom", "domain"),
+    "domain": ("domain", "superkingdom"),
+}
+
+
+def normalize_ranks(wanted):
+    """Expand requested rank names to include their synonyms."""
+    expanded = set()
+    for want in wanted:
+        expanded.update(RANK_SYNONYMS.get(want, (want,)))
+    return expanded
+
+
+def canonical_rank(rank_name, wanted):
+    """Map a taxdump rank back to the rank name the *caller* asked for."""
+    if rank_name in wanted:
+        return rank_name
+    for want in wanted:
+        if rank_name in RANK_SYNONYMS.get(want, ()):
+            return want
+    return None
 
 
 def load_nodes_names(taxdump_dir):
@@ -57,12 +85,22 @@ def main():
     ap.add_argument("--taxdump", default=".")
     ap.add_argument("--bam", nargs="*", default=[])
     ap.add_argument("--cov", nargs="*", default=[])
-    ap.add_argument("--taxlist", nargs="*",
-                    default=["species", "order", "phylum", "superkingdom"])
+    ap.add_argument("--taxlist", nargs="*", default=["species", "order", "phylum", "superkingdom"])
+    # This helper runs in the host interpreter (it needs metawrap2), but samtools lives in
+    # the blobology conda env, so the caller passes its absolute path. Falling back to
+    # "samtools" keeps the script usable standalone when samtools is on PATH.
+    ap.add_argument(
+        "--samtools",
+        default="samtools",
+        help="path to the samtools binary (default: look it up on PATH)",
+    )
     args = ap.parse_args()
 
     out_file = args.out or (args.assembly + ".txt")
-    wanted_ranks = set(args.taxlist)
+    # Column names stay exactly as the user asked for them (so the output contract and the
+    # plot filenames do not change); only the *matching* accepts the synonym.
+    requested_ranks = list(args.taxlist)
+    wanted_ranks = normalize_ranks(requested_ranks)
 
     sys.stderr.write("Loading taxonomy from %s ...\n" % args.taxdump)
     parent, rank, name = load_nodes_names(args.taxdump)
@@ -79,7 +117,8 @@ def main():
             for tid in lineage_taxids(taxid, parent):
                 r = rank.get(tid)
                 if r in wanted_ranks and tid in name:
-                    info[r] = name[tid]
+                    key = canonical_rank(r, requested_ranks) or r
+                    info[key] = name[tid]
             contig_taxinfo[seqid] = info
 
     # length / GC per contig (compression-transparent)
@@ -96,7 +135,13 @@ def main():
     # coverage per BAM (total aligned reference span / contig length), via samtools
     for bam in args.bam:
         sys.stderr.write("Reading %s ...\n" % bam)
-        proc = subprocess.Popen(["samtools", "view", bam], stdout=subprocess.PIPE, text=True)
+        try:
+            proc = subprocess.Popen([args.samtools, "view", bam], stdout=subprocess.PIPE, text=True)
+        except OSError as exc:
+            sys.exit(
+                "could not run samtools (%r): %s\nPass --samtools /path/to/samtools, or "
+                "make samtools available on PATH." % (args.samtools, exc)
+            )
         for sam in proc.stdout:
             if not sam or sam[0] in "@#" or sam.strip() == "":
                 continue

@@ -23,8 +23,12 @@ def fix_naming(fasta_path: str, min_len: int, out: IO, width: int = WRAP_WIDTH) 
     renamed = []
     for header, seq in iter_fasta(fasta_path):
         parts = header.split(" ")
-        length = parts[3].split("=")[1]
-        cov = parts[2].split("=")[1]
+        # Read len=/multi= by name rather than by position: MEGAHIT's header layout has
+        # changed between releases, and positional indexing turns that into an IndexError
+        # (or, worse, silently reads the wrong field) instead of just working.
+        fields = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+        length = fields.get("len") or str(len(seq))
+        cov = fields.get("multi", "0")
         if int(length) < min_len:
             continue
         renamed.append((parts[0] + "_length_" + length + "_cov_" + cov, seq))

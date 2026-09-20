@@ -23,7 +23,9 @@ def test_delimiters_differ_by_level():
 
 def test_long_message_wraps_to_multiple_lines():
     msg = "word " * 40  # far exceeds the 90-char wrap width
-    content = [ln for ln in mwlog.format_comment(msg.strip(), "-").split("\n") if set(ln) != {"-"} and ln]
+    content = [
+        ln for ln in mwlog.format_comment(msg.strip(), "-").split("\n") if set(ln) != {"-"} and ln
+    ]
     assert len(content) >= 2
     for line in content:
         assert len(line) == 120

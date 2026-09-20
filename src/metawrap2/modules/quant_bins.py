@@ -18,11 +18,31 @@ import shutil
 from typing import List
 
 from ..config import load_settings
-from ..io.seqio import iter_fasta
+from ..constants import FASTA_EXTENSIONS, TSV_SUFFIX
+from ..io.seqio import contig_id, iter_fasta
+from ..progress import bar
+from ..pyrun import py_module
 from ..scripts import split_salmon_out_into_bins, summarize_salmon_files
 from ._common import (
-    announcement, collect_read_pairs, comm, ensure_dir, env_for, error, finish_run,
-    make_checkpoint, run, start_run, warning,
+    absolutize_paths,
+    announcement,
+    check_fasta,
+    check_fastq,
+    collect_read_pairs,
+    comm,
+    dry_run,
+    ensure_dir,
+    env_for,
+    error,
+    finish_run,
+    make_checkpoint,
+    require_nonempty_dir,
+    resolve_threads,
+    run,
+    start_run,
+    threads_arg,
+    validate_inputs,
+    warning,
 )
 
 CONDA_ENV = "metawrap2-quant_bins"
@@ -30,7 +50,9 @@ CONDA_ENV = "metawrap2-quant_bins"
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 SALMON_INDEX = "salmon index -p {threads} -t {assembly} -i {index}"
 SALMON_QUANT = "salmon quant -i {index} --libType IU -1 {r1} -2 {r2} -o {out} --meta -p {threads}"
-MAKE_HEATMAP = ["python", "-m", "metawrap2.scripts.make_heatmap", "{table}", "{png}"]
+# MetaWrap2's own helper -> host interpreter (env=None); the quant_bins env has salmon,
+# not python+seaborn. See metawrap2.pyrun.
+MAKE_HEATMAP = py_module("metawrap2.scripts.make_heatmap", "{table}", "{png}")
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
 # ───────────────────────────────────────────────────────────────────────────────────────────
@@ -40,15 +62,21 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="metawrap2 quant_bins",
         usage="metawrap2 quant_bins [options] -b bins_folder -o output_dir -a assembly.fa "
-              "readsA_1.fastq readsA_2.fastq ... [readsX_1.fastq readsX_2.fastq]",
+        "readsA_1.fastq readsA_2.fastq ... [readsX_1.fastq readsX_2.fastq]",
         description="Estimate the abundance of each bin across samples with salmon, and "
-                    "draw a clustered abundance heatmap (.gz reads accepted).",
+        "draw a clustered abundance heatmap (.gz reads accepted).",
     )
-    p.add_argument("-b", "--bins", required=True, help="folder containing draft genomes (bins) in fasta format")
+    p.add_argument(
+        "-b", "--bins", required=True, help="folder containing draft genomes (bins) in fasta format"
+    )
     p.add_argument("-o", "--output", required=True, help="output directory")
-    p.add_argument("-a", "--assembly", default="",
-                   help="fasta file with entire metagenomic assembly (strongly recommended!)")
-    p.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS, help="number of threads (default 1)")
+    p.add_argument(
+        "-a",
+        "--assembly",
+        default="",
+        help="fasta file with entire metagenomic assembly (strongly recommended!)",
+    )
+    threads_arg(p)
     p.add_argument("--config", help="path to metawrap2.toml")
     p.add_argument("reads", nargs="+", help="paired read files (*_1.fastq/*_2.fastq, .gz accepted)")
     return p.parse_args(argv)
@@ -60,8 +88,10 @@ def _concat_bins_into_assembly(bin_folder: str, assembly: str) -> None:
         os.remove(assembly)
     with open(assembly, "w") as out:
         for f in sorted(os.listdir(bin_folder)):
-            for header, seq in iter_fasta(os.path.join(bin_folder, f)):
-                out.write(">%s\n%s\n" % (header, seq))
+            out.writelines(
+                ">%s\n%s\n" % (contig_id(header), seq)
+                for header, seq in iter_fasta(os.path.join(bin_folder, f))
+            )
 
 
 def main(argv: List[str]) -> int:
@@ -70,8 +100,24 @@ def main(argv: List[str]) -> int:
         error("%s does not exist. Exiting..." % args.bins)
 
     settings = load_settings(args.config)
+    resolve_threads(args, settings)
+    absolutize_paths(args)
+    validate_inputs(
+        "quant_bins",
+        [
+            (
+                lambda path, what: require_nonempty_dir(path, what, FASTA_EXTENSIONS),
+                args.bins,
+                "bin folder (-b)",
+            )
+        ]
+        + ([(check_fasta, args.assembly, "assembly (-a)")] if args.assembly else [])
+        + [(check_fastq, r, "read file") for r in args.reads],
+    )
     env = env_for("quant_bins", settings)
-    rec = start_run("quant_bins", args, env, settings, inputs=[args.assembly, args.bins] + list(args.reads))
+    rec = start_run(
+        "quant_bins", args, env, settings, inputs=[args.assembly, args.bins] + list(args.reads)
+    )
 
     ckpt = make_checkpoint(args.output)
     try:
@@ -83,16 +129,20 @@ def main(argv: List[str]) -> int:
         if not assembly:
             comm("Concatenating bins into a metagenomic assembly file.")
             assembly = os.path.join(args.output, "assembly.fa")
-            _concat_bins_into_assembly(args.bins, assembly)
+            if not dry_run():
+                _concat_bins_into_assembly(args.bins, assembly)
         elif not os.path.isfile(assembly):
             error("Assembly file %s does not exist. Exiting..." % assembly)
 
         index = os.path.join(args.output, "assembly_index")
         if ckpt.todo("index"):
             comm("Indexing assembly file with salmon. Ignore any warnings")
-            run(SALMON_INDEX.format(threads=args.threads, assembly=assembly, index=index),
-                env=env, tool="salmon index",
-                hint="Something went wrong with indexing the assembly.")
+            run(
+                SALMON_INDEX.format(threads=args.threads, assembly=assembly, index=index),
+                env=env,
+                tool="salmon index",
+                hint="Something went wrong with indexing the assembly.",
+            )
             ckpt.done("index")
         else:
             comm("skipping salmon index (already done; --resume)")
@@ -107,18 +157,26 @@ def main(argv: List[str]) -> int:
         align_dir = os.path.join(args.output, "alignment_files")
         ensure_dir(align_dir)
         if ckpt.todo("quant"):
-            for sample, r1, r2 in pairs:
+            for sample, r1, r2 in bar(
+                pairs, desc="quantifying samples", unit=" sample", total=len(pairs)
+            ):
                 out_quant = os.path.join(align_dir, sample + ".quant")
                 comm("processing sample %s with reads %s and %s..." % (sample, r1, r2))
-                run(SALMON_QUANT.format(index=index, r1=r1, r2=r2, out=out_quant, threads=args.threads),
-                    env=env, tool="salmon quant",
-                    hint="Something went wrong with aligning %s fastq files back to assembly!" % sample)
+                run(
+                    SALMON_QUANT.format(
+                        index=index, r1=r1, r2=r2, out=out_quant, threads=args.threads
+                    ),
+                    env=env,
+                    tool="salmon quant",
+                    hint="Something went wrong with aligning %s fastq files back to assembly!"
+                    % sample,
+                )
             ckpt.done("quant")
         else:
             comm("skipping salmon quant (already done; --resume)")
 
         quant_dir = os.path.join(args.output, "quant_files")
-        if ckpt.todo("summarize"):
+        if ckpt.todo("summarize") and not dry_run():
             comm("summarize salmon files...")
             summarize_salmon_files.summarize(align_dir)
             ensure_dir(quant_dir)
@@ -131,7 +189,7 @@ def main(argv: List[str]) -> int:
             if n < 1:
                 error("There were no files found in %s" % quant_dir)
             comm("There were %d samples detected. Making abundance table!" % n)
-            table = os.path.join(args.output, "bin_abundance_table.tab")
+            table = os.path.join(args.output, "bin_abundance_table" + TSV_SUFFIX)
             with open(table, "w") as out:
                 split_salmon_out_into_bins.build_table(quant_dir, args.bins, assembly, out)
             comm("Average bin abundance table stored in %s" % table)
@@ -140,13 +198,32 @@ def main(argv: List[str]) -> int:
                 announcement("MAKING GENOME ABUNDANCE HEATMAP WITH SEABORN")
                 comm("making heatmap with Seaborn")
                 heatmap = os.path.join(args.output, "bin_abundance_heatmap.png")
-                run([a.format(table=table, png=heatmap) for a in MAKE_HEATMAP],
-                    env=env, tool="make_heatmap", hint="Something went wrong with making the heatmap.")
-                comm("cleaning up...")
-                shutil.rmtree(align_dir, ignore_errors=True)
+                run(
+                    [a.format(table=table, png=heatmap) for a in MAKE_HEATMAP],
+                    env=None,
+                    tool="make_heatmap",
+                    hint="Something went wrong with making the heatmap.",
+                )
             else:
                 warning("Cannot make clustered heatmap with just one sample... Skipping heatmap")
+
+            # Clean up regardless of sample count: salmon's per-sample output is large and is
+            # fully summarised into quant_files/ and the abundance table by this point. It used
+            # to be deleted only on the >1-sample path, so single-sample runs silently kept it.
+            comm("cleaning up salmon's per-sample alignment output...")
+            shutil.rmtree(align_dir, ignore_errors=True)
             ckpt.done("summarize")
+        elif dry_run():
+            ensure_dir(quant_dir)
+            table = os.path.join(args.output, "bin_abundance_table" + TSV_SUFFIX)
+            heatmap = os.path.join(args.output, "bin_abundance_heatmap.png")
+            comm("(dry run) would summarize salmon output into %s" % table)
+            if len(pairs) > 1:
+                run(
+                    [a.format(table=table, png=heatmap) for a in MAKE_HEATMAP],
+                    env=None,
+                    tool="make_heatmap",
+                )
         else:
             comm("skipping abundance summary (already done; --resume)")
 
@@ -158,4 +235,5 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main(sys.argv[1:]))

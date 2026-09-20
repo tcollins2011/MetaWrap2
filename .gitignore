@@ -1,13 +1,21 @@
+# Python build / install artifacts
 __pycache__/
 *.pyc
 *.egg-info/
-.pytest_cache/
 build/
 dist/
-.ruff_cache/
 
-# macOS / caches
-.DS_Store
+# Tool caches
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
+coverage.xml
+htmlcov/
+
+# Built documentation
 docs/site/
+site/
+
+# OS cruft
+.DS_Store

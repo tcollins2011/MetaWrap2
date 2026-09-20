@@ -1,117 +1,232 @@
-#!/usr/bin/env python
-#usage: 
-# bwa mem -a assembly.fa reads_1.fastq reads_2.fastq | ./filter_reads_for_bin_reassembly.py original_bin_folder reads_1.fastq reads_2.fastq output_dir
-from __future__ import print_function
-import sys, os
-strict_snp_cutoff = int(sys.argv[3])
-permissive_snp_cutoff = int(sys.argv[4])
+"""Route read pairs to the bin they align to, at two stringencies, for reassembly.
 
-complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'a':'t', 't':'a', 'c':'g', 'g':'c', 'N':'N', 'n':'n'} 
-def rev_comp(seq):
-	rev_comp=""
-	for n in seq:
-		rev_comp+=complement[n]
-	return rev_comp[::-1]
+Reads a SAM stream on stdin (``bwa mem`` against all bins concatenated) and writes, per bin,
+four FASTQ files::
 
-# load bin contigs
-print("loading contig to bin mappings...")
-contig_bins={}
-for bin_file in os.listdir(sys.argv[1]):
-	if bin_file.endswith(".fa") or bin_file.endswith(".fasta"): 
-		bin_name=".".join(bin_file.split("/")[-1].split(".")[:-1])
-		for line in open(sys.argv[1]+"/"+bin_file):
-			if line[0]!=">": continue
-			contig_bins[line[1:-1]]=bin_name
+    <bin>.strict_1.fastq      <bin>.strict_2.fastq
+    <bin>.permissive_1.fastq  <bin>.permissive_2.fastq
 
-# store the read names and what bins they belong in in these dictionaries
-# strict stores only perfectly aligning reads and permissive stores any aligned reads
+A pair is recruited to a bin when **both** mates align to contigs belonging to that same bin.
+It then goes into the *strict* set if the two mates carry fewer than ``strict`` mismatches
+between them (SAM ``NM`` tags summed), and into the *permissive* set under the looser
+``permissive`` cutoff. ``reassemble_bins`` assembles both and keeps whichever CheckM likes
+best, so the two stringencies are a way of trying both a conservative and a generous read
+recruitment for every genome.
 
-print("Parsing sam file and writing reads to appropriate files depending what bin they alligned to...")
-files={}
-opened_bins={}
-for line in sys.stdin:
-	if line[0]=="@": continue
-	cut = line.strip().split("\t")
-	binary_flag = bin(int(cut[1]))
+Reads that aligned in reverse are reverse-complemented (and their quality strings reversed)
+so the FASTQ is in the original read orientation, which is what an assembler expects.
 
-	if binary_flag[-7]=="1":
-		F_line=line
-		continue
-	elif binary_flag[-8]=="1":
-		R_line=line
+Usage (``reassemble_bins`` does this for you)::
 
-	# get fields for forward and reverse reads	
-	F_cut = F_line.strip().split("\t")
-	R_cut = R_line.strip().split("\t")
+    bwa mem -t 8 assembly.fa r1.fastq r2.fastq \\
+      | python -m metawrap2.scripts.filter_reads_for_bin_reassembly \\
+            original_bins/ reads_for_reassembly/ 2 5
 
-	# skip non aligned reads
-	if F_cut[2]=="*" and R_cut[2]=="*": continue
+This is a rewrite of the original script - same recruitment rules and same output -
+restructured into functions from a tab-indented, module-level-``sys.argv`` script. Two
+behavioural details were corrected in the process, both noted at their call sites: SAM flags
+are now tested with bitwise masks rather than by indexing into ``bin(flag)`` (which raised
+IndexError on small flag values), and contigs are matched on their id rather than their whole
+header (so bins carrying tool-added header annotations are not silently unmatched).
+"""
 
-	# make sure the R and F reads aligned to the same bin
-	if F_cut[2] != R_cut[2]:
-		if F_cut[2] not in contig_bins or R_cut[2] not in contig_bins: 
-			continue
-		bin1 = contig_bins[F_cut[2]]
-		bin2 = contig_bins[R_cut[2]]
-		if bin1 != bin2: 
-			continue
-		bin_name=bin1
-	else:
-		contig=F_cut[2]
-		if contig not in contig_bins: continue
-		bin_name = contig_bins[contig]
+from __future__ import annotations
 
-	# make sure the reads aligned again
-	if "NM:i:" not in F_line and "NM:i:" not in R_line: continue
-	
-	# open the revelant output files
-	if bin_name not in opened_bins:
-		opened_bins[bin_name]=None
-		files[sys.argv[2]+"/"+bin_name+".strict_1.fastq"]=open(sys.argv[2]+"/"+bin_name+".strict_1.fastq", "w")
-		files[sys.argv[2]+"/"+bin_name+".strict_2.fastq"]=open(sys.argv[2]+"/"+bin_name+".strict_2.fastq", "w")
-		files[sys.argv[2]+"/"+bin_name+".permissive_1.fastq"]=open(sys.argv[2]+"/"+bin_name+".permissive_1.fastq", "w")
-		files[sys.argv[2]+"/"+bin_name+".permissive_2.fastq"]=open(sys.argv[2]+"/"+bin_name+".permissive_2.fastq", "w")
+import os
+import sys
+from typing import Dict, Iterator, List, Optional, TextIO, Tuple
 
-	# count how many mismatches there are between the two reads
-	cumulative_mismatches=0
-	for field in F_cut:
-		if field.startswith("NM:i:"):
-			cumulative_mismatches += int(field.split(":")[-1])
-			break
-	for field in R_cut:
-		if field.startswith("NM:i:"):
-			cumulative_mismatches += int(field.split(":")[-1])
-			break
+from ..constants import FASTA_EXTENSIONS
+from ..io.seqio import contig_id, iter_fasta
+from ..progress import bar
 
-	# determine alignment type from bitwise FLAG
-	F_binary_flag = bin(int(F_cut[1]))
-	R_binary_flag = bin(int(R_cut[1]))
+# SAM FLAG bits we care about.
+FLAG_REVERSE = 0x10  # read aligned to the reverse strand
+FLAG_FIRST = 0x40  # first mate in the pair
+FLAG_SECOND = 0x80  # second mate in the pair
+
+_COMPLEMENT = str.maketrans("ACGTacgtNn", "TGCAtgcaNn")
+
+STYLES = ("strict", "permissive")
 
 
-	# if the reads are reversed, fix them
-	if F_binary_flag[-5]=='1':
-		F_cut[9] = rev_comp(F_cut[9])
-		F_cut[10] = F_cut[10][::-1]
-	if R_binary_flag[-5]=='1':
-		R_cut[9] = rev_comp(R_cut[9])
-		R_cut[10] = R_cut[10][::-1]
-
-	# strict assembly
-	if cumulative_mismatches<strict_snp_cutoff:
-		files[sys.argv[2]+"/"+bin_name+".strict_1.fastq"].write('@' + F_cut[0] + "/1" + "\n" + F_cut[9] + "\n+\n" + F_cut[10] + "\n")
-		files[sys.argv[2]+"/"+bin_name+".strict_2.fastq"].write('@' + R_cut[0] + "/2" + "\n" + R_cut[9] + "\n+\n" + R_cut[10] + "\n")
-
-	# permissive assembly
-	if cumulative_mismatches<permissive_snp_cutoff:
-		files[sys.argv[2]+"/"+bin_name+".permissive_1.fastq"].write('@' + F_cut[0] + "/1" + "\n" + F_cut[9] + "\n+\n" + F_cut[10] + "\n")
-		files[sys.argv[2]+"/"+bin_name+".permissive_2.fastq"].write('@' + R_cut[0] + "/2" + "\n" + R_cut[9] + "\n+\n" + R_cut[10] + "\n")
+def reverse_complement(seq: str) -> str:
+    return seq.translate(_COMPLEMENT)[::-1]
 
 
-print("closing files")
-for f in files:
-	files[f].close()
+def load_contig_bins(bin_folder: str) -> Dict[str, str]:
+    """Map each contig id to the name of the bin that contains it.
+
+    Keyed on :func:`contig_id` (the header up to the first whitespace), which is also what a
+    SAM reference name is - so a bin whose headers carry tool-added annotations (metaBAT2
+    appends ``total_depth=..``) still matches its own alignments.
+    """
+    contig_bins: Dict[str, str] = {}
+    for filename in sorted(os.listdir(bin_folder)):
+        if not filename.endswith(FASTA_EXTENSIONS):
+            continue
+        bin_name = os.path.splitext(filename)[0]
+        for header, _seq in iter_fasta(os.path.join(bin_folder, filename)):
+            contig_bins[contig_id(header)] = bin_name
+    return contig_bins
 
 
-print("Finished splitting reads!")
+def mismatches(fields: List[str]) -> int:
+    """The SAM ``NM`` edit distance for one alignment record, or 0 if it has no NM tag."""
+    for field in fields[11:]:
+        if field.startswith("NM:i:"):
+            return int(field.rpartition(":")[2])
+    return 0
 
 
+def has_nm_tag(fields: List[str]) -> bool:
+    """True if this record carries an NM tag, i.e. it actually aligned."""
+    return any(f.startswith("NM:i:") for f in fields[11:])
+
+
+def iter_pairs(stream: Iterator[str]) -> Iterator[Tuple[List[str], List[str]]]:
+    """Yield (forward_fields, reverse_fields) for each mate pair in a SAM stream.
+
+    Header lines are skipped. Records are paired by the FLAG's first/second-mate bits, tested
+    with bitwise masks: the original indexed into ``bin(flag)``, which raises IndexError for
+    any flag small enough to make the binary string short.
+    """
+    forward: Optional[List[str]] = None
+    for line in stream:
+        if not line or line[0] == "@":
+            continue
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) < 11:
+            continue
+        try:
+            flag = int(fields[1])
+        except ValueError:
+            continue
+        if flag & FLAG_FIRST:
+            forward = fields
+        elif flag & FLAG_SECOND and forward is not None:
+            yield forward, fields
+            forward = None
+
+
+def bin_for_pair(
+    forward: List[str], reverse: List[str], contig_bins: Dict[str, str]
+) -> Optional[str]:
+    """The bin both mates belong to, or None if they disagree or are unbinned/unmapped."""
+    f_ref, r_ref = forward[2], reverse[2]
+    if f_ref == "*" and r_ref == "*":
+        return None
+    if f_ref == r_ref:
+        return contig_bins.get(f_ref)
+    f_bin, r_bin = contig_bins.get(f_ref), contig_bins.get(r_ref)
+    if f_bin is not None and f_bin == r_bin:
+        return f_bin
+    return None
+
+
+def as_fastq(fields: List[str], mate: int) -> str:
+    """One FASTQ record for a SAM line, restored to the original read orientation."""
+    seq, qual = fields[9], fields[10]
+    if int(fields[1]) & FLAG_REVERSE:
+        seq = reverse_complement(seq)
+        qual = qual[::-1]
+    return "@%s/%d\n%s\n+\n%s\n" % (fields[0], mate, seq, qual)
+
+
+class BinWriters:
+    """Lazily-opened output handles: four files per bin, closed together at the end.
+
+    Files are opened on first use rather than up front, so a run only creates handles for bins
+    that actually recruited reads. ``reassemble_bins`` raises the open-file limit before
+    calling this, because a study with many bins needs thousands of handles at once.
+    """
+
+    def __init__(self, out_dir: str):
+        self.out_dir = out_dir
+        self._handles: Dict[Tuple[str, str, int], TextIO] = {}
+
+    def write(self, bin_name: str, style: str, mate: int, record: str) -> None:
+        key = (bin_name, style, mate)
+        handle = self._handles.get(key)
+        if handle is None:
+            path = os.path.join(self.out_dir, "%s.%s_%d.fastq" % (bin_name, style, mate))
+            handle = open(path, "w")  # noqa: SIM115 - closed together in close()
+            self._handles[key] = handle
+        handle.write(record)
+
+    def close(self) -> None:
+        for handle in self._handles.values():
+            handle.close()
+        self._handles.clear()
+
+    @property
+    def bins(self) -> int:
+        return len({key[0] for key in self._handles})
+
+
+def filter_reads(
+    sam_stream: Iterator[str], bin_folder: str, out_dir: str, strict: int, permissive: int
+) -> Dict[str, int]:
+    """Route pairs from *sam_stream* into per-bin FASTQ files. Returns simple counts."""
+    print("loading contig to bin mappings...")
+    contig_bins = load_contig_bins(bin_folder)
+    print("%d contigs across %d bins" % (len(contig_bins), len(set(contig_bins.values()))))
+
+    os.makedirs(out_dir, exist_ok=True)
+    writers = BinWriters(out_dir)
+    counts = {"pairs": 0, "recruited": 0, "strict": 0, "permissive": 0}
+
+    print("Parsing the sam stream and routing reads to the bin they aligned to...")
+    try:
+        # This consumes every alignment of every read in the library off a pipe and can run
+        # for a long time with no output at all; the bar makes it obvious it is still moving.
+        for forward, reverse in bar(
+            iter_pairs(sam_stream), desc="recruiting reads to bins", unit=" pair"
+        ):
+            counts["pairs"] += 1
+            bin_name = bin_for_pair(forward, reverse, contig_bins)
+            if bin_name is None:
+                continue
+            # At least one mate must have actually aligned (carry an NM tag).
+            if not (has_nm_tag(forward) or has_nm_tag(reverse)):
+                continue
+            counts["recruited"] += 1
+
+            total = mismatches(forward) + mismatches(reverse)
+            r1, r2 = as_fastq(forward, 1), as_fastq(reverse, 2)
+            if total < strict:
+                writers.write(bin_name, "strict", 1, r1)
+                writers.write(bin_name, "strict", 2, r2)
+                counts["strict"] += 1
+            if total < permissive:
+                writers.write(bin_name, "permissive", 1, r1)
+                writers.write(bin_name, "permissive", 2, r2)
+                counts["permissive"] += 1
+    finally:
+        print("closing files")
+        writers.close()
+
+    print(
+        "Finished splitting reads! %d pairs seen, %d recruited to a bin "
+        "(%d strict, %d permissive)"
+        % (counts["pairs"], counts["recruited"], counts["strict"], counts["permissive"])
+    )
+    return counts
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) != 4:
+        sys.stderr.write(
+            "usage: bwa mem ... | python -m metawrap2.scripts."
+            "filter_reads_for_bin_reassembly <bin folder> <output dir> "
+            "<strict mismatch cutoff> <permissive mismatch cutoff>\n"
+        )
+        return 2
+    bin_folder, out_dir, strict, permissive = argv[0], argv[1], int(argv[2]), int(argv[3])
+    filter_reads(sys.stdin, bin_folder, out_dir, strict, permissive)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -17,50 +17,109 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import shlex
 import shutil
 from typing import List
 
 from ..config import load_settings
+from ..io import reads as _reads
 from ..io.seqio import smart_open
 from ..scripts import select_human_reads, skip_human_reads
 from ._common import (
-    announcement, comm, ensure_dir, env_for, error, finish_run, make_checkpoint, run,
-    start_run, warning,
+    absolutize_paths,
+    announcement,
+    check_disk_space,
+    check_fastq,
+    comm,
+    dry_run,
+    ensure_dir,
+    env_for,
+    error,
+    expect_produced,
+    file_size,
+    finish_run,
+    fs_move,
+    fs_remove,
+    make_checkpoint,
+    read_layout,
+    resolve_threads,
+    run,
+    start_run,
+    threads_arg,
+    validate_inputs,
+    warning,
 )
 
 CONDA_ENV = "metawrap2-read_qc"
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-FASTQC       = "fastqc -q -t {threads} -o {outdir} -f fastq {r1} {r2}"
-TRIM_GALORE  = "trim_galore --no_report_file --paired -o {outdir} {r1} {r2}"
-BMTAGGER     = ("bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1"
-                " -1 {r1} -2 {r2} -o {listfile}")
+FASTQC = "fastqc -q -t {threads} -o {outdir} -f fastq {files}"
+TRIM_GALORE = "trim_galore --no_report_file --paired -j {trim_threads} -o {outdir} {r1} {r2}"
+TRIM_GALORE_SINGLE = "trim_galore --no_report_file -j {trim_threads} -o {outdir} {reads}"
+BMTAGGER = "bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1" " -1 {r1} -2 {r2} -o {listfile}"
+BMTAGGER_SINGLE = (
+    "bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1" " -1 {reads} -o {listfile}"
+)
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
-DEFAULT_HOST = "hg38"   # prefix of the host index inside the bmtagger database folder
+DEFAULT_HOST = "hg38"  # prefix of the host index inside the bmtagger database folder
+# trim_galore's own docs warn that -j above 4 gives no further speedup (cutadapt scaling),
+# and it spawns ~4 processes per core, so we cap it rather than passing -t straight through.
+TRIM_GALORE_MAX_THREADS = 4
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="metawrap2 read_qc",
-        usage="metawrap2 read_qc [options] -1 reads_1.fastq -2 reads_2.fastq -o output_dir",
-        description="Quality-trim reads and remove host sequences. Read files must follow the "
-                    "name_1.fastq / name_2.fastq convention (.gz accepted).",
+        usage="metawrap2 read_qc [options] -1 reads_1.fastq [-2 reads_2.fastq] -o output_dir",
+        description="Quality-trim reads and remove host sequences. Paired files may use any "
+        "of the usual mate conventions (_1/_2, _R1/_R2, _R1_001/_R2_001); .gz and "
+        ".bz2 are accepted. Single-end and interleaved data are supported with "
+        "--single-end / --interleaved.",
     )
-    p.add_argument("-1", dest="reads_1", required=True, help="forward fastq reads")
-    p.add_argument("-2", dest="reads_2", required=True, help="reverse fastq reads")
+    p.add_argument(
+        "-1",
+        dest="reads_1",
+        required=True,
+        help="forward fastq reads (or the only file, with --single-end/--interleaved)",
+    )
+    p.add_argument(
+        "-2", dest="reads_2", help="reverse fastq reads (omit for --single-end/--interleaved)"
+    )
     p.add_argument("-o", "--output", required=True, help="output directory")
-    p.add_argument("-t", "--threads", type=int, default=1, help="number of threads (default 1)")
-    p.add_argument("-x", "--host", default=DEFAULT_HOST,
-                   help="prefix of host index in bmtagger database folder (default hg38)")
-    p.add_argument("--skip-bmtagger", action="store_true",
-                   help="dont remove host sequences with bmtagger")
-    p.add_argument("--skip-trimming", action="store_true",
-                   help="dont trim sequences with trimgalore")
-    p.add_argument("--skip-pre-qc-report", action="store_true",
-                   help="dont make FastQC report of input sequences")
-    p.add_argument("--skip-post-qc-report", action="store_true",
-                   help="dont make FastQC report of final sequences")
+    threads_arg(p)
+    p.add_argument(
+        "-x",
+        "--host",
+        default=DEFAULT_HOST,
+        help="prefix of host index in bmtagger database folder (default hg38)",
+    )
+    p.add_argument(
+        "--skip-bmtagger", action="store_true", help="dont remove host sequences with bmtagger"
+    )
+    p.add_argument(
+        "--skip-trimming", action="store_true", help="dont trim sequences with trimgalore"
+    )
+    p.add_argument(
+        "--skip-pre-qc-report",
+        action="store_true",
+        help="dont make FastQC report of input sequences",
+    )
+    p.add_argument(
+        "--skip-post-qc-report",
+        action="store_true",
+        help="dont make FastQC report of final sequences",
+    )
+    layout = p.add_mutually_exclusive_group()
+    layout.add_argument(
+        "--single-end", action="store_true", help="the input is single-end (one file, no mates)"
+    )
+    layout.add_argument(
+        "--interleaved",
+        action="store_true",
+        help="the input is one file of interleaved paired reads; it is split "
+        "into mates first, then processed as paired",
+    )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
 
@@ -72,6 +131,26 @@ def _sample_name(reads_1: str) -> str:
         if token in base:
             return base.split(token)[0]
     return os.path.splitext(base)[0]
+
+
+def _trim_stem(path: str) -> str:
+    """The stem Trim Galore derives its output filename from: basename minus one extension.
+
+    Trim Galore names its output after the *input file*, not after the sample, so this has to
+    follow whatever we actually handed it (which may be a decompressed or de-interleaved
+    intermediate rather than the user's original file).
+    """
+    base = os.path.basename(path)
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return os.path.splitext(base)[0]
+
+
+def _is_ours(path: str, out_dir: str) -> bool:
+    """True if *path* is an intermediate this run created inside *out_dir* (safe to move)."""
+    out_abs = os.path.abspath(out_dir) + os.sep
+    return os.path.abspath(path).startswith(out_abs)
 
 
 def _decompress(path: str, out_dir: str) -> str:
@@ -88,33 +167,62 @@ def _decompress(path: str, out_dir: str) -> str:
     return dest
 
 
-def _fastqc_report(args, env, name: str, r1: str, r2: str) -> None:
+def _fastqc_report(args, env, name: str, files: List[str]) -> None:
     outdir = os.path.join(args.output, name)
     ensure_dir(outdir)
-    run(FASTQC.format(threads=args.threads, outdir=outdir, r1=r1, r2=r2),
-        env=env, tool="fastqc")
+    run(
+        FASTQC.format(
+            threads=args.threads, outdir=outdir, files=" ".join(shlex.quote(f) for f in files)
+        ),
+        env=env,
+        tool="fastqc",
+    )
     for zipf in glob.glob(os.path.join(outdir, "*.zip")):
         os.remove(zipf)
     comm("%s saved to: %s" % (name, outdir))
 
 
+def _deinterleave_input(args, sample: str) -> List[str]:
+    """Split interleaved input into two mate files inside the output dir; return both paths."""
+    announcement("SPLITTING INTERLEAVED READS INTO MATES")
+    r1 = os.path.join(args.output, "%s_deinterleaved_1.fastq" % sample)
+    r2 = os.path.join(args.output, "%s_deinterleaved_2.fastq" % sample)
+    if dry_run():
+        comm("(dry run) would split %s into %s and %s" % (args.reads_1, r1, r2))
+        return [r1, r2]
+    try:
+        pairs = _reads.deinterleave(args.reads_1, r1, r2)
+    except ValueError as exc:
+        error(str(exc))
+    comm("split %d read pairs out of %s" % (pairs, args.reads_1))
+    return [r1, r2]
+
+
 def main(argv: List[str]) -> int:
     args = _parse_args(argv)
 
-    if args.reads_1 == args.reads_2:
+    if args.reads_2 and args.reads_1 == args.reads_2:
         error("The forward and reverse reads are the same file. Exiting pipeline.")
-    if not os.path.isfile(args.reads_1):
-        error("%s file does not exist. Exiting..." % args.reads_1)
-    if not os.path.isfile(args.reads_2):
-        error("%s file does not exist. Exiting..." % args.reads_2)
 
     settings = load_settings(args.config)
+    resolve_threads(args, settings)
+    absolutize_paths(args)
+    # Every read file must exist, be non-empty, and not end mid-record: an empty or truncated
+    # FASTQ otherwise produces an empty assembly, zero bins, and a failure several modules later.
+    check_disk_space(
+        "read_qc", settings, [p for p in (args.reads_1, args.reads_2) if p], args.output
+    )
+    validate_inputs(
+        "read_qc",
+        [(check_fastq, args.reads_1, "forward reads (-1)")]
+        + ([(check_fastq, args.reads_2, "reverse reads (-2)")] if args.reads_2 else []),
+    )
+    layout = read_layout(args)  # validates the layout and reports problems up front
     env = env_for("read_qc", settings)
-    rec = start_run("read_qc", args, env, settings, inputs=[args.reads_1, args.reads_2])
+    rec = start_run("read_qc", args, env, settings, inputs=list(layout.files))
 
     ckpt = make_checkpoint(args.output)
     try:
-
         do_bmtagger = not args.skip_bmtagger
         bmtagger_db = settings.db("BMTAGGER_DB")
         if do_bmtagger:
@@ -126,40 +234,80 @@ def main(argv: List[str]) -> int:
             warning("%s already exists." % args.output)
         ensure_dir(args.output)
 
-        reads_1 = _decompress(args.reads_1, args.output)
-        reads_2 = _decompress(args.reads_2, args.output)
-        sample = _sample_name(reads_1)
+        sample = _sample_name(args.reads_1)
+
+        # Interleaved input is split into mates first and then follows the ordinary paired
+        # path: Trim Galore has no interleaved mode, and treating it as single-end would throw
+        # away the pairing the assembler and binners rely on.
+        if layout.layout == "interleaved":
+            streams = _deinterleave_input(args, sample)
+            paired = True
+        else:
+            streams = [p for p in (args.reads_1, args.reads_2) if p]
+            paired = layout.layout == "paired"
+
+        # Decompress whatever we are about to feed the tools, remembering the copies so they
+        # can be removed at the end (several GB per sample of pure duplication otherwise).
+        original = list(streams)
+        streams = [_decompress(p, args.output) for p in streams]
+        decompressed = [p for p, was in zip(streams, original) if p != was]
+        if layout.layout == "interleaved":
+            decompressed += [p for p in original if _is_ours(p, args.output)]
 
         if not args.skip_pre_qc_report and ckpt.todo("pre_qc_report"):
             announcement("MAKING PRE-QC REPORT")
-            _fastqc_report(args, env, "pre-QC_report", reads_1, reads_2)
+            _fastqc_report(args, env, "pre-QC_report", streams)
             ckpt.done("pre_qc_report")
 
+        trimmed = [
+            os.path.join(args.output, "trimmed_%d.fastq" % (i + 1)) for i in range(len(streams))
+        ]
         if not args.skip_trimming and ckpt.todo("trimming"):
             announcement("RUNNING TRIM-GALORE")
-            run(TRIM_GALORE.format(outdir=args.output, r1=reads_1, r2=reads_2),
-                env=env, tool="trim_galore")
-            trimmed_1 = os.path.join(args.output, "trimmed_1.fastq")
-            trimmed_2 = os.path.join(args.output, "trimmed_2.fastq")
-            os.replace(os.path.join(args.output, "%s_1_val_1.fq" % sample), trimmed_1)
-            os.replace(os.path.join(args.output, "%s_2_val_2.fq" % sample), trimmed_2)
-            if not os.path.getsize(trimmed_1):
+            trim_threads = min(args.threads, TRIM_GALORE_MAX_THREADS)
+            if paired:
+                run(
+                    TRIM_GALORE.format(
+                        outdir=args.output, r1=streams[0], r2=streams[1], trim_threads=trim_threads
+                    ),
+                    env=env,
+                    tool="trim_galore",
+                )
+                # Trim Galore names paired output <stem>_val_1.fq / <stem>_val_2.fq, and
+                # single-end output <stem>_trimmed.fq.
+                produced = [
+                    os.path.join(args.output, "%s_val_%d.fq" % (_trim_stem(streams[i]), i + 1))
+                    for i in range(2)
+                ]
+            else:
+                run(
+                    TRIM_GALORE_SINGLE.format(
+                        outdir=args.output, reads=streams[0], trim_threads=trim_threads
+                    ),
+                    env=env,
+                    tool="trim_galore",
+                )
+                produced = [os.path.join(args.output, "%s_trimmed.fq" % _trim_stem(streams[0]))]
+            for src, dest in zip(produced, trimmed):
+                fs_move(src, dest)
+            if not file_size(trimmed[0]):
                 error("Something went wrong with trimming the reads. Exiting.")
-            comm("Trimmed reads saved to: %s and %s" % (trimmed_1, trimmed_2))
-            reads_1, reads_2 = trimmed_1, trimmed_2
-            for leftover in ("%s_1_trimmed.fq" % sample, "%s_2_trimmed.fq" % sample):
-                path = os.path.join(args.output, leftover)
-                if os.path.isfile(path):
-                    os.remove(path)
+            for path in trimmed:
+                expect_produced(
+                    path, "trimmed reads", hint="Check Trim Galore's output in run.stderr."
+                )
+            comm("Trimmed reads saved to: %s" % ", ".join(trimmed))
+            streams = list(trimmed)
             ckpt.done("trimming")
-        else:
+        elif all(os.path.isfile(t) for t in trimmed):
             # on --resume, pick up the trimmed reads a previous run left behind
-            trimmed_1 = os.path.join(args.output, "trimmed_1.fastq")
-            trimmed_2 = os.path.join(args.output, "trimmed_2.fastq")
-            if os.path.isfile(trimmed_1) and os.path.isfile(trimmed_2):
-                comm("skipping read trimming (already done; --resume)")
-                reads_1, reads_2 = trimmed_1, trimmed_2
+            comm("skipping read trimming (already done; --resume)")
+            streams = list(trimmed)
 
+        clean = [
+            os.path.join(args.output, "%s_%d.clean.fastq" % (sample, i + 1))
+            for i in range(len(streams))
+        ]
         if do_bmtagger and ckpt.todo("host_removal"):
             announcement("REMOVING HOST SEQUENCES WITH BMTAGGER")
             tmpdir = os.path.join(args.output, "bmtagger_tmp")
@@ -168,56 +316,90 @@ def main(argv: List[str]) -> int:
             srprism = os.path.join(bmtagger_db, args.host + ".srprism")
             listfile = os.path.join(args.output, "%s.bmtagger.list" % sample)
             comm("running bmtagger with %s %s indexes..." % (bitmask, srprism))
-            run(BMTAGGER.format(bitmask=bitmask, srprism=srprism, tmpdir=tmpdir,
-                                r1=reads_1, r2=reads_2, listfile=listfile),
-                env=env, tool="bmtagger.sh")
-            if not (os.path.isfile(listfile) and os.path.getsize(listfile)):
+            if paired:
+                cmd = BMTAGGER.format(
+                    bitmask=bitmask,
+                    srprism=srprism,
+                    tmpdir=tmpdir,
+                    r1=streams[0],
+                    r2=streams[1],
+                    listfile=listfile,
+                )
+            else:
+                cmd = BMTAGGER_SINGLE.format(
+                    bitmask=bitmask,
+                    srprism=srprism,
+                    tmpdir=tmpdir,
+                    reads=streams[0],
+                    listfile=listfile,
+                )
+            run(cmd, env=env, tool="bmtagger.sh")
+            if not dry_run() and not (os.path.isfile(listfile) and os.path.getsize(listfile)):
                 warning("No contamination reads found, which is very unlikely.")
 
-            clean_1 = os.path.join(args.output, "%s_1.clean.fastq" % sample)
-            clean_2 = os.path.join(args.output, "%s_2.clean.fastq" % sample)
-            comm("Now sorting out found human reads from the main fastq files...")
-            with open(clean_1, "w") as out:
-                skip_human_reads.filter_reads(listfile, reads_1, out)
-            with open(clean_2, "w") as out:
-                skip_human_reads.filter_reads(listfile, reads_2, out)
-
-            comm("Now sorting out found human reads and putting them into a new file... for science...")
-            with open(os.path.join(args.output, "host_reads_1.fastq"), "w") as out:
-                select_human_reads.select_reads(listfile, reads_1, out)
-            with open(os.path.join(args.output, "host_reads_2.fastq"), "w") as out:
-                select_human_reads.select_reads(listfile, reads_2, out)
-            if not os.path.getsize(clean_1):
-                error("Something went wrong with removing contaminant reads with bmtagger. Exiting.")
+            if not dry_run():
+                comm("Now sorting out found host reads from the main fastq files...")
+                for src, dest in zip(streams, clean):
+                    with open(dest, "w") as out:
+                        skip_human_reads.filter_reads(listfile, src, out)
+                comm("Now keeping the host reads in their own files... for science...")
+                for i, src in enumerate(streams):
+                    host = os.path.join(args.output, "host_reads_%d.fastq" % (i + 1))
+                    with open(host, "w") as out:
+                        select_human_reads.select_reads(listfile, src, out)
+                if not file_size(clean[0]):
+                    error(
+                        "Something went wrong with removing contaminant reads with bmtagger. "
+                        "Exiting."
+                    )
 
             shutil.rmtree(tmpdir, ignore_errors=True)
-            os.remove(listfile)
-            reads_1, reads_2 = clean_1, clean_2
-            for trimmed in ("trimmed_1.fastq", "trimmed_2.fastq"):
-                path = os.path.join(args.output, trimmed)
-                if os.path.isfile(path):
-                    os.remove(path)
+            fs_remove(listfile)
+            streams = list(clean)
+            for t in trimmed:
+                fs_remove(t)
             ckpt.done("host_removal")
-        elif do_bmtagger:
-            # on --resume, pick up the host-filtered reads a previous run left behind
-            clean_1 = os.path.join(args.output, "%s_1.clean.fastq" % sample)
-            clean_2 = os.path.join(args.output, "%s_2.clean.fastq" % sample)
-            if os.path.isfile(clean_1) and os.path.isfile(clean_2):
-                comm("skipping host read removal (already done; --resume)")
-                reads_1, reads_2 = clean_1, clean_2
+        elif do_bmtagger and all(os.path.isfile(c) for c in clean):
+            comm("skipping host read removal (already done; --resume)")
+            streams = list(clean)
 
-        final_1 = os.path.join(args.output, "final_pure_reads_1.fastq")
-        final_2 = os.path.join(args.output, "final_pure_reads_2.fastq")
+        final = [
+            os.path.join(args.output, "final_pure_reads_%d.fastq" % (i + 1))
+            for i in range(len(streams))
+        ]
         if ckpt.todo("finalize"):
-            os.replace(reads_1, final_1)
-            os.replace(reads_2, final_2)
-            comm("Contamination-free and trimmed reads are stored in: %s and %s" % (final_1, final_2))
+            # `streams` are intermediates we created inside args.output in every case except
+            # "--skip-trimming --skip-bmtagger with uncompressed input", where they are still
+            # the user's raw input. Moving those would destroy the user's data, so copy when
+            # the source is not ours to move.
+            for src, dest in zip(streams, final):
+                if os.path.abspath(src) == os.path.abspath(dest):
+                    continue
+                if _is_ours(src, args.output):
+                    fs_move(src, dest)
+                elif dry_run():
+                    continue
+                else:
+                    comm("Copying (not moving) input %s - it is outside the output directory" % src)
+                    shutil.copyfile(src, dest)
+            for path in final:
+                expect_produced(path, "final QC'ed reads")
+            comm("Contamination-free and trimmed reads are stored in: %s" % ", ".join(final))
             ckpt.done("finalize")
 
         if not args.skip_post_qc_report and ckpt.todo("post_qc_report"):
             announcement("MAKING POST-QC REPORT")
-            _fastqc_report(args, env, "post-QC_report", final_1, final_2)
+            _fastqc_report(args, env, "post-QC_report", final)
             ckpt.done("post_qc_report")
+
+        # Drop the decompressed copies of the (compressed) inputs - the final reads are
+        # written, so these are now just a duplicate of data the user already has.
+        for path in (decompressed if not dry_run() else []):
+            if os.path.isfile(path) and os.path.abspath(path) not in {
+                os.path.abspath(f) for f in final
+            }:
+                comm("removing intermediate file %s" % path)
+                os.remove(path)
 
         announcement("READ QC PIPELINE COMPLETE!!!")
     finally:
@@ -227,4 +409,5 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main(sys.argv[1:]))

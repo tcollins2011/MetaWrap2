@@ -34,9 +34,7 @@ class Checkpoint:
 
     def todo(self, step: str) -> bool:
         """True if *step* should run now (always, unless resuming and it already finished)."""
-        if self.resume and os.path.exists(self._marker(step)):
-            return False
-        return True
+        return not (self.resume and os.path.exists(self._marker(step)))
 
     def done(self, step: str) -> None:
         """Record that *step* finished."""

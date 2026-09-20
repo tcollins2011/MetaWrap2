@@ -1,3 +1,451 @@
+MetaWrap2 v=2.0.1
+	Phase 1 foundation work: a pipeline driver, verified resume, a durable run history, one
+		naming convention for bins, and a one-command install. No scientific behaviour
+		changed - that is the point of this release.
+	New - one command for a whole study
+		"metawrap2 run <sheet|directory> -o study/" runs the pipeline end to end from a small
+			TOML (or YAML) sample sheet. It owns the intermediate layout and the plumbing
+			between steps that the tutorial previously asked users to do by hand with
+			mkdir/mv/cat - collecting each sample's QC'ed reads into CLEAN_READS,
+			concatenating them for a co-assembly, handing each module the right bin
+			directory - and none of that was resumable or recorded before
+		-j runs independent samples concurrently, dividing the -t thread budget between them
+		--resume skips steps that already finished (state in <output>/.metawrap2/run_steps),
+			--dry-run prints every module command it would run, --steps/--skip adjust the plan,
+			--no-coassembly assembles per sample, and a directory can be passed instead of a
+			sheet to pair up the reads in it automatically
+		every step is an ordinary "metawrap2 <module>" invocation logged to study/LOGS/, so
+			the driver adds no behaviour of its own and anything it does can be done by hand
+		"metawrap2 run --example" prints a documented starter sheet
+	New - read layouts and file naming
+		paired files are now recognised in any of the usual conventions - _1/_2, _R1/_R2,
+			_R1_001/_R2_001, .1/.2 - instead of only _1.fastq/_2.fastq. Illumina output no
+			longer has to be renamed before MetaWrap2 will touch it. .gz and .bz2 throughout
+		read_qc supports --single-end and --interleaved. Its error message had told users to
+			pass those flags since 2.0.0, but neither existed. Interleaved input is split into
+			mates first and then follows the ordinary paired path, because Trim Galore has no
+			interleaved mode and treating it as single-end would destroy the pairing
+		io/reads.py is now the single place that decides what a read filename means, and is
+			actually wired in - it shipped in 2.0.0 fully tested but imported by nothing
+	Fixed
+		"metawrap2 run ... --dry-run" executed the run instead of planning it: the top-level
+			CLI strips the global flags out of argv before a subcommand parses them, so the
+			driver never saw its own --dry-run
+		the driver passed a fixed -A/-B/-C to bin_refinement, so a study that selected only
+			some binners failed with "INITIAL_BINNING/maxbin2_bins is not a valid directory";
+			it now passes only the bin sets binning was asked to produce
+		quant_bins deleted salmon's per-sample alignment directory only when there was more
+			than one sample, so single-sample runs silently kept it
+		bin_refinement rewrote every bin file on every invocation while normalising contig
+			headers; it now only rewrites the files that actually change
+		add_bins_to_blobplot keyed contigs on the whole FASTA header, so bins carrying
+			metaBAT2's header annotations matched nothing and the blobplot came out entirely
+			unbinned. Same contig-identity fix as the rest of 2.0.1
+		a duplicated test function name meant one test had been silently shadowed and never run
+	Changed - readability and lint
+		choose_best_bin.py, filter_reads_for_bin_reassembly.py and
+			filter_nanopore_reads_for_bin_reassembly.py were rewritten out of their
+			tab-indented, module-level-sys.argv Python-2 form into documented, importable,
+			tested functions. Behaviour is unchanged: the read-recruitment rewrite was checked
+			byte-for-byte against the original over a real bwa-mem stream (all 12 output files
+			identical), and choose_best_bin picks the same winners. Both now test SAM flags
+			with bitwise masks rather than indexing into bin(flag), which raised IndexError on
+			small flag values (the nanopore version had a try/except IndexError for exactly this)
+		ruff now reports no findings anywhere in the repository, down from 564, and CI gates
+			on it instead of running it with "|| true". Style-only rules that contradict the
+			project's own conventions (printf formatting, typing.List for the py3.8 target) are
+			ignored with a comment saying why; vendored code is excluded; genuinely unclosed
+			file handles were fixed and deliberately long-lived ones annotated
+		CI also smoke-tests the CLI: every module must print its help and plan a run with no
+			external tool installed
+		metawrap2.toml.example is generated from the same template "config init" writes, with a
+			test that they have not drifted. The example had fallen behind and listed neither
+			BLASTDB_NAME, CHECKM_DB, BAKTA_DB nor GTDBTK_DATA_PATH
+	New - one command to install it all
+		"metawrap2 quickstart" creates every module's conda environment, then verifies the
+			result. Getting started previously meant four separate commands and a reading of
+			the docs before anything ran; each was simple and none of them was what the user
+			came to do. -t builds several environments at once, --binning-only installs just
+			the six modules genome recovery needs rather than all thirteen, and --from-lock
+			builds from the committed lockfiles
+		it never downloads a database that was not asked for. The databases run from 550 MB
+			to ~300 GB and take hours to days, and where they go is a decision about the
+			machine, so --databases small|full|none is required to fetch anything. With no
+			answer given it installs the environments, prints what each module needs and how
+			large it is, and - only when a terminal is attached - offers to do it, defaulting
+			to no. A non-interactive run never asks and never downloads
+		it composes rather than reimplements: it calls the same install-env, install-db and
+			doctor code paths, and stops at the first failing step naming the exact command to
+			resume from
+		"metawrap2 config migrate <file>" converts an older shell-style configuration - a file
+			of KEY=/path lines meant to be sourced - into the TOML that is read now. It keeps
+			the database paths, drops keys that no longer apply and says why, flags paths that
+			do not exist on this machine, and leaves out the variables that only located the
+			old installation's own scripts. The file is scanned, never executed
+		retired module and flag names now explain themselves. "metawrap2 kraken" and
+			--metabat1 used to produce an argument error that said nothing about why they were
+			gone; each now names what to use instead
+	Changed - a guess no longer stops a run
+		the pre-flight disk-space estimate warns instead of refusing. It is a chosen multiple
+			of the input size rather than a measurement, and it cannot know how large scratch
+			gets at its peak because scratch is deleted when a step finishes - so it can be
+			wrong in both directions, and the user knows things about their filesystem that it
+			does not. strict_space_check = true under [settings] restores the hard stop, which
+			is what you want on shared infrastructure where one run filling the disk is
+			everyone's problem. --skip-space-check still turns it off entirely
+		a config's unknown or retired *database* keys are now notes rather than errors.
+			[databases] is deliberately open, so a locally patched module may read a key
+			nothing here knows; and a leftover key from an older setup is harmless. Refusing to
+			run binning because the config still mentioned a database only a removed module
+			ever read was absurd. An unknown [settings] key is still an error - that namespace
+			is small and entirely ours, and a typo there silently does nothing
+	Changed - things that change your output or your scripts
+		bins are now named bin_001.fasta, for every binner, counted from 1 and zero-padded.
+			metaWRAP named them three ways at once: metaBAT2's came out bin.1.fa, MaxBin2's
+			were renumbered bin.0.fa (from 0 - an arbitrary choice of metaWRAP's own), and
+			CONCOCT's carried CONCOCT's cluster ids, so the same number meant a different
+			thing in each folder. Unpadded numbers also sort bin.1, bin.10, bin.2, which
+			mattered because bin sets are iterated in sorted filename order and refined bins
+			are numbered in that order - so with ten or more bins the numbering depended on a
+			lexicographic accident. Bin CONTENTS are unchanged; the golden tests assert the
+			same contigs in the same bins. Scripts globbing *.fa need *.fasta, and if you hand
+			bins to CheckM or GTDB-Tk yourself the flag is now -x fasta
+		.stats files are now .stats.tsv and .contigs files .contigs.tsv, so an extension says
+			what a file is. Contents unchanged; scripts globbing *.stats need *.stats.tsv
+		Python 3.10 is the minimum (was 3.8). 3.8 and 3.9 are both past end of life and the
+			type checker cannot target them; CI runs 3.10-3.13
+		--resume now re-runs anything it cannot verify. A step previously skipped on the
+			strength of a marker file alone will re-run if its outputs are missing or empty or
+			its inputs have changed. A resume that used to "work" may now do real work,
+			because it may have been skipping a step that never produced anything
+	New - --resume that verifies instead of assuming
+		a run manifest (manifest.json) records each step's command, duration, outcome, and
+			every declared input and output with a content fingerprint. A step is skipped only
+			if it completed, its outputs are all still present and non-empty, and none of its
+			inputs has changed. Marker-file resume was wrong in two directions: a step whose
+			outputs were deleted was skipped anyway, and a step whose inputs had changed was
+			also skipped, silently mixing results from two different inputs
+		fingerprints hash the size plus the first and last megabyte, so the check costs the
+			same on a 100 GB library as on a small one. --strict-fingerprints hashes whole
+			files, for the case where an edit between the sampled ends matters
+		"metawrap2 status <study>" reads the manifest back: per-step status, duration, and what
+			--resume would do next and why - taken from the same check --resume itself makes,
+			not a reimplementation of it. --step NAME shows one step's inputs, outputs, command
+			and measured cost; --audit verifies every recorded output is still present and
+			non-empty; --json for scripting
+		at the end of every run the same audit runs automatically. Recording an output is a
+			claim and something now checks it: a step that reported success but produced
+			nothing, one that declared no outputs at all (--resume can never verify it, so it
+			degrades to the marker-file behaviour manifests replaced), or a file no step
+			claims, are all reported then rather than discovered on the next resume
+	New - failing at the cause, not three modules later
+		inputs and intermediates are checked for zero bytes, wrong format, truncation
+			mid-record, and truncated gzip streams before a tool is handed them - and every
+			problem is reported at once rather than one per re-run. An empty FASTQ used to
+			produce an empty assembly, then zero bins, then a CheckM error about file
+			extensions, hours and three modules from the cause
+		preflight disk-space estimates refuse to start a step the filesystem plausibly cannot
+			hold (metaSPAdes needs roughly 12x its input in scratch). The global
+			--skip-space-check flag, or skip_space_check = true, overrides
+		an unknown [settings] key or top-level table in the config is now an error with a
+			did-you-mean, rather than being silently ignored - "use_conda_env" used to look
+			like it worked and do nothing. [databases] stays open to unrecognised keys, since a
+			locally patched module may use its own, but a name that is nearly a known one is
+			reported: CHECKM_DBB means CheckM silently gets no database
+	New - surviving what actually goes wrong
+		SIGTERM and SIGHUP are handled like Ctrl-C. A scheduler killing the job on a wall-clock
+			or memory limit, or a dropped SSH session, used to kill the process outright,
+			leaving the step recorded as "running" forever with nothing to explain it. Those
+			signals now raise a KeyboardInterrupt subclass, so every finally already written
+			runs, the outcome is recorded, and the exit code is 128 + the signal number
+		one writer per output directory: a lock file created with O_EXCL means a second run
+			writing the same -o fails immediately, naming who holds it, instead of interleaving
+			with the first and leaving a plausible-looking directory whose contents came from
+			two runs with different parameters. A lock whose process is gone on this host is
+			taken over silently; one from another host cannot be checked, so it is believed,
+			and --force overrides
+		Ctrl-C marks the running step interrupted, so --resume redoes it rather than trusting
+			half-written outputs
+		the memory budget is divided across parallel workers, so "-m 64 -j 4" gives each worker
+			16 GB rather than four workers each believing they own 64
+		one scratch policy: [settings] scratch_dir, or $METAWRAP2_SCRATCH, decides temporary
+			space for every module instead of each tool's own default scattering files. Unset,
+			scratch stays inside the run's output directory - the one location the user chose
+		the run log rotates at 256 MB, keeping 3 backups. It holds every line of every tool,
+			and one pathological tool could otherwise fill the filesystem the run needs
+	New - knowing and reproducing what you ran
+		"metawrap2 history" is an append-only record of every run ever started on this machine,
+			at ~/.metawrap2/history.jsonl. It lives outside any output directory, survives
+			deleting one, and is never pruned. --module/--output/--since/--failed/--commands/
+			--json/--stats filter and reshape it, and --diff RUN RUN compares two runs field by
+			field: version, conda env, databases, command line. A history write can never fail
+			a run
+		conda lockfiles are committed for every shipped environment. "install-env --lock" writes
+			envs/locks/<module>.<platform>.lock from "conda list --explicit --md5";
+			--from-lock, and "doctor --fix --from-lock", restore from it. Plain
+			"conda create --file" works too, so no extra tooling is needed
+		run_environment.json records the environment's full conda package list, written before
+			any tool runs - so a run that dies in its first command still says what it was
+			running with
+		the MetaWrap2 git commit is recorded alongside the version string, with the branch,
+			git describe, and whether the working tree was dirty. Between releases "2.0.1"
+			names many different trees, including one with local edits - the normal state of a
+			package whose design invites editing the module files
+		databases are identified, not just located: which of each database's defining files are
+			present, their total size, and a content fingerprint from name/size/mtime. A
+			database updated in place is now visible as a change rather than an
+			identical-looking path, so "which analyses used the nt I just replaced?" has an
+			answer
+		each step's real cost is measured - peak RSS, CPU time, wall time - by reaping the child
+			with os.wait4 rather than subprocess.call. getrusage(RUSAGE_CHILDREN) cannot do
+			this: it reports a running maximum across every child ever waited for. "1.0 cores
+			busy while given 24 threads" is visible in the log
+		"metawrap2 calibrate <study>..." compares the built-in disk and memory estimates against
+			real runs. Output-to-input ratio is a measurable lower bound on the disk multiplier
+			(scratch is deleted when a step finishes, so no manifest can record its peak);
+			peak memory is measured exactly. The report says which is which, because a
+			confidently wrong disk estimate is how a run fills a filesystem four hours in
+	New - bin_refinement takes any number of bin sets
+		up to six bin sets, not exactly two or three, with --refine-combinations
+			pairs-and-all|pairs|all choosing which subsets are refined. Two- and three-set runs
+			produce byte-identical output and an identical Binning_refiner command line to
+			before, which the golden tests enforce
+	New - metawrap2 doctor
+		"metawrap2 doctor" is the same command as "metawrap2 test" under the name people reach
+			for when something is broken - and the name its own repair flag already used.
+			--fix recreates exactly the environments that are missing or broken, leaves healthy
+			ones alone, then re-checks and reports anything still wrong
+		doctor also checks the databases each module needs, using the same definitions as the
+			provenance fingerprints. A healthy environment with a half-downloaded database is
+			not a working installation, and checking envs alone answered only half of "can I
+			run this?"
+	Fixed - wrong or missing records
+		every module recorded "completed" in its history regardless of outcome. finish_run is
+			called from a finally, where success and failure are indistinguishable from the
+			arguments, and it defaulted to the happy path - so a run that failed, or was
+			killed, or called error(), still logged success and told you nothing. The status is
+			now derived from whether an exception is propagating and which one
+		metaBAT2's bins were never renumbered, so its output kept the tool's own bin.1.fa naming
+			while MaxBin2's and CONCOCT's were rewritten. Renumbering now happens after
+			metaBAT2's non-genome outputs (bin.unbinned.fa, bin.lowDepth.fa, bin.tooShort.fa)
+			are moved aside, so a rejected-contigs file can never consume a bin number, and
+			bins are ordered by the number metaBAT2 gave them numerically rather than
+			lexicographically
+		"metawrap2 doctor" was unreachable under that name despite its own repair flag being
+			--fix; only "metawrap2 test" resolved
+		a dead branch in check_fasta's truncation test: "A or B and C" parses as "A or (B and
+			C)", making the single-line case unreachable. The remaining condition covered it
+		bin_refinement left bins* directories in the output root for more than three input sets,
+			and the binning/reassembly plots crashed or reused colours with many sets
+		dereplication crashed with KeyError on a bin with no row in the stats file - which
+			happens when a run is interrupted between writing bins and re-scoring them. Such a
+			bin is now treated as the worst possible bin, with a warning, rather than aborting
+			the refinement
+		--subsample in kraken2 needed many times the file size in RAM, making it unusable on
+			exactly the large libraries it exists to shrink. Reservoir sampling now bounds peak
+			memory by the requested depth
+	Changed - logging and typing
+		logging is a real logging.Logger throughout, with a banner formatter on the console and
+			a plain one in the file. Every run writes <output>/metawrap2.log; wrapped tools'
+			stdout and stderr are funnelled into it at DEBUG, tagged [stdout]/[stderr], while
+			still streaming to the screen. The console handler resolves sys.stdout at emit
+			time, which fixes silent or erroring log output when the stream is swapped
+		repetitive tool output is collapsed and progress-bar spam filtered from the captured
+			logs - measured at 1.8 MB down to 30 KB on a real three-sample run.
+			--verbose-logs restores the raw stream
+		tqdm progress bars wherever MetaWrap2 itself is doing the work - splitting bins,
+			subsampling reads, scanning FASTA - not only where a wrapped tool prints something
+		type annotations throughout, checked by mypy in CI and in the pre-push hook
+		the package is pip-installable as an ordinary wheel. The environment yamls and
+			lockfiles moved under src/metawrap2/envs/ and ship as package data, so they
+			resolve from an installed wheel and not only from a source checkout
+		the README now describes MetaWrap2 rather than mirroring the metaWRAP 1 README
+	Changed - the test suite gates a push
+		456 tests, up from 245. New suites cover the manifest and its audit, input validation,
+			the run history, the scratch policy, the lockfiles, "doctor --fix", the run lock,
+			signal handling, "status", and bin naming
+		15 golden tests pin bin_refinement's exact output - real Binning_refiner, real
+			consolidation and dereplication, with only CheckM replaced by a deterministic
+			stand-in - so the N-set generalisation could be proved not to change the 2- and
+			3-set results
+		a golden end-to-end test runs binning into bin_refinement, quant_bins and annotate_bins
+			against stub tools on PATH, pinning the output tree and the .stats.tsv contract
+			byte-for-byte. It catches what unit tests structurally cannot: a module writing
+			where the next one does not look
+		black, isort, ruff, mypy and pytest must all pass before a push (pre-commit pre-push
+			hooks) and all run in CI on Python 3.10-3.13. Formatting is checked, never
+			applied, in CI: a job that rewrites your code and then passes teaches you nothing
+		ruff-format was removed from pre-commit - two formatters fight each other
+		a weekly Lockfiles workflow creates conda environments from the committed lockfiles -
+			the only check that they do what they claim - and opens a PR when a re-solve makes
+			them drift, so drift arrives as a reviewable diff rather than a surprise months
+			later. It also runs on any PR touching src/metawrap2/envs/
+
+MetaWrap2 v=2.0.1
+	Bug fixes and install/usability work from a full end-to-end validation run on real data
+	(3 metaHIT gut metagenomes, every module, all databases).
+	Fixed - would break any real run
+		MetaWrap2's own helper scripts (metawrap2.scripts.*, metawrap2.vendor.*) were invoked
+			as "python -m ..." *inside* a module's conda env, which contains only that
+			module's external tools - no python, no metawrap2, no matplotlib. Every such call
+			failed. They now run in the host interpreter by absolute path (metawrap2.pyrun);
+			affected bin_refinement, reassemble_bins, quant_bins, and blobology
+		"mamba run --no-capture-output" is a conda-only flag; mamba 2.x mis-parses it and
+			every wrapped command died with "exec: --: invalid option", which looked like the
+			tool was missing. The flag is now used only when "run --help" advertises it
+		"metawrap2 test" probed tools with "bash -lc", and a login shell rebuilds PATH from
+			the user's profile, discarding the env's own bin directory - so every tool in
+			every healthy env was reported MISSING. Now uses "bash -c"
+		numpy/pandas/matplotlib/seaborn were undeclared dependencies even though the bundled
+			plotting helpers import them; added (plus tqdm for progress bars)
+		envs/blobology.yaml pip-installed "metawrap2" from PyPI, where it does not exist, so
+			the env could never be created. The blobology env now holds only external tools
+		envs/classify_bins.yaml was missing blast, though the module shells out to blastn
+		envs/assembly.yaml did not pin python, so QUAST landed on python>=3.12 and died with
+			"No module named 'distutils'"; pinned python<3.12
+		envs/bin_refinement.yaml did not pin setuptools, so CheckM1 died with "No module
+			named 'pkg_resources'" on setuptools>=81; pinned setuptools<81
+	Fixed - wrong results from contig-identity mismatches
+		contig identity is now consistently "the header up to the first whitespace"
+			(metawrap2.io.seqio.contig_id) everywhere contigs are compared between files.
+			Current metaBAT2 (2.18) appends " total_depth=.. sample_depths=.." to every
+			contig header; MetaWrap2 keyed on the *whole* header in some places and on the
+			first token in others, so metaBAT2 bins matched nothing:
+			- bin_refinement measured 0% overlap between a metaBAT2 bin and the same bin
+			  from another binner (the threshold is 80%), so consolidation silently never
+			  combined metaBAT2 with MaxBin2/CONCOCT - the module appeared to work and
+			  quietly produced a worse bin set
+			- quant_bins aborted outright with "None of the contigs/scaffolds in the -a
+			  metagenomic assembly file were present in the bin files"
+			metaBAT2's bins are also normalised at the source now, so MetaWrap2's own
+			outputs carry clean headers
+	Fixed - data loss and wrong results
+		read_qc with --skip-trimming --skip-bmtagger moved the user's *raw input* FASTQ into
+			the output directory (os.replace on a path outside the output dir). It now copies
+			when the source is not an intermediate it created
+		read_qc left the decompressed copies of gzipped inputs in the output directory
+			forever - several GB per sample of pure duplication. They are now removed once
+			the final reads are written
+		binning split CONCOCT clusters by truncating each contig name at the *first* ".",
+			so any assembler whose names contain a dot - metaSPAdes emits
+			"NODE_1_length_5000_cov_3.5" - had unrelated contigs collapsed onto one key and
+			scattered into the wrong bins. Names are now used verbatim. Splitting is also
+			idempotent now (it appended, so a re-run duplicated every sequence)
+		metaBAT2's --unbinned output (bin.unbinned.fa) sat in the bin directory where
+			bin_refinement and CheckM scored it as if it were a genome; it is moved aside
+		rm_short_contigs parsed the contig length out of a SPAdes-style header and stopped at
+			the first short contig; it now measures the sequence, so it works on any
+			assembler and does not depend on the file being sorted longest-first
+		refinement.dereplicate raised KeyError and aborted the whole run if a bin file had no
+			row in the .stats file; such bins now lose contested contigs and a warning is printed
+	Fixed - --dry-run
+		--dry-run only ever printed the first one or two commands of a module: the
+			orchestration then tried to consume outputs that a dry run never produced and
+			died with a raw traceback, or with a misleading "Something went wrong with X".
+			Every module now prints its complete pipeline (dry-run-aware filesystem helpers
+			in modules/_common.py), writes no result data, and still records the plan in
+			run_commands.txt. Covered by a test per module
+	Fixed - log noise
+		run.stdout/run.stderr are now filtered for runaway repetition and progress-bar
+			redraws. Measured on a 3-sample run, INITIAL_BINNING/run.stderr was 1.8 MB, of
+			which 23,770 of 24,770 lines were two metaBAT2 warnings repeated ~11,900 times
+			each; filtering takes it to 30 KB (98.5% smaller). Repeats are counted, not
+			discarded: the first 20 are kept verbatim and a summary line reports how many
+			more there were. A command whose stdout *is* its result is never filtered, the
+			error message in a ToolError still shows the tool's real last output, and
+			--verbose-logs restores the raw behaviour
+		a failed per-bin SPAdes reassembly now reports the ERROR lines from that bin's
+			spades.log instead of guessing "It is possible there were not enough reads",
+			and the all-bins-failed message lists the likely shared causes
+	Fixed - scalability and robustness
+		"kraken2 --subsample" materialised every read of both files in memory before
+			sampling, so it died on exactly the large libraries it exists to shrink; it now
+			uses reservoir sampling, bounded by the subsample size
+		the BLAST database no longer has to be named "nt" with 2-digit volume numbering:
+			BLASTDB_NAME selects the database, and presence is detected across single-volume,
+			2-digit, 3-digit, and alias (.nal) layouts (BLAST v5 uses 3 digits)
+		conda_env_exists guessed at a couple of hard-coded prefixes; it now asks conda/mamba
+			for the real environment directories
+		"metawrap2 install-env" located envs/ by a fixed relative path that only works in a
+			source checkout; it now searches upward and honours $METAWRAP2_ENVS_DIR
+		fix_megahit_contig_naming read len=/multi= by position, which breaks across MEGAHIT
+			releases; it now reads them by name and falls back to the measured length
+		a bin_refinement run whose consolidation yields no bins now explains that nothing
+			met the -c/-x thresholds and points at the .stats files, instead of failing
+			inside CheckM with "No bins found. Check the extension (-x) used to identify bins"
+		every module now makes its path arguments absolute up front (modules._common.
+			absolutize_paths). Tools that must run with cwd=<output dir> because they write
+			into the working directory - taxator-tk's binner, the plotting helpers - were
+			being handed paths relative to the *original* directory, producing
+			"cd out && ... out/file" (i.e. out/out/file). So classify_bins and the final
+			bin_refinement plot both failed for anyone who passed a relative -o, which is
+			what the tutorial itself does
+		binner and taxknife now get TAXATORTK_TAXONOMY_NCBI, which only taxator had. binner
+			aborted with "Specify the folder containing the NCBI taxonomy dump files as
+			TAXATORTK_TAXONOMY_NCBI environment variable" - after the slow megablast step
+			had already completed
+		kraken2 looked for names.dmp/nodes.dmp only under <db>/taxonomy/, which is the
+			kraken2-build layout; every *prebuilt* database keeps them at the top level, so
+			the module crashed with a bare FileNotFoundError after the slow classification
+			had already finished. It now searches both and falls back to TAXDUMP
+		"superkingdom" is no longer assumed: NCBI renamed that rank to "domain" and a
+			current taxdump has zero superkingdom nodes, so blobology's superkingdom
+			blobplot said "Not annotated" for every contig - losing the
+			Bacteria/Archaea/Eukaryota split the plot exists for - and prune_blast_hits
+			discarded domain-ranked hits. Both ranks are now accepted as synonyms
+		metaBAT2's non-genome outputs (bin.lowDepth.fa, bin.tooShort.fa, bin.unbinned.fa
+			and its two .txt summaries) are moved out of the bin directory into
+			metabat2_extra/ so CheckM and bin_refinement do not score them as genomes
+		gc_cov_annotate shells out to samtools, which is in the blobology conda env and not
+			on the host PATH where the helper now runs; the caller passes its absolute path
+		seaborn's clustermap needs scipy, which was not declared - the quant_bins heatmap
+			failed at the very last step of the module
+		annotate_bins iterated every file in the bin folder, including .stats/.contigs
+			sidecars; it now only annotates fasta files, and says so if there are none
+		sam_to_fastq wrote a ">" header into a 4-line FASTQ record, making the file neither
+			valid FASTA nor valid FASTQ; it now writes "@" (verified to be equivalent for
+			MEGAHIT, the only in-pipeline consumer)
+	New - opt-in modern tools, now actually wired up
+		"bin_refinement --checkm2" scores bins with CheckM2 instead of CheckM1: fast, no
+			pplacer, none of CheckM1's ~40GB-per-thread memory wall. Produces the same
+			.stats contract, so every later step works unchanged
+		"classify_bins --gtdbtk" classifies against GTDB with GTDB-Tk in place of the
+			MEGABLAST -> taxator-tk -> binner -> taxknife chain, writing the same
+			bin_taxonomy.tab
+		"annotate_bins --bakta" annotates with Bakta instead of the unmaintained PROKKA,
+			with the same output layout (--bakta-db or BAKTA_DB)
+		these three environments shipped in 2.0.0 with no flags to select them, and the docs
+			described flags that did not exist
+	New - installation and usability
+		"metawrap2 install-db" downloads, unpacks, indexes, and *configures* every database,
+			including the "checkm data setRoot" step that is easy to forget and otherwise
+			surfaces much later as a confusing bin_refinement failure. "--list" shows sizes
+			and which module needs what; "--small" installs capped-but-real builds for
+			testing; already-installed databases are skipped, so it is safe to re-run
+		"install-env -t N" and "install-db -t N" do the work N at a time (env solves and
+			database downloads are independent and network-bound, so this is close to a
+			linear speedup). Per-env solver output goes to its own log file instead of
+			interleaving on screen
+		"-t/--threads" now defaults to [settings] threads from metawrap2.toml instead of a
+			silent 1 - which on a metagenome was the difference between hours and days - and
+			accepts "-t all". Out-of-range values are clamped with a warning
+		a module whose conda env is missing now fails immediately with the exact
+			"metawrap2 install-env <module>" command to fix it, instead of a mamba error
+			about a missing prefix part-way into a long run
+		progress bars (tqdm) on the long loops that used to look like a hang: read
+			recruitment, per-bin reassembly and annotation, CheckM over bin sets,
+			per-sample quantification and mapping, CONCOCT bin splitting, subsampling.
+			They go to stderr and switch off when stderr is not a terminal, so they never
+			corrupt a redirected data file or flood run.stderr
+		"metawrap2 check" now exits non-zero when a selected module is missing a database it
+			cannot run without (it only ever checked conda envs, despite saying otherwise),
+			and no longer reports setting-valued keys like BLASTDB_NAME as a missing path
+		trim_galore now gets -j (capped at 4, where cutadapt stops scaling) instead of
+			running single-threaded regardless of -t
+	Testing
+		added 50+ regression tests pinning every fix above, and made two environment-
+			dependent tests hermetic (one passed only before the conda envs existed)
+
 MetaWrap2 v=2.0.0
 	MetaWrap2 is the Python-native successor to metaWRAP. Same algorithms, same external
 	tools, same results as metaWRAP 1.x - but the pipeline is now entirely Python (no Bash,
@@ -149,7 +597,7 @@ metaWRAP v=1.1 (January 2019)
 		fixed Maxbin distribution to use conda's Perl instead of system Perl (in maxbin v=2.2.5)
 		fixed checkm folder error when resuming a previously attempted run
 		changed default MaxBin2 marker set to the Bacterial marker set
-		added --universal option to set MaxBin2 to use the universal marker genes for improved Archaea binning 
+		added --universal option to set MaxBin2 to use the universal marker genes for improved Archaea binning
 		added -l option that sets the minimum contig length to bin for all four binners
 		removed cleanup feature so re-running the module with a new binner is possible
 	Bin_refinement
@@ -284,7 +732,7 @@ metaWRAP v=0.7 (January 2017)
 		changed taxator-tk version from 1.3.3 to 1.3.3e, which sources from a more updated binary source
 	Quant_bins module:
 		fixed bug where quantitation would fail if the contig names had a different naming conventaion from metaSPAdes
-		improved run time by not making unnecesary coppies of assembly	
+		improved run time by not making unnecesary coppies of assembly
 	Classify_bins module:
 		fixed bug in processing columns of the blast output
 	Bin_refinement:
@@ -307,7 +755,7 @@ metaWRAP v=0.6 (Late December 2017)
 	Reassembly module:
 		major bug fixes with tmp directory handling
 		restored parallelization of SPAdes - all bins assemble simmultaneously with 1 thread now
-	
+
 
 metaWRAP v=0.5 (Mid December 2017)
 	General:
@@ -391,7 +839,7 @@ metaWRAP v=0.2 (August 2017)
 		All modules are now called through the master "metaWRAP" script (including the ALL module)
 		Changed heirarchy of pipeline scripts. Now they are hidden away in a "pipelines" folder, and only metaWRAP is visible
 		Changed the commenting system to be done through a python script that writes out pretty comments
-		New module: Phylosift. Currently all it does is randomly subsamples reads and runs Phylosift on them	
+		New module: Phylosift. Currently all it does is randomly subsamples reads and runs Phylosift on them
 	ReadQC module:
 		Added --skip-bmtagger option (reduces runtime signifficantly)
 		Added --skip-trimming option

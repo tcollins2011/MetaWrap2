@@ -20,7 +20,8 @@ From: mambaorg/micromamba:1.5-jammy
 %post
     # Core runtime only; heavy tools come from the per-module envs.
     micromamba install -y -n base -c conda-forge -c bioconda \
-        "python>=3.8" "biopython>=1.79" pip
+        "python>=3.10" "biopython>=1.79" "numpy>=1.20" "pandas>=1.3" \
+        "matplotlib-base>=3.5" "seaborn>=0.11" "scipy>=1.7" "tqdm>=4.60" pip
     micromamba clean --all --yes
 
     # Install the metawrap2 package and its `metawrap2` console command on PATH.

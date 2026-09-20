@@ -12,7 +12,7 @@ import matplotlib
 import pandas as pd
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 # Paul Tol qualitative scheme (http://www.sron.nl/~pault/), indexed by number of levels,
 # with light grey (#DDDDDD) reserved for the base/catch-all category. Ported from the
@@ -26,12 +26,87 @@ PAULTOL = [
     ["#DDDDDD", "#332288", "#88CCEE", "#117733", "#DDCC77", "#CC6677"],
     ["#DDDDDD", "#332288", "#88CCEE", "#117733", "#DDCC77", "#CC6677", "#AA4499"],
     ["#DDDDDD", "#332288", "#88CCEE", "#44AA99", "#117733", "#DDCC77", "#CC6677", "#AA4499"],
-    ["#DDDDDD", "#332288", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#CC6677", "#AA4499"],
-    ["#DDDDDD", "#332288", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#CC6677", "#882255", "#AA4499"],
-    ["#DDDDDD", "#332288", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#661100", "#CC6677", "#882255", "#AA4499"],
-    ["#DDDDDD", "#332288", "#6699CC", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#661100", "#CC6677", "#882255", "#AA4499"],
-    ["#DDDDDD", "#332288", "#6699CC", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#661100", "#CC6677", "#AA4466", "#882255", "#AA4499"],
-    ["#DDDDDD", "#332288", "#6699CC", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#661100", "#CC6677", "#AA4466", "#882255", "#AA4499", "#777777"],
+    [
+        "#DDDDDD",
+        "#332288",
+        "#88CCEE",
+        "#44AA99",
+        "#117733",
+        "#999933",
+        "#DDCC77",
+        "#CC6677",
+        "#AA4499",
+    ],
+    [
+        "#DDDDDD",
+        "#332288",
+        "#88CCEE",
+        "#44AA99",
+        "#117733",
+        "#999933",
+        "#DDCC77",
+        "#CC6677",
+        "#882255",
+        "#AA4499",
+    ],
+    [
+        "#DDDDDD",
+        "#332288",
+        "#88CCEE",
+        "#44AA99",
+        "#117733",
+        "#999933",
+        "#DDCC77",
+        "#661100",
+        "#CC6677",
+        "#882255",
+        "#AA4499",
+    ],
+    [
+        "#DDDDDD",
+        "#332288",
+        "#6699CC",
+        "#88CCEE",
+        "#44AA99",
+        "#117733",
+        "#999933",
+        "#DDCC77",
+        "#661100",
+        "#CC6677",
+        "#882255",
+        "#AA4499",
+    ],
+    [
+        "#DDDDDD",
+        "#332288",
+        "#6699CC",
+        "#88CCEE",
+        "#44AA99",
+        "#117733",
+        "#999933",
+        "#DDCC77",
+        "#661100",
+        "#CC6677",
+        "#AA4466",
+        "#882255",
+        "#AA4499",
+    ],
+    [
+        "#DDDDDD",
+        "#332288",
+        "#6699CC",
+        "#88CCEE",
+        "#44AA99",
+        "#117733",
+        "#999933",
+        "#DDCC77",
+        "#661100",
+        "#CC6677",
+        "#AA4466",
+        "#882255",
+        "#AA4499",
+        "#777777",
+    ],
 ]
 
 MAX_COLORS = 13
@@ -91,8 +166,15 @@ def main():
             pts = sub[sub[taxlevel] == cat]
             if pts.empty:
                 continue
-            ax.scatter(pts["gc"], pts["cov"], s=14, alpha=1.0 / 3,
-                       color=color_of[cat], label=cat, edgecolors="none")
+            ax.scatter(
+                pts["gc"],
+                pts["cov"],
+                s=14,
+                alpha=1.0 / 3,
+                color=color_of[cat],
+                label=cat,
+                edgecolors="none",
+            )
         ax.set_yscale("log")
         ax.set_ylim(5, 10000)
         ax.set_xlim(0.2, 0.8)
@@ -112,18 +194,45 @@ def main():
 
     # ggplot-style grey facet strips above each panel
     from matplotlib.patches import Rectangle
+
     strip_h = 0.028
     for ax, read_set in zip(axes[0], read_sets):
         pos = ax.get_position()
-        fig.patches.append(Rectangle(
-            (pos.x0, pos.y1), pos.width, strip_h, transform=fig.transFigure,
-            facecolor="#d9d9d9", edgecolor="#808080", linewidth=0.7, zorder=5, clip_on=False))
-        fig.text(pos.x0 + pos.width / 2, pos.y1 + strip_h / 2, read_set,
-                 ha="center", va="center", fontsize=20, zorder=6)
+        fig.patches.append(
+            Rectangle(
+                (pos.x0, pos.y1),
+                pos.width,
+                strip_h,
+                transform=fig.transFigure,
+                facecolor="#d9d9d9",
+                edgecolor="#808080",
+                linewidth=0.7,
+                zorder=5,
+                clip_on=False,
+            )
+        )
+        fig.text(
+            pos.x0 + pos.width / 2,
+            pos.y1 + strip_h / 2,
+            read_set,
+            ha="center",
+            va="center",
+            fontsize=20,
+            zorder=6,
+        )
 
     handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=min(len(labels), 4), markerscale=3,
-               frameon=False, title="Annotation", fontsize=18, title_fontsize=20)
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=min(len(labels), 4),
+        markerscale=3,
+        frameon=False,
+        title="Annotation",
+        fontsize=18,
+        title_fontsize=20,
+    )
     fig.savefig("%s.%s.png" % (input_file, taxlevel), dpi=100)
     plt.close(fig)
 

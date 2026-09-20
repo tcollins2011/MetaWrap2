@@ -37,11 +37,11 @@ def draw_clustermap(df, lut) -> None:
     sns.set(font_scale=1)
     df = df.fillna(0)
     if lut is not False:
-        g = sns.clustermap(df, figsize=(14, 8), col_colors=lut, col_cluster=True,
-                           yticklabels=True, cmap="magma")
+        g = sns.clustermap(
+            df, figsize=(14, 8), col_colors=lut, col_cluster=True, yticklabels=True, cmap="magma"
+        )
     else:
-        g = sns.clustermap(df, figsize=(14, 8), col_cluster=True, yticklabels=True,
-                           cmap="magma")
+        g = sns.clustermap(df, figsize=(14, 8), col_cluster=True, yticklabels=True, cmap="magma")
     plt.setp(g.ax_heatmap.get_xticklabels(), rotation=90)
     plt.setp(g.ax_heatmap.yaxis.get_majorticklabels(), rotation=0)
 
@@ -49,9 +49,11 @@ def draw_clustermap(df, lut) -> None:
 def main(argv: List[str]) -> int:
     print("loading libs...")
     import matplotlib
+
     matplotlib.use("agg")
     import matplotlib.pyplot as plt
     import numpy as np
+
     plt.rc("font", family="arial")
 
     table = argv[0]

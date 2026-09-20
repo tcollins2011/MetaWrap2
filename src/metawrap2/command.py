@@ -26,11 +26,38 @@ import signal
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, TextIO, Union
+from dataclasses import dataclass
+from typing import List, Optional, Protocol, Sequence, TextIO, Union
 
-__all__ = ["CommandRunner", "ToolError", "runner", "run", "set_recorder", "set_dry_run",
-           "set_force", "set_resume", "set_run_logs", "set_env_manager"]
+from .logfilter import LogFilter
+from .logging import log_tool_output
+
+
+class Recorder(Protocol):
+    """What the runner needs from a provenance recorder.
+
+    A Protocol rather than an import of RunRecorder: provenance imports nothing from here, and
+    keeping it that way avoids a circular import while still type-checking the one call made.
+    """
+
+    def record_command(self, cmd: str) -> None: ...
+
+
+__all__ = [
+    "CommandRunner",
+    "ToolError",
+    "run",
+    "runner",
+    "set_dry_run",
+    "set_env_manager",
+    "set_force",
+    "set_recorder",
+    "set_resume",
+    "set_run_logs",
+    "set_skip_space_check",
+    "set_verbose_logs",
+    "tool_path_in_env",
+]
 
 
 @dataclass
@@ -53,20 +80,73 @@ class ToolError(RuntimeError):
         return "\n".join(msg)
 
 
-def _pump(pipe, screen: Optional[TextIO], logfile, tail: Optional[list]) -> None:
-    """Read *pipe* line by line, echoing to *screen* and appending to *logfile*/*tail*."""
+_RUN_FLAGS_CACHE: dict = {}
+
+
+def _run_flags(env_manager: str) -> List[str]:
+    """Extra flags for ``<env_manager> run`` so the child's output streams through live.
+
+    ``--no-capture-output`` is a *conda* flag. mamba 2.x does not accept it and mis-parses it
+    into the generated wrapper script, so every command fails with
+    ``exec: --: invalid option`` - which looks like the tool is missing rather than like a
+    flag problem. mamba 2.x streams output by default anyway, so when the flag is not
+    supported we simply omit it. The answer is cached: this shells out once per process.
+    """
+    if env_manager in _RUN_FLAGS_CACHE:
+        return _RUN_FLAGS_CACHE[env_manager]
+    flags: List[str] = []
+    try:
+        helptext = (
+            subprocess.run(
+                [env_manager, "run", "--help"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=60,
+                check=False,
+            ).stdout
+            or ""
+        )
+        if "--no-capture-output" in helptext:
+            flags = ["--no-capture-output"]
+    except (OSError, subprocess.SubprocessError):
+        flags = []
+    _RUN_FLAGS_CACHE[env_manager] = flags
+    return flags
+
+
+def _pump(
+    pipe,
+    screen: Optional[TextIO],
+    logfile,
+    tail: Optional[list],
+    log_filter: Optional[LogFilter] = None,
+    stream_name: str = "stdout",
+) -> None:
+    """Read *pipe* line by line, echoing to *screen* and appending to *logfile*/*tail*.
+
+    *log_filter* collapses progress-bar redraws and caps runaway repeated messages (see
+    :mod:`metawrap2.logfilter`). The error *tail* is always fed the unfiltered line, so the
+    message in a ToolError still shows exactly what the tool last said.
+    """
     try:
         for line in iter(pipe.readline, ""):
-            if screen is not None:
-                screen.write(line)
-                screen.flush()
-            if logfile is not None:
-                logfile.write(line)
-                logfile.flush()
             if tail is not None:
                 tail.append(line)
                 if len(tail) > 25:
                     tail.pop(0)
+            shown = log_filter.feed(line) if log_filter is not None else line
+            if shown is None:
+                continue
+            if screen is not None:
+                screen.write(shown)
+                screen.flush()
+            if logfile is not None:
+                logfile.write(shown)
+                logfile.flush()
+            # Also record it in the combined run log, so metawrap2.log has the whole story of
+            # the run in order rather than only what MetaWrap2 itself said.
+            log_tool_output(shown, stream_name)
     finally:
         pipe.close()
 
@@ -75,13 +155,15 @@ def _pump(pipe, screen: Optional[TextIO], logfile, tail: Optional[list]) -> None
 class CommandRunner:
     """Runs external commands with env-wrapping, logging, provenance, and dry-run."""
 
-    env_manager: str = "mamba"          # program used for `... run -n env`
+    env_manager: str = "mamba"  # program used for `... run -n env`
     dry_run: bool = False
-    force: bool = False                 # overwrite an existing MetaWrap2 output dir
-    resume: bool = False                # reuse an existing output dir, skip finished steps
-    recorder: object = None             # provenance RunRecorder (or None)
+    force: bool = False  # overwrite an existing MetaWrap2 output dir
+    resume: bool = False  # reuse an existing output dir, skip finished steps
+    recorder: Optional[Recorder] = None  # provenance RunRecorder (or None)
     run_stdout_path: Optional[str] = None
     run_stderr_path: Optional[str] = None
+    verbose_logs: bool = False  # True disables log noise filtering
+    skip_space_check: bool = False  # True disables the preflight disk-space estimate
 
     # -- configuration --------------------------------------------------------------------
 
@@ -92,19 +174,21 @@ class CommandRunner:
             setattr(self, key, value)
 
     def env_prefix(self, env: Optional[str]) -> List[str]:
-        """argv prefix that runs a command inside conda env *env* using mamba (or [] if None)."""
-        return [self.env_manager, "run", "--no-capture-output", "-n", env] if env else []
+        """argv prefix that runs a command inside conda env *env* (or [] if None)."""
+        if not env:
+            return []
+        return [self.env_manager, "run"] + _run_flags(self.env_manager) + ["-n", env]
 
     # -- execution ------------------------------------------------------------------------
 
     def run(
         self,
-        cmd: Union[str, Sequence[str]],
+        cmd: Union[str, Sequence[str]],  # noqa: UP007 - py3.8 target
         *,
         env: Optional[str] = None,
         tool: Optional[str] = None,
         stdout_path: Optional[str] = None,
-        log_path: Optional[str] = None,   # backwards-compatible alias for stdout_path
+        log_path: Optional[str] = None,  # backwards-compatible alias for stdout_path
         hint: str = "",
         check: bool = True,
         cwd: Optional[str] = None,
@@ -126,14 +210,21 @@ class CommandRunner:
             sys.stderr.write("[dry-run] %s\n" % recorded)
             return 0
 
-        return self._execute(full, tool=tool, stdout_path=stdout_path, hint=hint,
-                             check=check, cwd=cwd, recorded=recorded)
+        return self._execute(
+            full,
+            tool=tool,
+            stdout_path=stdout_path,
+            hint=hint,
+            check=check,
+            cwd=cwd,
+            recorded=recorded,
+        )
 
     def _open_run_log(self, path: Optional[str], header: str):
         if not path:
             return None
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        fh = open(path, "a")
+        fh = open(path, "a")  # noqa: SIM115 - closed in _execute's finally, spans the child
         fh.write(header)
         return fh
 
@@ -141,7 +232,12 @@ class CommandRunner:
         header = "\n$ %s\n" % recorded
         run_out = self._open_run_log(self.run_stdout_path, header)
         run_err = self._open_run_log(self.run_stderr_path, header)
-        data_out = open(stdout_path, "w") if stdout_path else None
+        # A command whose stdout *is* the result goes straight to the file, unfiltered.
+
+        # closed in the finally below.
+        data_out = open(stdout_path, "w") if stdout_path else None  # noqa: SIM115
+        out_filter = LogFilter(enabled=not self.verbose_logs)
+        err_filter = LogFilter(enabled=not self.verbose_logs)
         tail: list = []
         threads: List[threading.Thread] = []
         proc = None
@@ -156,12 +252,22 @@ class CommandRunner:
                 start_new_session=True,  # own process group, so Ctrl-C can kill the tree
             )
             # stderr always streams to the screen + run.stderr (+ tail for error messages)
-            threads.append(threading.Thread(
-                target=_pump, args=(proc.stderr, sys.stderr, run_err, tail), daemon=True))
+            threads.append(
+                threading.Thread(
+                    target=_pump,
+                    args=(proc.stderr, sys.stderr, run_err, tail, err_filter, "stderr"),
+                    daemon=True,
+                )
+            )
             # stdout: to the screen + run.stdout, unless it was redirected to a data file
             if data_out is None:
-                threads.append(threading.Thread(
-                    target=_pump, args=(proc.stdout, sys.stdout, run_out, None), daemon=True))
+                threads.append(
+                    threading.Thread(
+                        target=_pump,
+                        args=(proc.stdout, sys.stdout, run_out, None, out_filter, "stdout"),
+                        daemon=True,
+                    )
+                )
             for t in threads:
                 t.start()
             try:
@@ -172,13 +278,22 @@ class CommandRunner:
             for t in threads:
                 t.join()
         finally:
+            # Report what was collapsed, so a quiet log never hides that it was filtered.
+            for fh, filt in ((run_out, out_filter), (run_err, err_filter)):
+                if fh is None:
+                    continue
+                for line in filt.summary():
+                    fh.write(line)
+            for line in err_filter.summary():
+                sys.stderr.write(line)
             for fh in (run_out, run_err, data_out):
                 if fh is not None:
                     fh.close()
 
         if check and rc != 0:
-            raise ToolError(tool=tool, returncode=rc, cmd=full,
-                            log_tail="".join(tail).rstrip(), hint=hint)
+            raise ToolError(
+                tool=tool, returncode=rc, cmd=full, log_tail="".join(tail).rstrip(), hint=hint
+            )
         return rc
 
     @staticmethod
@@ -219,3 +334,51 @@ def set_run_logs(stdout_path: Optional[str], stderr_path: Optional[str]) -> None
 
 def set_env_manager(name: str) -> None:
     runner.configure(env_manager=name)
+
+
+def set_verbose_logs(value: bool) -> None:
+    runner.configure(verbose_logs=bool(value))
+
+
+def set_skip_space_check(value: bool) -> None:
+    runner.configure(skip_space_check=bool(value))
+
+
+_TOOL_PATH_CACHE: dict = {}
+
+
+def tool_path_in_env(env: Optional[str], tool: str) -> str:
+    """Absolute path to *tool* inside conda env *env* (or just *tool* if not found).
+
+    MetaWrap2's own Python helpers run in the host interpreter, but a few of them shell out
+    to an external tool that only exists inside a module's conda env (blobology's
+    gc_cov_annotate needs samtools). Resolving the absolute path here lets the helper call it
+    directly instead of relying on a PATH that will not contain it. Cached per process.
+    """
+    if not env:
+        return tool
+    key = (env, tool)
+    if key in _TOOL_PATH_CACHE:
+        return _TOOL_PATH_CACHE[key]
+    resolved = tool
+    try:
+        argv = (
+            [runner.env_manager, "run"]
+            + _run_flags(runner.env_manager)
+            + ["-n", env, "bash", "-c", "command -v %s" % shlex.quote(tool)]
+        )
+        out = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        candidate = (out.stdout or "").strip().splitlines()
+        if out.returncode == 0 and candidate and os.path.isabs(candidate[-1]):
+            resolved = candidate[-1]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _TOOL_PATH_CACHE[key] = resolved
+    return resolved

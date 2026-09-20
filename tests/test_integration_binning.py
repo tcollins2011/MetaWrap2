@@ -11,6 +11,7 @@ import stat
 
 import pytest
 
+from metawrap2.constants import BIN_EXTENSION
 from metawrap2.modules import binning
 
 STUBS = {
@@ -67,15 +68,26 @@ def test_binning_end_to_end_with_stubs(tmp_path, stub_path):
     r2.write_text("@read/1\nACGT\n+\nIIII\n")
     out = tmp_path / "binning_out"
 
-    rc = binning.main([
-        "-a", str(asm), "-o", str(out), "--metabat2", "-t", "1",
-        "--config", str(cfg), str(r1), str(r2),
-    ])
+    rc = binning.main(
+        [
+            "-a",
+            str(asm),
+            "-o",
+            str(out),
+            "--metabat2",
+            "-t",
+            "1",
+            "--config",
+            str(cfg),
+            str(r1),
+            str(r2),
+        ]
+    )
     assert rc == 0
 
     # produced bins
     bins = out / "metabat2_bins"
-    assert bins.is_dir() and any(f.endswith(".fa") for f in os.listdir(bins))
+    assert bins.is_dir() and any(f.endswith(BIN_EXTENSION) for f in os.listdir(bins))
     # provenance written, with the real (unwrapped, since conda disabled) commands
     assert (out / "run_config.json").exists()
     cmds = (out / "run_commands.txt").read_text()

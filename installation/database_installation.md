@@ -1,5 +1,18 @@
 # Downloading and configuring MetaWrap2 databases
 
+**The easy way:** `metawrap2 install-db` does everything on this page for you - download, unpack, index,
+and write the path into your config file:
+
+```bash
+metawrap2 install-db --list        # available databases, their sizes, and which module needs each
+metawrap2 install-db --all         # install everything at full size
+metawrap2 install-db --all --small # capped-but-real variants, for testing the pipeline quickly
+metawrap2 install-db kraken2 --dir /data/dbs   # one database, into a location you choose
+```
+
+The rest of this page documents what each database is and how to build one by hand, which is what you want
+if you already have a copy, need a non-default host genome, or are on a machine without internet access.
+
 Databases are only needed for the modules that use them. Configure their locations in your MetaWrap2
 config file (copy `metawrap2.toml.example` to `~/.metawrap2/config.toml`, or pass one with `--config`).
 There is no more `config-metawrap` file - all database paths live in the `[databases]` section of
@@ -12,6 +25,13 @@ There is no more `config-metawrap` file - all database paths live in the `[datab
 | NCBI_nt | ~71 GB | `BLASTDB` | blobology, classify_bins |
 | NCBI_tax | ~283 MB | `TAXDUMP` | blobology, classify_bins |
 | Indexed host genome (e.g. hg38) | ~20 GB | `BMTAGGER_DB` | read_qc (host removal) |
+
+If your BLAST database is not called `nt` (for example `core_nt`, or a custom database you built), set
+`BLASTDB_NAME` alongside `BLASTDB`:
+```toml
+BLASTDB = "/path/to/my/blast_dbs"
+BLASTDB_NAME = "core_nt"
+```
 
 After downloading a database, set the matching key in `~/.metawrap2/config.toml`, for example:
 ```toml

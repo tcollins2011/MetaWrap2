@@ -5,6 +5,9 @@ channels:
   - conda-forge
   - bioconda
 dependencies:
+  # QUAST 5.x still imports distutils, which Python 3.12 removed from the stdlib, so an
+  # unpinned solve produces an env where `quast` dies on import. Pin below 3.12.
+  - python <3.12
   - spades >=3.15
   - megahit >=1.2.9
   - quast >=5.2.0

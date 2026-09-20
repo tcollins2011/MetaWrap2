@@ -28,31 +28,40 @@
 # And the publication: https://www.ncbi.nlm.nih.gov/pubmed/28186226
 
 
-from __future__ import print_function
-import os
-import glob
-import shutil
 import argparse
-from time import sleep
+import glob
+import os
+import shutil
 from sys import stdout
-from Bio import SeqIO
+from time import sleep
 
+from Bio import SeqIO
 
 ##################################################### CONFIGURATION ####################################################
 
 parser = argparse.ArgumentParser()
 
 parser.add_argument('-1',
-                    required=True,
+                    required=False,
                     help='first bin folder name')
 
 parser.add_argument('-2',
-                    required=True,
+                    required=False,
                     help='second bin folder name')
 
 parser.add_argument('-3',
                     required=False,
                     help='third bin folder name')
+
+# MetaWrap2 modification: upstream Binning_refiner only ever accepted two or three bin sets,
+# but its algorithm (keep a contig only where every input set agrees, group contigs by their
+# tuple of bin assignments) is N-way already. -i may be repeated to pass any number of
+# folders; -1/-2/-3 still work exactly as before, so existing invocations are unaffected.
+parser.add_argument('-i',
+                    action='append',
+                    default=[],
+                    dest='bins',
+                    help='a bin folder; repeat once per bin set (alternative to -1/-2/-3)')
 
 parser.add_argument('-o',
                     required=True,
@@ -70,29 +79,38 @@ if output_dir[-1]=='/':
     output_dir=output_dir[:-1]
 
 input_bin_folder_1 = args['1']
-if input_bin_folder_1[-1] == '/':
+if input_bin_folder_1 is not None and input_bin_folder_1[-1] == '/':
     input_bin_folder_1 = input_bin_folder_1[:-1]
 
 input_bin_folder_2 = args['2']
-if input_bin_folder_2[-1] == '/':
+if input_bin_folder_2 is not None and input_bin_folder_2[-1] == '/':
     input_bin_folder_2 = input_bin_folder_2[:-1]
 
+input_bin_folder_3 = None
 if args['3'] != None:
     input_bin_folder_3 = args['3']
     if input_bin_folder_3[-1] == '/':
         input_bin_folder_3 = input_bin_folder_3[:-1]
 
 bin_size_cutoff = args['ms']
-bin_size_cutoff_MB = float("{0:.2f}".format(bin_size_cutoff / (1024 * 1024)))
+bin_size_cutoff_MB = float(f"{bin_size_cutoff / (1024 * 1024):.2f}")
 
-# get input bin folder list
+# get input bin folder list. Order matters: it decides the order of each contig's assignment
+# tuple, and therefore how the refined bins are numbered - so -1/-2/-3 are kept first, in that
+# order, and any -i folders follow in the order given.
 input_bin_folder_list = []
-if args['3'] == None:
-    print('Specified 2 input bin sets: -1 %s -2 %s' % (input_bin_folder_1, input_bin_folder_2))
-    input_bin_folder_list = [input_bin_folder_1, input_bin_folder_2]
-else:
-    print('Specified 3 input bin sets: -1 %s -2 %s -3 %s' % (input_bin_folder_1, input_bin_folder_2, input_bin_folder_3))
-    input_bin_folder_list = [input_bin_folder_1, input_bin_folder_2, input_bin_folder_3]
+for positional in (input_bin_folder_1, input_bin_folder_2, input_bin_folder_3):
+    if positional is not None:
+        input_bin_folder_list.append(positional)
+for extra in args['bins']:
+    extra = extra[:-1] if extra.endswith('/') else extra
+    if extra not in input_bin_folder_list:
+        input_bin_folder_list.append(extra)
+if len(input_bin_folder_list) < 2:
+    print('Need at least two bin sets to refine; got %d' % len(input_bin_folder_list))
+    exit(1)
+print('Specified %d input bin sets: %s' % (len(input_bin_folder_list),
+                                           ' '.join(input_bin_folder_list)))
 
 ################################################ Define folder/file name ###############################################
 
@@ -101,11 +119,6 @@ output_folder = output_dir
 pwd_output_folder = '%s/%s' % (wd, output_folder)
 
 ########################################################################################################################
-
-# get bin name list
-bin_folder_1_bins_files = '%s/%s/*.fa*' % (wd, input_bin_folder_1)
-bin_folder_2_bins_files = '%s/%s/*.fa*' % (wd, input_bin_folder_2)
-
 
 # check input files
 folder_bins_dict = {}
@@ -175,15 +188,14 @@ for each_folder in input_bin_folder_list:
 # combine all modified bins together
 sleep(1)
 print('Combine all bins together')
-if len(input_bin_folder_list) == 2:
-    pwd_combined_folder_1_bins = '%s/%s/combined_%s_bins.fa' % (wd, output_folder, input_bin_folder_1)
-    pwd_combined_folder_2_bins = '%s/%s/combined_%s_bins.fa' % (wd, output_folder, input_bin_folder_2)
-    os.system('cat %s %s > %s' % (pwd_combined_folder_1_bins, pwd_combined_folder_2_bins, combined_all_bins_file))
-if len(input_bin_folder_list) == 3:
-    pwd_combined_folder_1_bins = '%s/%s/combined_%s_bins.fa' % (wd, output_folder, input_bin_folder_1)
-    pwd_combined_folder_2_bins = '%s/%s/combined_%s_bins.fa' % (wd, output_folder, input_bin_folder_2)
-    pwd_combined_folder_3_bins = '%s/%s/combined_%s_bins.fa' % (wd, output_folder, input_bin_folder_3)
-    os.system('cat %s %s %s > %s' % (pwd_combined_folder_1_bins, pwd_combined_folder_2_bins, pwd_combined_folder_3_bins, combined_all_bins_file))
+# MetaWrap2 modification: concatenate one combined-bins file per input folder, in order, for
+# any number of folders (upstream had a hardcoded branch for exactly 2 and exactly 3).
+pwd_combined_folder_bins = ['%s/%s/combined_%s_bins.fa' % (wd, output_folder, folder)
+                            for folder in input_bin_folder_list]
+with open(combined_all_bins_file, 'w') as combined_out:
+    for each_combined in pwd_combined_folder_bins:
+        with open(each_combined) as each_in:
+            shutil.copyfileobj(each_in, combined_out)
 
 combined_all_bins = SeqIO.parse(combined_all_bins_file, 'fasta')
 contig_bin_dict = {}
@@ -274,20 +286,18 @@ for each_refined_bin in refined_bins:
     each_refined_bin_name = each_refined_bin_split[0]
     each_refined_bin_length = 0
     each_refined_bin_contig = []
-    if len(input_bin_folder_list) == 2:
-        each_refined_bin_source = each_refined_bin_split[1:3]
-        each_refined_bin_length = int(each_refined_bin_split[3][:-2])
-        each_refined_bin_contig = each_refined_bin_split[4:]
-        separated_1_handle.write('%s\t%sbp\t%s\n' % (each_refined_bin_name, each_refined_bin_length, '\t'.join(each_refined_bin_source)))
-        separated_2_handle.write('%s\n%s\n' % (each_refined_bin_name, '\t'.join(each_refined_bin_contig)))
-
-    if len(input_bin_folder_list) == 3:
-        each_refined_bin_source = each_refined_bin_split[1:4]
-        each_refined_bin_length = int(each_refined_bin_split[4][:-2])
-        each_refined_bin_contig = each_refined_bin_split[5:]
-        separated_1_handle.write('%s\t%sbp\t%s\n' % (each_refined_bin_name, each_refined_bin_length, '\t'.join(each_refined_bin_source)))
-        separated_2_handle.write('%s\n%s\n' % (each_refined_bin_name, '\t'.join(each_refined_bin_contig)))
-    each_refined_bin_length_mbp = float("{0:.2f}".format(each_refined_bin_length / (1024 * 1024)))
+    # MetaWrap2 modification: each row is
+    #   name, source_1 .. source_n, "<length>bp", contig_1, contig_2, ...
+    # so the split points follow from the number of input folders. Upstream had a hardcoded
+    # branch for 2 and for 3, and nothing at all for more - which left
+    # each_refined_bin_source undefined and raised NameError further down.
+    n_folders = len(input_bin_folder_list)
+    each_refined_bin_source = each_refined_bin_split[1:1 + n_folders]
+    each_refined_bin_length = int(each_refined_bin_split[1 + n_folders][:-2])
+    each_refined_bin_contig = each_refined_bin_split[2 + n_folders:]
+    separated_1_handle.write('%s\t%sbp\t%s\n' % (each_refined_bin_name, each_refined_bin_length, '\t'.join(each_refined_bin_source)))
+    separated_2_handle.write('%s\n%s\n' % (each_refined_bin_name, '\t'.join(each_refined_bin_contig)))
+    each_refined_bin_length_mbp = float(f"{each_refined_bin_length / (1024 * 1024):.2f}")
     m = 0
     while m < len(each_refined_bin_source)-1:
         googlevis_input_handle.write('%s,%s,%s\n' % (each_refined_bin_source[m], each_refined_bin_source[m+1], each_refined_bin_length_mbp))
@@ -296,7 +306,7 @@ for each_refined_bin in refined_bins:
     stdout.write('\rExtracting refined bin: %s.fasta' % each_refined_bin_name)
     refined_bin_file = '%s/%s/Refined/%s.fasta' % (wd, output_folder, each_refined_bin_name)
     refined_bin_handle = open(refined_bin_file, 'w')
-    input_contigs_file = '%s/%s/combined_%s_bins.fa' % (wd, output_folder, input_bin_folder_1)
+    input_contigs_file = '%s/%s/combined_%s_bins.fa' % (wd, output_folder, input_bin_folder_list[0])
     input_contigs = SeqIO.parse(input_contigs_file, 'fasta')
     for each_input_contig in input_contigs:
         each_input_contig_id = each_input_contig.id.split(separator)[-1]

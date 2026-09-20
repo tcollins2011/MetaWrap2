@@ -1,8 +1,8 @@
 # MetaWrap2 dependencies
 
-MetaWrap2's core is lightweight: it only needs `python>=3.8` and `biopython` (installed by
+MetaWrap2's core is lightweight: it only needs `python>=3.10` and `biopython` (installed by
 `pip install -e .`). The heavy third-party tools each module drives (SPAdes, CheckM, salmon, KRAKEN2, ...)
-live in their own per-module conda environment, defined by the YAML files in [`envs/`](../envs/). Splitting
+live in their own per-module conda environment, defined by the YAML files in [`src/metawrap2/envs/`](../src/metawrap2/envs/). Splitting
 them up means each tool's dependencies resolve independently, so adding or updating one tool no longer has
 to satisfy every other tool at the same time.
 
@@ -40,5 +40,5 @@ reproduce the same results:
 | `metawrap2-classify_bins-gtdbtk` | GTDB-Tk | classify_bins |
 | `metawrap2-annotate_bins-bakta` | Bakta | annotate_bins |
 
-See [`envs/README.md`](../envs/README.md) for the authoritative, up-to-date list of environments and the
+See [`src/metawrap2/envs/README.md`](../src/metawrap2/envs/README.md) for the authoritative, up-to-date list of environments and the
 exact packages each one pins.

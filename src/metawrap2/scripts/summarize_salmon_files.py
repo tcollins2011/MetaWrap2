@@ -26,7 +26,7 @@ def process_quant_file(quant_path: str, out_path: str) -> None:
             for line in fh:
                 if line.startswith("Name"):
                     continue
-                name, length, eff_length, tpm, count = line.strip().split("\t")
+                name, _length, _eff_length, tpm, _count = line.strip().split("\t")
                 outfp.write("%s\t%s\n" % (name, float(tpm)))
 
 
@@ -43,8 +43,7 @@ def summarize(directory: str) -> List[str]:
             if filename.endswith("quant.sf"):
                 dirname = os.path.basename(root)
                 outname = dirname + ".counts"
-                process_quant_file(os.path.join(root, filename),
-                                   os.path.join(directory, outname))
+                process_quant_file(os.path.join(root, filename), os.path.join(directory, outname))
                 quantlist.append(outname)
                 break
     return sorted(quantlist)

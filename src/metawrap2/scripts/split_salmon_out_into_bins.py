@@ -18,7 +18,7 @@ import os
 import sys
 from typing import Dict, List, TextIO
 
-from ..io.seqio import iter_fasta
+from ..io.seqio import contig_id, iter_fasta
 
 
 def _median(values: List[float]) -> float:
@@ -34,11 +34,15 @@ def _median(values: List[float]) -> float:
 
 
 def load_bins(bin_folder: str) -> Dict[str, str]:
-    """Map each contig header to the bin filename that contains it."""
+    """Map each contig id to the bin filename that contains it.
+
+    Keyed on :func:`contig_id` to match load_contig_lengths (and the assembly, and salmon's
+    transcript names). Keying on the full header made every metaBAT2 bin invisible here.
+    """
     bins = {}
-    for bin_name in os.listdir(bin_folder):
+    for bin_name in sorted(os.listdir(bin_folder)):
         for header, _seq in iter_fasta(os.path.join(bin_folder, bin_name)):
-            bins[header] = bin_name
+            bins[contig_id(header)] = bin_name
     return bins
 
 
@@ -46,7 +50,7 @@ def load_contig_lengths(assembly: str) -> Dict[str, int]:
     """Map each contig (first whitespace-delimited id token) to its length."""
     lengths = {}
     for header, seq in iter_fasta(assembly):
-        lengths[header.split()[0]] = len(seq)
+        lengths[contig_id(header)] = len(seq)
     return lengths
 
 
@@ -71,7 +75,10 @@ def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> 
                 abun = float(line.strip().split("\t")[1])
                 if bin_name not in bin_abundances:
                     bin_abundances[bin_name] = {
-                        "total_len": 0, "total_cov": 0, "cov_list": [], "samples": {},
+                        "total_len": 0,
+                        "total_cov": 0,
+                        "cov_list": [],
+                        "samples": {},
                     }
                 length = contig_lengths[contig]
                 weight = length // 1000
@@ -90,10 +97,9 @@ def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> 
             )
             sys.exit(1)
 
-        for bin_name in bin_abundances:
-            bin_abundances[bin_name]["samples"][sample] = _median(
-                bin_abundances[bin_name]["cov_list"])
-            bin_abundances[bin_name]["total_len"] = 0
+        for abundance in bin_abundances.values():
+            abundance["samples"][sample] = _median(abundance["cov_list"])
+            abundance["total_len"] = 0
             bin_abundances[bin_name]["total_cov"] = 0
             bin_abundances[bin_name]["cov_list"] = []
 

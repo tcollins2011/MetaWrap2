@@ -1,0 +1,120 @@
+name: Lockfiles
+
+# A committed lockfile that no longer resolves is worse than no lockfile: it promises
+# reproducibility and delivers a failed solve, at the moment someone is trying to reproduce a
+# result. Nothing in the normal CI run catches that, because creating a conda environment is far
+# too slow to do on every push - so it is checked here, on a schedule, and on demand.
+#
+# Two jobs:
+#   verify   - actually create environments from the committed lockfiles. This is the one that
+#              matters: it is the only check that the files do what they claim.
+#   refresh  - re-solve the environment yamls and open a PR if the resulting lockfiles differ,
+#              so drift arrives as a reviewable diff rather than as a surprise months later.
+
+on:
+  schedule:
+    # Weekly, early Monday. Often enough that drift is a small diff; rarely enough that it is
+    # not noise, and that the conda channels are not hammered.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      modules:
+        description: "Modules to check (space-separated, or 'all')"
+        default: "all"
+  pull_request:
+    # A PR that edits a lockfile or an environment spec must prove the result still resolves.
+    paths:
+      - "src/metawrap2/envs/**"
+
+jobs:
+  verify:
+    name: Create envs from the committed lockfiles
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The full set would take hours. These four cover the shapes that actually break:
+        # a large bioconda solve (binning), pinned Python tooling (bin_refinement), a JVM
+        # dependency (read_qc), and the smallest env as a control (quant_bins).
+        module: [binning, bin_refinement, read_qc, quant_bins]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: latest
+          init-shell: bash
+
+      - name: Create the environment from its lockfile
+        shell: bash -el {0}
+        run: |
+          lock="src/metawrap2/envs/locks/${{ matrix.module }}.linux-64.lock"
+          if [ ! -f "$lock" ]; then
+            echo "::error::$lock is missing. Generate it with: metawrap2 install-env ${{ matrix.module }} --lock"
+            exit 1
+          fi
+          micromamba create -y -n "lockcheck" --file "$lock"
+
+      - name: Report what it produced
+        shell: bash -el {0}
+        run: |
+          micromamba list -n lockcheck | tail -n +4 | wc -l | xargs echo "packages installed:"
+
+  refresh:
+    name: Re-solve the yamls and open a PR if the locks drifted
+    # Only on the schedule or a manual run: on a PR the point is to verify, not to rewrite.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: latest
+          init-shell: bash
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install MetaWrap2
+        run: pip install -e .
+
+      - name: Re-solve and re-lock
+        shell: bash -el {0}
+        run: |
+          modules="${{ github.event.inputs.modules }}"
+          if [ -z "$modules" ] || [ "$modules" = "all" ]; then
+            metawrap2 install-env --all -t 4 --force --lock --no-test
+          else
+            metawrap2 install-env $modules -t 4 --force --lock --no-test
+          fi
+
+      - name: Open a PR if anything changed
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/refresh-lockfiles
+          title: "chore: refresh conda lockfiles"
+          commit-message: "chore: refresh conda lockfiles"
+          add-paths: src/metawrap2/envs/locks/*.lock
+          body: |
+            Automated weekly re-solve of the per-module conda environments.
+
+            Every changed line is a package build that moved. Worth a look at:
+
+            * anything where the **Python** version changed - that is the usual cause of a
+              module that suddenly cannot import something;
+            * a **major** version bump in one of the wrapped bioinformatics tools, since that
+              can change results, not just packaging.
+
+            The `verify` job on this PR creates environments from the new lockfiles, so a merge
+            means they resolve. It does not mean the tools still produce the same output - that
+            is what the golden tests and a real run are for.

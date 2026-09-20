@@ -1,11 +1,22 @@
-# Run `pre-commit install` once, then these checks run on every commit.
+# Run `pre-commit install && pre-commit install --hook-type pre-push` once. The commit hooks
+# format and lint what you touched; the pre-push hooks run the full gate (black, isort, ruff,
+# mypy, pytest) so nothing that fails them can reach the remote.
 repos:
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
     hooks:
+      # ruff lints; black formats. ruff-format is deliberately not enabled - two formatters
+      # fight each other over the same files.
       - id: ruff
         args: [--fix]
-      - id: ruff-format
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
@@ -13,6 +24,7 @@ repos:
       - id: trailing-whitespace
       - id: check-yaml
       - id: check-added-large-files
+        args: [--maxkb=512]
       - id: check-merge-conflict
   - repo: local
     hooks:
@@ -20,4 +32,38 @@ repos:
         name: no .sh/.pl/.R (MetaWrap2 is Python-only)
         entry: bash -c 'if find . -path ./.git -prune -o \( -name "*.sh" -o -name "*.pl" -o -name "*.R" \) -print | grep .; then exit 1; fi'
         language: system
+        pass_filenames: false
+
+      # --- the pre-push gate -------------------------------------------------------------
+      # These run once per push, not per commit, because they are slower and are about the
+      # state of the whole tree rather than the files in one commit.
+      - id: black-check
+        name: black (whole tree, check only)
+        entry: black --check --diff .
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+      - id: isort-check
+        name: isort (whole tree, check only)
+        entry: isort --check-only --diff .
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+      - id: ruff-check
+        name: ruff (whole tree)
+        entry: ruff check .
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+      - id: pytest
+        name: pytest
+        entry: python -m pytest -q
+        language: system
+        stages: [pre-push]
         pass_filenames: false

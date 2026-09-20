@@ -6,9 +6,14 @@ from metawrap2.provenance import CONFIG_NAME, RunRecorder
 
 def _make_recorder(module, inputs):
     return RunRecorder(
-        module=module, version="2.0.0", parameters={"threads": 4},
-        config_file=None, conda_env="metawrap2-%s" % module,
-        databases={}, inputs=inputs, command_line=["metawrap2", module],
+        module=module,
+        version="2.0.0",
+        parameters={"threads": 4},
+        config_file=None,
+        conda_env="metawrap2-%s" % module,
+        databases={},
+        inputs=inputs,
+        command_line=["metawrap2", module],
     )
 
 
@@ -82,7 +87,8 @@ def test_find_mw2_root_walks_up(tmp_path):
 
 def test_parse_env_tool():
     assert provenance._parse_env_tool(
-        "mamba run --no-capture-output -n metawrap2-binning metabat2 -i a.fa") == ("metawrap2-binning", "metabat2")
+        "mamba run --no-capture-output -n metawrap2-binning metabat2 -i a.fa"
+    ) == ("metawrap2-binning", "metabat2")
     assert provenance._parse_env_tool("cd /x && mamba run -n e salmon quant") == ("e", "salmon")
     assert provenance._parse_env_tool("bash -c 'a | b'") is None
     assert provenance._parse_env_tool("prokka --outdir x") == (None, "prokka")
@@ -91,5 +97,6 @@ def test_parse_env_tool():
 def test_capture_versions_graceful_when_tool_absent():
     # a tool that isn't installed -> no version recorded, no error
     versions = provenance.capture_tool_versions(
-        ["mamba run -n metawrap2-binning definitely_not_a_real_tool_xyz --version"])
+        ["mamba run -n metawrap2-binning definitely_not_a_real_tool_xyz --version"]
+    )
     assert versions == {}

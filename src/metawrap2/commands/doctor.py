@@ -15,8 +15,10 @@ import os
 import re
 import subprocess
 import sys
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from .. import dbcheck as _dbcheck
+from ..command import _run_flags
 from ..config import MODULE_ENVS, MODULE_TOOLS, conda_env_exists
 
 # Signatures in a tool's output that mean it's installed but broken (not just "exits nonzero
@@ -56,11 +58,23 @@ OK, MISSING, BROKEN = "OK", "MISSING", "BROKEN"
 
 
 def _env_run(env: str, shell_cmd: str, timeout: int = 60) -> Tuple[int, str]:
-    """Run a shell command inside a conda env via mamba; return (returncode, output)."""
-    cmd = ["mamba", "run", "--no-capture-output", "-n", env, "bash", "-lc", shell_cmd]
+    """Run a shell command inside a conda env via mamba; return (returncode, output).
+
+    Uses ``bash -c``, not ``bash -lc``: a login shell re-reads the user's profile, which
+    rebuilds PATH from scratch and throws away the environment's own bin directory - so every
+    tool probe reported MISSING even for a perfectly good env. Flags for ``run`` come from
+    :func:`metawrap2.command._run_flags` because ``--no-capture-output`` is conda-only.
+    """
+    cmd = ["mamba", "run"] + _run_flags("mamba") + ["-n", env, "bash", "-c", shell_cmd]
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           text=True, timeout=timeout)
+        p = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
         return p.returncode, p.stdout or ""
     except subprocess.TimeoutExpired:
         return 124, "timed out"
@@ -94,8 +108,13 @@ def _probe_tool(env: str, tool: str) -> Tuple[str, str]:
 def _check_module(module: str) -> dict:
     env = MODULE_ENVS.get(module, "metawrap2-%s" % module)
     if not conda_env_exists(env):
-        return {"module": module, "env": env, "status": MISSING,
-                "detail": "conda env not created", "tools": []}
+        return {
+            "module": module,
+            "env": env,
+            "status": MISSING,
+            "detail": "conda env not created",
+            "tools": [],
+        }
     tools = []
     n_missing = n_broken = 0
     for tool in MODULE_TOOLS.get(module, []):
@@ -133,13 +152,127 @@ def _run_unit_tests() -> Tuple[Optional[bool], str]:
     if not tests_dir:
         return None, "skipped (run from a source checkout to run unit tests)"
     try:
-        p = subprocess.run([sys.executable, "-m", "pytest", "-q", tests_dir],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                           cwd=os.path.dirname(tests_dir))
+        p = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", tests_dir],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=os.path.dirname(tests_dir),
+            check=False,
+        )
     except FileNotFoundError:
         return None, "skipped (pytest not installed)"
     summary = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else ""
     return p.returncode == 0, summary
+
+
+def repair(
+    modules: List[str], results: List[dict], threads: int = 4, use_lock: bool = False
+) -> int:
+    """Recreate the environments that are missing or broken. Returns an exit code.
+
+    Recreating the environment is the only real remedy for a broken one - a half-solved env
+    cannot be patched into a working one - so rather than telling the user to go and do it,
+    ``--fix`` does exactly that, for exactly the environments that are actually broken. Healthy
+    environments are never touched.
+    """
+    from .install_env import main as install_main
+
+    damaged = [r["module"] for r in results if r["status"] in (MISSING, BROKEN)]
+    if not damaged:
+        print("\n  Nothing to fix: every environment checked is healthy.\n")
+        return 0
+
+    print("\n  Recreating %d environment(s): %s" % (len(damaged), ", ".join(damaged)))
+    print("  (healthy environments are left alone)\n")
+    argv = list(damaged) + ["--force", "-t", str(threads), "--no-test"]
+    if use_lock:
+        argv.append("--from-lock")
+    rc = install_main(argv)
+
+    print("\n  Re-checking what was rebuilt...\n")
+    after = [_check_module(m) for m in damaged]
+    still_bad = [r["module"] for r in after if r["status"] != OK]
+    for r in after:
+        print("  %-16s %-30s %s" % (r["module"], r["env"], r["status"]))
+        for tool, st, detail in r["tools"]:
+            if st != OK:
+                print("      - %-18s %-8s %s" % (tool, st, detail))
+    if still_bad:
+        print(
+            "\n  %d environment(s) are still not healthy: %s\n"
+            "  Their build logs are the next thing to look at; the solver output usually "
+            "names the conflict.\n" % (len(still_bad), ", ".join(still_bad))
+        )
+        return 1
+    print("\n  All rebuilt environments are healthy.\n")
+    return rc
+
+
+#: Which database keys each module needs. An environment can be perfectly healthy and the module
+#: still unable to run, because the database it reads is missing or half-downloaded - so checking
+#: envs without checking databases answers only half of "can I run this?".
+MODULE_DATABASES: Dict[str, List[str]] = {
+    "read_qc": ["BMTAGGER_DB"],
+    "kraken2": ["KRAKEN2_DB"],
+    "blobology": ["BLASTDB", "TAXDUMP"],
+    "classify_bins": ["BLASTDB", "TAXDUMP"],
+    "bin_refinement": ["CHECKM_DB"],
+    "reassemble_bins": ["CHECKM_DB"],
+    "binning": ["CHECKM_DB"],
+    "annotate_bins": [],
+    "assembly": [],
+    "quant_bins": [],
+}
+
+
+def _report_databases(modules: List[str], config: Optional[str], verbose: bool = False) -> int:
+    """Print the state of every database the given modules need. Returns how many are unusable.
+
+    Optional databases (the opt-in CheckM2/GTDB-Tk/Bakta paths, and CheckM's data when only the
+    binners are being used) are reported but not counted as failures, because a user who never
+    asked for that code path has nothing wrong with their installation.
+    """
+    from ..config import OPTIONAL_DB_KEYS, load_settings
+
+    needed: List[str] = []
+    for module in modules:
+        for key in MODULE_DATABASES.get(module, []):
+            if key not in needed:
+                needed.append(key)
+    if not needed:
+        return 0
+
+    try:
+        settings = load_settings(config)
+    except Exception as exc:  # noqa: BLE001 - a broken config is itself the finding
+        print("\nDatabases: could not read the config - %s" % exc)
+        return 1
+
+    rows = _dbcheck.check(settings, sorted(needed))
+    print("\nDatabase status")
+    print("=" * 74)
+    print("  %-18s %-11s %s" % ("database", "status", "detail"))
+    print("  " + "-" * 70)
+    bad = 0
+    for key, status, detail in rows:
+        optional = key in OPTIONAL_DB_KEYS
+        shown = status if status == _dbcheck.OK or not optional else "%s (optional)" % status
+        print("  %-18s %-11s %s" % (key, shown, detail))
+        if status != _dbcheck.OK and not optional:
+            bad += 1
+    print("  " + "-" * 70)
+    print(
+        "  %d usable, %d unusable. Install with: metawrap2 install-db --list"
+        % (sum(1 for _k, st, _d in rows if st == _dbcheck.OK), bad)
+    )
+    if verbose:
+        print(
+            "\n  The value in brackets is the database's content fingerprint, also recorded in\n"
+            "  each run's run_environment.json - so a database replaced in place is visible as a\n"
+            "  change rather than an identical-looking path."
+        )
+    return bad
 
 
 def main(argv: List[str]) -> int:
@@ -147,7 +280,29 @@ def main(argv: List[str]) -> int:
     ap.add_argument("modules", nargs="*", help="modules to test (default: all)")
     ap.add_argument("--no-unit-tests", action="store_true", help="skip the Python unit tests")
     ap.add_argument("--tools-only", action="store_true", help="only probe tools/envs")
+    ap.add_argument(
+        "--no-databases", action="store_true", help="skip checking the configured databases"
+    )
+    ap.add_argument("--config", help="config file to read database paths from")
     ap.add_argument("--verbose", action="store_true", help="list every tool and its version")
+    ap.add_argument(
+        "--fix",
+        action="store_true",
+        help="recreate the environments reported missing or broken, then re-check "
+        "them (healthy environments are left alone)",
+    )
+    ap.add_argument(
+        "--from-lock",
+        action="store_true",
+        help="with --fix, rebuild from the committed lockfiles rather than by " "solving the yaml",
+    )
+    ap.add_argument(
+        "-t",
+        "--threads",
+        type=int,
+        default=4,
+        help="with --fix, how many environments to rebuild at once (default 4)",
+    )
     args = ap.parse_args(argv)
 
     modules = args.modules or sorted(MODULE_ENVS)
@@ -165,17 +320,26 @@ def main(argv: List[str]) -> int:
             if st != OK or args.verbose:
                 print("      - %-18s %-8s %s" % (tool, st, detail))
     print("  " + "-" * 70)
-    print("  %d OK, %d missing, %d broken (of %d modules)"
-          % (counts[OK], counts[MISSING], counts[BROKEN], len(results)))
+    print(
+        "  %d OK, %d missing, %d broken (of %d modules)"
+        % (counts[OK], counts[MISSING], counts[BROKEN], len(results))
+    )
+
+    db_bad = 0
+    if not args.tools_only and not args.no_databases:
+        db_bad = _report_databases(modules, args.config, verbose=args.verbose)
+
+    if args.fix:
+        return repair(modules, results, threads=args.threads, use_lock=args.from_lock)
 
     unit_ok = None
     if not args.tools_only and not args.no_unit_tests:
         unit_ok, summary = _run_unit_tests()
         print("\n  Unit tests: %s" % summary)
 
-    print("")
+    print()
     # exit nonzero if anything is missing/broken or unit tests failed
-    bad = counts[MISSING] + counts[BROKEN]
+    bad = counts[MISSING] + counts[BROKEN] + db_bad
     if bad or unit_ok is False:
         return 1
     return 0

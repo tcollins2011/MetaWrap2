@@ -1,6 +1,6 @@
 """Transparent handling of compressed and uncompressed sequence files.
 
-Addresses the most-requested metaWRAP feature (issue #159): accept ``.gz`` / ``.bz2``
+Accepts ``.gz`` / ``.bz2``
 input anywhere a plain FASTA/FASTQ was accepted, without forcing users to decompress
 terabytes of data first. Compression is detected by magic bytes, not just extension,
 so mislabeled files still work.
@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import bz2
 import gzip
-import io
-from typing import IO
+from typing import IO, cast
 
 from ..constants import BZIP2_MAGIC, GZIP_MAGIC
 
@@ -56,10 +55,32 @@ def smart_open(path: str, mode: str = "rt", **kwargs) -> IO:
     comp = detect_compression(path) if reading else _compression_for_write(path)
 
     if comp == "gzip":
-        return gzip.open(path, mode, **kwargs)
+        # gzip/bz2/io.open all return file-like objects; the union of their concrete types
+        # is not IO[Any] to mypy, but every caller only uses the IO interface.
+        return cast(IO, gzip.open(path, mode, **kwargs))
     if comp == "bzip2":
-        return bz2.open(path, mode, **kwargs)
-    return io.open(path, mode, **kwargs)
+        return cast(IO, bz2.open(path, mode, **kwargs))
+    return open(path, mode, **kwargs)
+
+
+def contig_id(header: str) -> str:
+    """The identity of a contig: its header up to the first whitespace.
+
+    Everything that compares contigs between files must agree on this, because tools append
+    their own annotations to the description field. Current metaBAT2, for example, writes
+
+        >NODE_2_length_158684_cov_2.764955 total_depth=41.98 sample_depths=18.3,23.5,0.2
+
+    while the assembly and every other binner write just the first token. MetaWrap2 used the
+    *whole* header as the key in some places and the first token in others, so metaBAT2 bins
+    matched nothing: bin_refinement measured 0%% overlap between a metaBAT2 bin and the very
+    same bin from another binner (silently skipping consolidation), and quant_bins aborted
+    with "None of the contigs in the assembly were present in the bin files".
+
+    This is also what SAM/BAM reference names are, and what BLAST uses as the query id, so
+    the first token is the only identity that is consistent end to end.
+    """
+    return header.split()[0] if header else header
 
 
 def iter_fasta(path: str):

@@ -1,0 +1,12 @@
+# Blobology module tools (metawrap2 blobology).
+# Only external tools live here: MetaWrap2's own Python helpers (gc_cov_annotate,
+# makeblobplot, ...) run in the host interpreter that metawrap2 is installed into,
+# so this env deliberately carries no python/metawrap2. See metawrap2.pyrun.
+name: metawrap2-blobology
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - blast >=2.13
+  - bowtie2 >=2.5
+  - samtools >=1.15

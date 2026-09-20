@@ -14,7 +14,10 @@ from __future__ import annotations
 import sys
 from typing import Dict, Iterator, List
 
-INCLUDE = {"species", "genus", "family", "order", "class", "phylum", "superkingdom"}
+# "domain" is included alongside "superkingdom" because NCBI renamed that rank: a current
+# taxdump has no "superkingdom" nodes at all, so a hit whose only ranked ancestor is a domain
+# would otherwise be discarded.
+INCLUDE = {"species", "genus", "family", "order", "class", "phylum", "superkingdom", "domain"}
 
 
 def load_ranks(nodes_dmp: str) -> Dict[str, str]:

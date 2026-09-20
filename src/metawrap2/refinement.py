@@ -1,7 +1,7 @@
 """Core bin-refinement algorithms: consolidation and contig dereplication.
 
-This is the scientific heart of metaWRAP's bin_refinement module and is kept
-faithful to the original behaviour. Two changes over the historical scripts:
+This is the scientific heart of the bin_refinement module, kept faithful to the
+behaviour it has always had. Two changes over the original scripts:
 
 * Contig identity is the full FASTA header string. The old code parsed a length out
   of the header with ``line.split('_')[3]`` (a SPAdes-only assumption) in one code
@@ -18,18 +18,26 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from typing import Dict, List, Optional, Tuple
 
-from .constants import OVERLAP_THRESHOLD
-from .io.seqio import iter_fasta
+from .constants import (
+    BIN_EXTENSION,
+    OVERLAP_THRESHOLD,
+    STATS_SUFFIX,
+    bin_filename,
+    bin_stem,
+)
+from .io.seqio import contig_id, iter_fasta
 from .utils import bin_name_from_filename, quality_score
 
 
 def _read_stats(path: str) -> Tuple[str, Dict[str, str], Dict[str, Tuple[float, ...]]]:
-    """Parse a metaWRAP/CheckM ``.stats`` file.
+    """Parse a CheckM ``.stats`` file.
 
     Returns ``(header_line, {bin.fa: raw_line}, {bin.fa: (completeness, contamination, extra)})``
-    where ``extra`` is the 6th column when present (used as a dereplication tiebreaker).
+    where ``extra`` is the N50 column when present, used only as a dereplication tiebreaker
+    (weighted 1e-10, so it separates otherwise-identical bins without shifting ranking).
     """
     header = ""
     raw: Dict[str, str] = {}
@@ -42,7 +50,7 @@ def _read_stats(path: str) -> Tuple[str, Dict[str, str], Dict[str, Tuple[float, 
             cut = line.rstrip("\n").split("\t")
             if len(cut) < 3:
                 continue
-            name = cut[0] + ".fa"
+            name = cut[0] + BIN_EXTENSION
             raw[name] = line
             extra = float(cut[5]) if len(cut) > 5 else 0.0
             stats[name] = (float(cut[1]), float(cut[2]), extra)
@@ -50,8 +58,12 @@ def _read_stats(path: str) -> Tuple[str, Dict[str, str], Dict[str, Tuple[float, 
 
 
 def _bin_contig_lengths(bin_path: str) -> Dict[str, int]:
-    """Map each contig name -> length for one bin FASTA (compression-transparent)."""
-    return {name: len(seq) for name, seq in iter_fasta(bin_path)}
+    """Map each contig id -> length for one bin FASTA (compression-transparent).
+
+    Keyed on :func:`contig_id`, not the raw header, so a binner's extra header annotations
+    cannot stop two copies of the same contig from matching.
+    """
+    return {contig_id(name): len(seq) for name, seq in iter_fasta(bin_path)}
 
 
 def _overlap_percent(a: Dict[str, int], b: Dict[str, int]) -> float:
@@ -119,20 +131,18 @@ def consolidate(
             src, raw = os.path.join(folder_2, best_bin_2), raw2[best_bin_2]
         else:
             src, raw = os.path.join(folder_1, bin_1), raw1[bin_1]
-        shutil.copy(src, os.path.join(out_folder, "bin.%d.fa" % bin_ct))
-        new_summary.append("bin.%d\t%s" % (bin_ct, "\t".join(raw.split("\t")[1:])))
+        shutil.copy(src, os.path.join(out_folder, bin_filename(bin_ct)))
+        new_summary.append("%s\t%s" % (bin_stem(bin_ct), "\t".join(raw.split("\t")[1:])))
         bin_ct += 1
 
     for bin_2 in sorted(good2):
         if bin_2 in matched_in_2:
             continue
-        shutil.copy(
-            os.path.join(folder_2, bin_2), os.path.join(out_folder, "bin.%d.fa" % bin_ct)
-        )
-        new_summary.append("bin.%d\t%s" % (bin_ct, "\t".join(raw2[bin_2].split("\t")[1:])))
+        shutil.copy(os.path.join(folder_2, bin_2), os.path.join(out_folder, bin_filename(bin_ct)))
+        new_summary.append("%s\t%s" % (bin_stem(bin_ct), "\t".join(raw2[bin_2].split("\t")[1:])))
         bin_ct += 1
 
-    with open(out_folder + ".stats", "w") as fh:
+    with open(out_folder + STATS_SUFFIX, "w") as fh:
         fh.write("".join(new_summary))
     return bin_ct
 
@@ -155,25 +165,45 @@ def dereplicate(stats_file: str, bins_folder: str, out_folder: str, mode: str = 
             extra = float(cut[5]) if len(cut) > 5 else 0.0
             bin_scores[cut[0]] = quality_score(float(cut[1]), float(cut[2]), extra)
 
+    def score(bin_name: str) -> float:
+        # A bin file with no row in the .stats file (the two can drift apart if a run was
+        # interrupted between writing bins and re-scoring them) used to raise KeyError here
+        # and abort the whole refinement. Treat it as the worst possible bin instead, so it
+        # never wins a contig but also never crashes the run.
+        if bin_name not in bin_scores:
+            missing_stats.add(bin_name)
+            return float("-inf")
+        return bin_scores[bin_name]
+
+    missing_stats: set = set()
     contig_owner: Dict[str, Optional[str]] = {}
     bin_files = sorted(os.listdir(bins_folder))
     for bin_file in bin_files:
         name = bin_name_from_filename(bin_file)
-        for contig, _seq in iter_fasta(os.path.join(bins_folder, bin_file)):
+        for header, _seq in iter_fasta(os.path.join(bins_folder, bin_file)):
+            contig = contig_id(header)
             if contig not in contig_owner:
                 contig_owner[contig] = name
             elif mode == "remove":
                 contig_owner[contig] = None
-            elif contig_owner[contig] is not None and bin_scores[name] > bin_scores[contig_owner[contig]]:
-                contig_owner[contig] = name
+            else:
+                owner = contig_owner[contig]
+                if owner is not None and score(name) > score(owner):
+                    contig_owner[contig] = name
+    if missing_stats:
+        sys.stderr.write(
+            "WARNING: %d bin(s) in %s have no row in %s, so they lost every contested "
+            "contig: %s\n"
+            % (len(missing_stats), bins_folder, stats_file, ", ".join(sorted(missing_stats)[:10]))
+        )
 
     os.makedirs(out_folder, exist_ok=True)
     for bin_file in bin_files:
         name = bin_name_from_filename(bin_file)
         kept: List[Tuple[str, str]] = [
-            (c, s)
-            for c, s in iter_fasta(os.path.join(bins_folder, bin_file))
-            if contig_owner.get(c) == name
+            (contig_id(h), s)
+            for h, s in iter_fasta(os.path.join(bins_folder, bin_file))
+            if contig_owner.get(contig_id(h)) == name
         ]
         if not kept:
             continue

@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -26,14 +26,47 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]" pytest-cov
 
+      # Gating, not advisory: the codebase is clean, so any new finding is a real regression.
+      # If a rule genuinely does not suit the project, silence it in pyproject.toml's
+      # [tool.ruff.lint] with a comment saying why - do not put "|| true" back here.
       - name: Lint (ruff)
-        run: ruff check . || true
+        run: ruff check .
+
+      # Formatting is checked, never applied, in CI: a job that rewrites your code and then
+      # passes teaches you nothing. Run `black . && isort .` locally (or let the pre-commit
+      # hook do it) and commit the result.
+      - name: Format check (black)
+        run: black --check --diff .
+
+      - name: Import order (isort)
+        run: isort --check-only --diff .
+
+      - name: Type check (mypy)
+        run: mypy
 
       - name: Unit tests (pytest + coverage)
         run: python -m pytest -q --cov=metawrap2 --cov-report=term-missing
 
       - name: Byte-compile the metawrap2 package
         run: python -m compileall -q src/metawrap2
+
+      # Every module must be able to print its own help and plan a whole run without any
+      # external tool installed. This is what catches wiring mistakes (a bad command
+      # template, a missing argument) that unit tests cannot see.
+      - name: Smoke-test the CLI
+        run: |
+          metawrap2 --version
+          metawrap2 --help
+          for module in read_qc assembly kraken2 blobology binning bin_refinement \
+                        reassemble_bins quant_bins classify_bins annotate_bins; do
+            echo "--- $module --help"
+            metawrap2 "$module" --help > /dev/null
+          done
+          for util in quickstart check doctor install-env install-db history status calibrate \
+                      run test config completion; do
+            echo "--- $util --help"
+            metawrap2 "$util" --help > /dev/null || true
+          done
 
   no-legacy-scripts:
     name: No shell/perl/R scripts in repo

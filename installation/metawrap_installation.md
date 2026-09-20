@@ -11,12 +11,15 @@ git clone https://github.com/ursky/MetaWrap2.git
 cd MetaWrap2
 pip install -e .
 ```
-The core only needs `python>=3.8` and `biopython`. After this, the `metawrap2` command is available; run
+The core needs `python>=3.10` plus `biopython` and the plotting stack (`numpy`, `pandas`, `matplotlib`,
+`seaborn`) that MetaWrap2's bundled helper scripts use; `pip` installs these for you. Note that these
+helpers deliberately run in *this* interpreter, not inside the per-module conda envs, so install the core
+into an environment you are happy to keep around. After this, the `metawrap2` command is available; run
 `metawrap2 -h` to see the modules, or `metawrap2 -v` to print the version.
 
 ## 2. Create the per-module conda environment(s)
 Each module runs in its own conda environment named `metawrap2-<module>` (e.g. `metawrap2-binning`),
-built from the matching file in [`envs/`](../envs/). Create the environment(s) for the module(s) you plan
+built from the matching file in [`src/metawrap2/envs/`](../src/metawrap2/envs/). Create the environment(s) for the module(s) you plan
 to use with `metawrap2 install-env`:
 ```bash
 # one module:
@@ -29,25 +32,39 @@ metawrap2 install-env assembly binning bin_refinement
 metawrap2 install-env --all
 ```
 You only need the environments for the modules you actually run. (If you prefer, you can create an
-environment directly, e.g. `conda env create -f envs/binning.yaml`, or use `mamba` for a faster solver.)
+environment directly, e.g. `conda env create -f src/metawrap2/envs/binning.yaml`, or use `mamba` for a faster solver.)
 
 Some modules have optional, newer engines in their own opt-in environments
 (`metawrap2-bin_refinement-checkm2`, `metawrap2-classify_bins-gtdbtk`, `metawrap2-annotate_bins-bakta`).
 The default environments keep the original tools and behavior, so existing runs reproduce the same
-results. See [`envs/README.md`](../envs/README.md) for the full list of environments and the tools each
+results. See [`src/metawrap2/envs/README.md`](../src/metawrap2/envs/README.md) for the full list of environments and the tools each
 one holds.
 
-## 3. Configure databases
-Copy the example configuration and set your database paths:
+## 3. Install and configure databases
+`metawrap2 install-db` downloads each database, unpacks and indexes it, and writes the matching path into
+your config file for you:
 ```bash
-mkdir -p ~/.metawrap2
-cp metawrap2.toml.example ~/.metawrap2/config.toml
-# edit ~/.metawrap2/config.toml and point each database key at your download
+metawrap2 install-db --list                 # what's available, how big, which module needs it
+metawrap2 install-db checkm taxdump         # just these two
+metawrap2 install-db --all                  # everything (hundreds of GB, many hours)
+metawrap2 install-db --all --small          # capped-but-real variants: good for a test run
+```
+Databases are only needed for the modules that use them, so install just what you need. `--small` picks a
+genuinely smaller build where one exists (e.g. the capped 8 GB Kraken2 standard database instead of the
+full ~90 GB one) - ideal for verifying the pipeline works, not for a production analysis.
+
+This also runs the `checkm data setRoot` step for you, which is easy to forget and otherwise shows up much
+later as a confusing `bin_refinement` failure.
+
+To configure paths by hand instead, copy the example config and edit it:
+```bash
+metawrap2 config init          # writes a starter ~/.metawrap2/config.toml
+metawrap2 config show          # print the resolved settings and which paths are missing
 ```
 There is no more `config-metawrap` file - all configuration (thread defaults, whether to use the
-per-module conda envs, and database paths) lives in `metawrap2.toml`. Databases are only needed for the
-modules that use them. See the [database installation guide](database_installation.md) for how to
-download and configure each one. You can also pass a config explicitly with `--config /path/to/config.toml`.
+per-module conda envs, and database paths) lives in `metawrap2.toml`. See the
+[database installation guide](database_installation.md) for what each database is and how to build one
+manually. You can also pass a config explicitly with `--config /path/to/config.toml`.
 
 ## 4. Preflight check before running
 Before running a module, verify that its tools, conda environment, and any required databases are present:

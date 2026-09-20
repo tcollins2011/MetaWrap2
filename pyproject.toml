@@ -4,17 +4,42 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metawrap2"
-version = "2.0.0"
+version = "2.0.1"
 description = "MetaWrap2 - a flexible, Python-native pipeline for genome-resolved metagenomic data analysis"
 readme = "README.md"
-requires-python = ">=3.8"
-license = { text = "MIT" }
+requires-python = ">=3.10"
+license = "MIT"
 authors = [
     { name = "Gherman Uritskiy" },
+]
+keywords = ["metagenomics", "bioinformatics", "binning", "MAG", "assembly", "pipeline"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
     "biopython>=1.79",
     "tomli>=2.0; python_version < '3.11'",
+    # The bundled helper scripts (plot_binning_results, plot_reassembly, make_heatmap,
+    # blobology/makeblobplot) run in the host interpreter, so their plotting/table stack
+    # is a hard requirement, not an extra.
+    "numpy>=1.20",
+    "pandas>=1.3",
+    "matplotlib>=3.5",
+    "seaborn>=0.11",
+    # seaborn.clustermap (quant_bins heatmap) needs scipy for the hierarchical clustering
+    "scipy>=1.7",
+    # progress bars for MetaWrap2's own long loops (metawrap2.progress degrades
+    # gracefully if it is absent, but it is small and always wanted)
+    "tqdm>=4.60",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +47,9 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.1",
+    "black>=24.1",
+    "isort>=5.13",
+    "mypy>=1.8",
     "pre-commit>=3.0",
 ]
 docs = [
@@ -29,15 +57,96 @@ docs = [
     "mkdocs-material>=9.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ursky/MetaWrap2"
+Repository = "https://github.com/ursky/MetaWrap2"
+Changelog = "https://github.com/ursky/MetaWrap2/blob/main/CHANGELOG"
+Issues = "https://github.com/ursky/MetaWrap2/issues"
+
 [project.scripts]
 metawrap2 = "metawrap2.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# The environment specs and their lockfiles are shipped with the package, not just present in
+# a source checkout: `metawrap2 install-env` needs them, and it has to work from a plain
+# `pip install metawrap2` as well as from a clone.
+"metawrap2" = ["envs/*.yaml", "envs/locks/*.lock", "envs/README.md"]
+
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py310"
+# Vendored third-party code is kept as close to upstream as possible so it can be re-synced;
+# linting it only produces noise we would have to re-suppress after every update.
+extend-exclude = ["src/metawrap2/vendor"]
+
+[tool.ruff.lint]
+# MetaWrap2 uses printf-style formatting and typing.List/Optional throughout. Ruff's
+# "modernise" rules fight that on almost every line (they were ~560 of the ~570 findings),
+# which buried the handful of real ones. Silence the style-only rules rather than
+# half-converting the codebase; converting to `list`/`X | None` is a deliberate one-pass
+# change for later, now that the minimum Python is 3.10.
+ignore = [
+    "UP031",   # printf-style string formatting (house style)
+    "UP006",   # use `list` instead of `List` for annotations
+    "UP045",   # use `X | None` instead of `Optional[X]`
+    "UP008", "UP035",
+    "FA100",   # `from __future__ import annotations` - not needed at py3.10, and adding it
+               # to the plotting scripts would change nothing but the diff
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The bundled helper scripts are executable entry points run as `python -m ...`; their
+# module-level argv handling and sys.path setup is deliberate.
+"src/metawrap2/scripts/**" = ["E402", "EXE001", "EXE002"]
+"tests/**" = ["E402"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+# Vendored code is kept close to upstream so it can be re-synced; reformatting it would make
+# every future diff against upstream unreadable.
+extend-exclude = "src/metawrap2/vendor"
+
+[tool.isort]
+profile = "black"          # so isort and black agree about import formatting
+line_length = 100
+known_first_party = ["metawrap2"]
+extend_skip_glob = ["src/metawrap2/vendor/*"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/metawrap2"]
+exclude = "src/metawrap2/vendor"
+# Pragmatic settings for a codebase with untyped scientific dependencies: annotations are
+# checked where they exist and required on new code, but third-party libraries without stubs
+# (biopython, matplotlib, seaborn) do not have to be silenced one import at a time.
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# The ported helper scripts are procedural module-level scripts, not typed libraries: they run
+# top to bottom and reuse names like `data` and `max_x` for each successive plot. Annotating
+# those would mean restructuring working, verified plotting code to satisfy the checker, so
+# their functions are checked but their module-level bodies are not.
+module = "metawrap2.scripts.*"
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# The three plotting scripts are the extreme case of the above - straight-line matplotlib code
+# ported from metaWRAP, verified by running it rather than by typing it.
+module = [
+    "metawrap2.scripts.plot_binning_results",
+    "metawrap2.scripts.plot_reassembly",
+    "metawrap2.scripts.make_heatmap",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

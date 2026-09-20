@@ -1,5 +1,3 @@
-import os
-
 from metawrap2.commands import completion, config_cmd, doctor
 
 
@@ -24,12 +22,25 @@ def test_completion_scripts(capsys):
     assert "#compdef metawrap2" in capsys.readouterr().out
 
 
-def test_doctor_reports_missing_when_no_envs(capsys):
+def test_doctor_reports_missing_when_no_envs(capsys, monkeypatch):
+    # Force the "env absent" answer instead of depending on what is installed on the machine
+    # running the tests: otherwise this passes on a fresh checkout and fails as soon as the
+    # developer actually creates the envs (and probes real tools, making the suite slow).
+    monkeypatch.setattr(doctor, "conda_env_exists", lambda env: False)
     rc = doctor.main(["binning", "--tools-only"])
     out = capsys.readouterr().out
     assert "MetaWrap2 module status" in out
     assert "metawrap2-binning" in out and "MISSING" in out
-    assert rc == 1  # env not created here
+    assert rc == 1
+
+
+def test_doctor_reports_ok_when_env_and_tools_are_healthy(capsys, monkeypatch):
+    monkeypatch.setattr(doctor, "conda_env_exists", lambda env: True)
+    monkeypatch.setattr(doctor, "_probe_tool", lambda env, tool: (doctor.OK, "1.0"))
+    rc = doctor.main(["binning", "--tools-only"])
+    out = capsys.readouterr().out
+    assert "tools OK" in out
+    assert rc == 0
 
 
 def test_doctor_parse_and_broken_signature():

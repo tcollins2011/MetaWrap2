@@ -1,18 +1,34 @@
 # MetaWrap2 configuration. Copy to ~/.metawrap2/config.toml (or pass with --config).
+# `metawrap2 install-db` writes the [databases] paths here for you.
 # Anything you don't set falls back to the in-code defaults documented in each module.
 
 [settings]
-# Default thread count when a module isn't given -t.
-threads = 1
+# Default thread count when a module isn't given -t. Modules use this instead of silently
+# running single-threaded, so it is worth setting to something sensible for your machine.
+threads = 8
 # Set false to run tools directly off your PATH instead of per-module conda envs.
 use_conda_envs = true
 
 [databases]
-# Point these at your own downloaded databases.
+# Point these at your own databases, or let `metawrap2 install-db` fill them in.
+# kraken2 module:
 KRAKEN2_DB = "/path/to/my/kraken2_database"
+# read_qc host removal (the directory holding <host>.bitmask and <host>.srprism*):
 BMTAGGER_DB = "/path/to/my/bmtagger_database"
+# blobology and classify_bins:
 BLASTDB = "/path/to/my/NCBI_nt"
+# The database's name inside BLASTDB. Only needed if it is not called "nt" (e.g. "core_nt").
+# BLASTDB_NAME = "nt"
 TAXDUMP = "/path/to/my/NCBI_tax"
+# CheckM1 reference data, used by bin_refinement / reassemble_bins / binning --run-checkm.
+# CheckM stores this path itself; `metawrap2 install-db checkm` runs `checkm data setRoot`.
+# CHECKM_DB = "/path/to/my/checkm_data"
+
+# Only needed for the opt-in modern tools:
+# annotate_bins --bakta
+# BAKTA_DB = "/path/to/my/bakta_db"
+# classify_bins --gtdbtk
+# GTDBTK_DATA_PATH = "/path/to/my/gtdb_release"
 
 # Optional: override any surfaced module constant without editing the source.
 # [modules.binning]

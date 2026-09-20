@@ -4,15 +4,32 @@ from metawrap2.scripts import prune_blast_hits
 
 
 def test_command_templates_format_cleanly():
-    b = classify_bins.BLASTN.format(threads=8, blastdb="/db", query="q.fa")
+    # blastdb is now the full -db argument (directory + database name), so a database that
+    # is not called "nt" works too.
+    b = classify_bins.BLASTN.format(threads=8, blastdb="/db/nt", query="q.fa")
     assert "{" not in b and "-num_threads 8" in b and "-db /db/nt" in b and "-query q.fa" in b
-    t = classify_bins.TAXATOR.format(taxdump="/tax", taxator_t=0.3, taxator_e=0.01,
-                                     mapping="m.tax", input="in.tab", output="out.gff3")
+    b = classify_bins.BLASTN.format(threads=1, blastdb="/db/core_nt", query="q.fa")
+    assert "-db /db/core_nt" in b
+    t = classify_bins.TAXATOR.format(
+        taxdump="/tax",
+        taxator_t=0.3,
+        taxator_e=0.01,
+        mapping="m.tax",
+        input="in.tab",
+        output="out.gff3",
+    )
     assert "{" not in t and "TAXATORTK_TAXONOMY_NCBI=/tax" in t and "< in.tab > out.gff3" in t
-    bn = classify_bins.BINNER.format(predictions="p.gff3", genus_cutoff=0.6, output="b.txt")
+    # binner and taxknife are taxator-tk tools too, so they also need the taxonomy env var -
+    # without it binner aborts with "Specify the folder containing the NCBI taxonomy dump
+    # files as TAXATORTK_TAXONOMY_NCBI environment variable".
+    bn = classify_bins.BINNER.format(
+        taxdump="/tax", predictions="p.gff3", genus_cutoff=0.6, output="b.txt"
+    )
     assert "{" not in bn and "genus:0.6" in bn
-    tk = classify_bins.TAXKNIFE.format(binned="b.txt", output="c.tab")
+    assert "TAXATORTK_TAXONOMY_NCBI=/tax" in bn
+    tk = classify_bins.TAXKNIFE.format(taxdump="/tax", binned="b.txt", output="c.tab")
     assert "{" not in tk and "grep -v 'Could not'" in tk
+    assert "TAXATORTK_TAXONOMY_NCBI=/tax" in tk
 
 
 def _raw_line(qseqid, staxids):
@@ -40,8 +57,19 @@ def test_cut_and_mapping_columns(tmp_path):
     mapping = tmp_path / "map.tax"
     classify_bins._write_pruned_columns(str(pruned), str(tab))
     classify_bins._write_mapping(str(pruned), str(mapping))
-    assert tab.read_text().strip().split("\t") == \
-        ["c1", "1", "100", "500", "s1", "10", "110", "200", "0.001", "95", "100"]
+    assert tab.read_text().strip().split("\t") == [
+        "c1",
+        "1",
+        "100",
+        "500",
+        "s1",
+        "10",
+        "110",
+        "200",
+        "0.001",
+        "95",
+        "100",
+    ]
     assert mapping.read_text().strip() == "s1\t562"
 
 
