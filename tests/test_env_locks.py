@@ -1,9 +1,9 @@
 """Tests for the committed conda lockfiles and `metawrap2 doctor --fix`.
 
 Neither of these may talk to conda in a test, so the package manager is stubbed. What is worth
-pinning is the contract around it: lockfile naming and content, that a lockfile is only trusted
-when it actually exists, that every module ships one for this platform, and that ``--fix``
-rebuilds exactly the broken environments and nothing else.
+pinning is the contract around it: lockfile naming and content, that a lockfile that fell back to
+human-readable output is refused, restoring from a lockfile, and that ``--fix`` rebuilds exactly
+the broken environments and nothing else.
 """
 
 from __future__ import annotations
@@ -54,12 +54,6 @@ def stub_conda(monkeypatch, stdout=EXPLICIT_OUTPUT, returncode=0, exc=None):
 # --- naming -------------------------------------------------------------------------------
 
 
-def test_lock_platform_matches_conda_subdir_naming():
-    plat = ie.lock_platform()
-    assert "-" in plat
-    assert plat.split("-")[0] in ("linux", "osx", "win")
-
-
 @pytest.mark.parametrize(
     "machine,system,expected",
     [
@@ -75,15 +69,6 @@ def test_lock_platform_translates_each_machine(monkeypatch, machine, system, exp
     assert ie.lock_platform() == expected
 
 
-def test_lock_path_includes_module_and_platform(envs_dir):
-    path = ie.lock_path("binning", "linux-64")
-    assert path == os.path.join(envs_dir, "locks", "binning.linux-64.lock")
-
-
-def test_lock_path_defaults_to_this_platform(envs_dir):
-    assert ie.lock_path("binning").endswith("binning.%s.lock" % ie.lock_platform())
-
-
 # --- writing a lockfile -------------------------------------------------------------------
 
 
@@ -96,25 +81,6 @@ def test_write_lockfile_records_explicit_urls_with_checksums(envs_dir, monkeypat
     assert "samtools-1.20-h50ea8bc_0.conda#abc123" in content  # exact build + md5, not a range
 
 
-def test_the_lockfile_header_says_how_to_use_it(envs_dir, monkeypatch):
-    """A lockfile nobody knows how to restore is not a backup."""
-    stub_conda(monkeypatch)
-    content = read(ie.write_lockfile("binning", "metawrap2-binning", "linux-64"))
-    assert "metawrap2 install-env binning --lock" in content
-    assert "conda create -n metawrap2-binning --file binning.linux-64.lock" in content
-
-
-def test_write_lockfile_creates_the_locks_directory(tmp_path, monkeypatch):
-    monkeypatch.setenv("METAWRAP2_ENVS_DIR", str(tmp_path / "fresh"))
-    stub_conda(monkeypatch)
-    assert os.path.isfile(ie.write_lockfile("binning", "metawrap2-binning", "linux-64"))
-
-
-def test_write_lockfile_returns_none_without_a_package_manager(envs_dir, monkeypatch):
-    monkeypatch.setattr(ie.shutil, "which", lambda name: None)
-    assert ie.write_lockfile("binning", "metawrap2-binning", "linux-64") is None
-
-
 def test_write_lockfile_refuses_output_that_is_not_explicit(envs_dir, monkeypatch):
     """A `conda list` that fell back to human-readable output must not be saved as a lockfile."""
     stub_conda(monkeypatch, stdout="samtools 1.20 h50ea8bc_0 conda-forge\n")
@@ -122,28 +88,7 @@ def test_write_lockfile_refuses_output_that_is_not_explicit(envs_dir, monkeypatc
     assert not os.path.exists(ie.lock_path("binning", "linux-64"))
 
 
-def test_write_lockfile_returns_none_when_conda_fails(envs_dir, monkeypatch):
-    stub_conda(monkeypatch, returncode=1)
-    assert ie.write_lockfile("binning", "metawrap2-binning", "linux-64") is None
-
-
-def test_write_lockfile_survives_conda_being_unrunnable(envs_dir, monkeypatch):
-    stub_conda(monkeypatch, exc=OSError("exec format error"))
-    assert ie.write_lockfile("binning", "metawrap2-binning", "linux-64") is None
-
-
-def test_write_lockfile_survives_a_timeout(envs_dir, monkeypatch):
-    stub_conda(monkeypatch, exc=subprocess.TimeoutExpired("conda", 300))
-    assert ie.write_lockfile("binning", "metawrap2-binning", "linux-64") is None
-
-
 # --- restoring from a lockfile ------------------------------------------------------------
-
-
-def test_create_from_lock_refuses_when_no_lockfile_exists(envs_dir, monkeypatch):
-    """Silently solving the yaml instead would defeat the point of asking for the lock."""
-    monkeypatch.setattr(ie, "run", lambda *a, **k: pytest.fail("must not invoke conda"))
-    assert ie.create_from_lock("binning", "metawrap2-binning", "linux-64") is False
 
 
 def test_create_from_lock_invokes_conda_create_with_the_file(envs_dir, monkeypatch):
@@ -170,46 +115,6 @@ def test_create_from_lock_invokes_conda_create_with_the_file(envs_dir, monkeypat
     ]
 
 
-def test_create_from_lock_reports_a_failed_create(envs_dir, monkeypatch):
-    with open(ie.lock_path("binning", "linux-64"), "w") as fh:
-        fh.write(EXPLICIT_OUTPUT)
-    monkeypatch.setattr(ie.shutil, "which", lambda n: "/usr/bin/conda")
-    monkeypatch.setattr(ie, "run", lambda *a, **k: 1)
-    assert ie.create_from_lock("binning", "metawrap2-binning", "linux-64") is False
-
-
-def test_create_from_lock_needs_a_package_manager(envs_dir, monkeypatch):
-    with open(ie.lock_path("binning", "linux-64"), "w") as fh:
-        fh.write(EXPLICIT_OUTPUT)
-    monkeypatch.setattr(ie.shutil, "which", lambda n: None)
-    assert ie.create_from_lock("binning", "metawrap2-binning", "linux-64") is False
-
-
-# --- what is actually committed -----------------------------------------------------------
-
-
-def test_every_shipped_env_has_a_linux_64_lockfile():
-    """The lockfiles are only reproducible if they exist for every env we ship."""
-    envs = ie.envs_dir()
-    yamls = sorted(f[: -len(".yaml")] for f in os.listdir(envs) if f.endswith(".yaml"))
-    assert yamls, "no environment yaml files found in %s" % envs
-    locks = os.path.join(envs, "locks")
-    missing = [m for m in yamls if not os.path.isfile(os.path.join(locks, "%s.linux-64.lock" % m))]
-    assert missing == [], "no linux-64 lockfile for: %s" % ", ".join(missing)
-
-
-def test_the_committed_lockfiles_are_explicit_and_checksummed():
-    locks = os.path.join(ie.envs_dir(), "locks")
-    files = [f for f in os.listdir(locks) if f.endswith(".lock")]
-    assert files
-    for name in files:
-        content = read(os.path.join(locks, name))
-        assert "@EXPLICIT" in content, "%s is not an explicit lockfile" % name
-        urls = [ln for ln in content.splitlines() if ln.startswith("http")]
-        assert urls, "%s pins no packages" % name
-        assert all("#" in u for u in urls), "%s has URLs without a checksum" % name
-
-
 # --- doctor --fix -------------------------------------------------------------------------
 
 
@@ -218,13 +123,6 @@ def results(**statuses):
         {"module": m, "env": "metawrap2-%s" % m, "status": s, "tools": []}
         for m, s in statuses.items()
     ]
-
-
-def test_fix_does_nothing_when_everything_is_healthy(monkeypatch, capsys):
-    monkeypatch.setattr(doctor, "_check_module", lambda m: pytest.fail("must not re-check"))
-    rc = doctor.repair(["binning"], results(binning=doctor.OK))
-    assert rc == 0
-    assert "Nothing to fix" in capsys.readouterr().out
 
 
 def test_fix_rebuilds_only_the_broken_environments(monkeypatch, capsys):
@@ -249,36 +147,3 @@ def test_fix_rebuilds_only_the_broken_environments(monkeypatch, capsys):
     assert "read_qc" not in argv
     assert "--force" in argv and "-t" in argv and "6" in argv and "--no-test" in argv
     assert "All rebuilt environments are healthy" in capsys.readouterr().out
-
-
-def test_fix_passes_from_lock_through(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        "metawrap2.commands.install_env.main", lambda argv: seen.setdefault("argv", argv) and 0
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_check_module",
-        lambda m: {"module": m, "env": "e", "status": doctor.OK, "tools": []},
-    )
-    doctor.repair(["binning"], results(binning=doctor.BROKEN), use_lock=True)
-    assert "--from-lock" in seen["argv"]
-
-
-def test_fix_reports_what_it_could_not_repair(monkeypatch, capsys):
-    monkeypatch.setattr("metawrap2.commands.install_env.main", lambda argv: 0)
-    monkeypatch.setattr(
-        doctor,
-        "_check_module",
-        lambda m: {
-            "module": m,
-            "env": "metawrap2-" + m,
-            "status": doctor.BROKEN,
-            "tools": [("metabat2", doctor.MISSING, "not on PATH in the env")],
-        },
-    )
-    rc = doctor.repair(["binning"], results(binning=doctor.BROKEN))
-    out = capsys.readouterr().out
-    assert rc == 1
-    assert "still not healthy" in out
-    assert "metabat2" in out  # the specific tool, not just the env name

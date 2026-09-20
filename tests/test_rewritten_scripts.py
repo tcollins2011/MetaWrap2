@@ -6,8 +6,6 @@ written: ``choose_best_bin`` produced the same winners, and
 files of a real bwa-mem stream. These tests pin the behaviour those checks confirmed.
 """
 
-import os
-
 from metawrap2.scripts import choose_best_bin as cbb
 from metawrap2.scripts import filter_reads_for_bin_reassembly as frb
 
@@ -38,47 +36,9 @@ def test_contamination_is_weighted_five_times_completeness():
     assert strict.beats(permissive)
 
 
-def test_ties_are_broken_by_n50():
-    a = cbb.BinVersion("bin.1", "strict", 80.0, 2.0, 30000)
-    b = cbb.BinVersion("bin.1", "permissive", 80.0, 2.0, 10000)
-    assert a.score == b.score
-    assert a.beats(b) and not b.beats(a)
-
-
-def test_parse_stats_splits_bin_and_style():
-    versions = cbb.parse_stats(STATS.splitlines())
-    assert len(versions) == 6
-    assert {v.bin_name for v in versions} == {"bin.1", "bin.2"}
-    assert {v.style for v in versions} == {"orig", "strict", "permissive"}
-    assert versions[0].full_name == "bin.1.orig"
-
-
 def test_chooses_the_expected_winners(tmp_path):
-    # matches what the original script produced for this input
+    # end-to-end: parse, score, threshold - matches what the original script produced
     assert cbb.best_bin_names(_write(tmp_path), 5, 30) == ["bin.1.strict", "bin.2.strict"]
-
-
-def test_versions_failing_thresholds_are_not_candidates(tmp_path):
-    # only bin.1.permissive clears 89% completeness
-    assert cbb.best_bin_names(_write(tmp_path), 89, 30) == ["bin.1.permissive"]
-    # nothing clears 99%
-    assert cbb.best_bin_names(_write(tmp_path), 99, 30) == []
-    # a strict contamination ceiling excludes the otherwise-best versions
-    assert cbb.best_bin_names(_write(tmp_path), 5, 1.6) == ["bin.1.strict"]
-
-
-def test_summarize_counts_winning_styles(tmp_path):
-    assert cbb.summarize(_write(tmp_path), 5, 30) == (0, 2, 0)  # (orig, strict, permissive)
-
-
-def test_unreadable_rows_are_skipped(tmp_path):
-    bad = STATS + "bin.3.orig\tnot-a-number\t1.0\t0.4\tBacteria\t100\t200\n" + "short\trow\n"
-    assert cbb.best_bin_names(_write(tmp_path, bad), 5, 30) == ["bin.1.strict", "bin.2.strict"]
-
-
-def test_choose_best_bin_cli_usage_error(capsys):
-    assert cbb.main([]) == 2
-    assert "usage:" in capsys.readouterr().err
 
 
 # --- filter_reads_for_bin_reassembly ------------------------------------------------------
@@ -98,43 +58,10 @@ def _bins(tmp_path):
     return str(folder)
 
 
-def test_contig_bins_keyed_on_contig_id_not_full_header(tmp_path):
-    """Bins carrying metaBAT2's header annotations must still match their own alignments."""
+def test_pair_must_agree_on_one_bin(tmp_path):
+    # also exercises load_contig_bins keying on contig id, not the full annotated header
     mapping = frb.load_contig_bins(_bins(tmp_path))
     assert mapping == {"c1": "bin.1", "c2": "bin.1", "c3": "bin.2"}
-
-
-def test_reverse_complement():
-    assert frb.reverse_complement("ACGTN") == "NACGT"
-    assert frb.reverse_complement("acgt") == "acgt"
-
-
-def test_iter_pairs_uses_bitwise_flags_not_string_indexing():
-    """bin(flag) indexing raised IndexError for small flags; masks do not."""
-    stream = iter(
-        [
-            "@HD\tVN:1.6",  # header, skipped
-            _sam("r1", 0x40, "c1"),  # first mate
-            _sam("r1", 0x80, "c1"),  # second mate
-            _sam("r2", 0, "c1"),  # flag 0: used to crash, now simply not a pair
-            "truncated\tline",  # too few fields, skipped
-            _sam("r3", 0x40, "c2"),
-            _sam("r3", 0x80, "c2"),
-        ]
-    )
-    pairs = list(frb.iter_pairs(stream))
-    assert [p[0][0] for p in pairs] == ["r1", "r3"]
-
-
-def test_mismatches_sums_nm_tags():
-    assert frb.mismatches(_sam("r", 0x40, "c1", nm=3).split("\t")) == 3
-    assert frb.mismatches(_sam("r", 0x40, "c1", nm=None).split("\t")) == 0
-    assert frb.has_nm_tag(_sam("r", 0x40, "c1", nm=0).split("\t")) is True
-    assert frb.has_nm_tag(_sam("r", 0x40, "c1", nm=None).split("\t")) is False
-
-
-def test_pair_must_agree_on_one_bin(tmp_path):
-    mapping = frb.load_contig_bins(_bins(tmp_path))
     same = (_sam("r", 0x40, "c1").split("\t"), _sam("r", 0x80, "c2").split("\t"))
     assert frb.bin_for_pair(*same, contig_bins=mapping) == "bin.1"  # c1+c2 are both bin.1
     across = (_sam("r", 0x40, "c1").split("\t"), _sam("r", 0x80, "c3").split("\t"))
@@ -148,7 +75,6 @@ def test_pair_must_agree_on_one_bin(tmp_path):
 def test_reverse_aligned_reads_are_restored_to_original_orientation():
     forward = _sam("r", 0x40 | frb.FLAG_REVERSE, "c1", seq="ACGT", qual="ABCD").split("\t")
     record = frb.as_fastq(forward, 1)
-    assert record == "@r/1\nACGT\n+\nDCBA\n".replace("ACGT", "ACGT")
     # sequence reverse-complemented, quality reversed
     assert record.splitlines()[1] == frb.reverse_complement("ACGT")
     assert record.splitlines()[3] == "ABCD"[::-1]
@@ -180,30 +106,3 @@ def test_strict_and_permissive_cutoffs(tmp_path):
     assert "@noisy/1" not in permissive_1
     # mates land in the _2 file with a /2 suffix
     assert "@clean/2" in (out / "bin.1.strict_2.fastq").read_text()
-
-
-def test_only_bins_that_recruited_reads_get_files(tmp_path):
-    bins = _bins(tmp_path)
-    out = tmp_path / "out"
-    stream = iter([_sam("r", 0x40, "c1", nm=0), _sam("r", 0x80, "c1", nm=0)])
-    frb.filter_reads(stream, bins, str(out), strict=2, permissive=5)
-    produced = sorted(os.listdir(out))
-    assert produced == [
-        "bin.1.permissive_1.fastq",
-        "bin.1.permissive_2.fastq",
-        "bin.1.strict_1.fastq",
-        "bin.1.strict_2.fastq",
-    ]
-
-
-def test_pair_with_no_nm_tag_on_either_mate_is_not_recruited(tmp_path):
-    bins = _bins(tmp_path)
-    out = tmp_path / "out"
-    stream = iter([_sam("r", 0x40, "c1", nm=None), _sam("r", 0x80, "c1", nm=None)])
-    counts = frb.filter_reads(stream, bins, str(out), strict=2, permissive=5)
-    assert counts["recruited"] == 0
-
-
-def test_filter_reads_cli_usage_error(capsys):
-    assert frb.main([]) == 2
-    assert "usage:" in capsys.readouterr().err

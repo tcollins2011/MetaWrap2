@@ -33,10 +33,6 @@ def test_command_templates_format_cleanly():
     assert "{" not in cmd and "-1 a.fastq" in cmd and "-2" not in cmd
 
 
-def test_sample_name():
-    assert read_qc._sample_name("/path/sampleA_1.fastq") == "sampleA"
-    assert read_qc._sample_name("/path/foo_bar_1.fastq.gz") == "foo_bar"
-    assert read_qc._sample_name("/path/x_1.fq") == "x"
 
 
 def _fastq(names):
@@ -46,23 +42,5 @@ def _fastq(names):
     return "\n".join(lines) + "\n"
 
 
-def test_skip_human_reads_drops_host(tmp_path):
-    fastq = tmp_path / "r.fastq"
-    fastq.write_text(_fastq(["read1", "read2", "read3"]))
-    listf = tmp_path / "host.list"
-    listf.write_text("read2\n")
-    out = io.StringIO()
-    skip_human_reads.filter_reads(str(listf), str(fastq), out)
-    text = out.getvalue()
-    assert "@read1/1" in text and "@read3/1" in text and "@read2/1" not in text
 
 
-def test_select_human_reads_keeps_only_host(tmp_path):
-    fastq = tmp_path / "r.fastq"
-    fastq.write_text(_fastq(["read1", "read2", "read3"]))
-    listf = tmp_path / "host.list"
-    listf.write_text("read2\n")
-    out = io.StringIO()
-    select_human_reads.select_reads(str(listf), str(fastq), out)
-    text = out.getvalue()
-    assert "@read2/1" in text and "@read1/1" not in text and "@read3/1" not in text

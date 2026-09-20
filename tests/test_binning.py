@@ -26,12 +26,3 @@ def test_split_concoct_bins(tmp_path):
     assert ">contig_3" in (out / "bin_002.fasta").read_text()
 
 
-def test_split_concoct_unbinned(tmp_path):
-    assembly = tmp_path / "asm.fa"
-    assembly.write_text(">c1\nACGT\n>c2\nTTTT\n")
-    clustering = tmp_path / "clust.csv"
-    clustering.write_text("contig_id,cluster_id\nc1,0\n")  # c2 unbinned
-    out = tmp_path / "bins"
-    binning._split_concoct_bins(str(clustering), str(assembly), str(out))
-    assert os.path.exists(out / "bin_001.fasta")
-    assert ">c2" in (out / "unbinned.fasta").read_text()

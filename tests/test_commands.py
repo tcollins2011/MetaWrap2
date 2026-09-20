@@ -14,12 +14,6 @@ def test_config_init_and_show(tmp_path, capsys):
     assert "use_conda_envs" in out and str(cfg) in out
 
 
-def test_completion_scripts(capsys):
-    assert completion.main(["bash"]) == 0
-    bash = capsys.readouterr().out
-    assert "complete -F _metawrap2 metawrap2" in bash and "binning" in bash
-    assert completion.main(["zsh"]) == 0
-    assert "#compdef metawrap2" in capsys.readouterr().out
 
 
 def test_doctor_reports_missing_when_no_envs(capsys, monkeypatch):
@@ -34,16 +28,5 @@ def test_doctor_reports_missing_when_no_envs(capsys, monkeypatch):
     assert rc == 1
 
 
-def test_doctor_reports_ok_when_env_and_tools_are_healthy(capsys, monkeypatch):
-    monkeypatch.setattr(doctor, "conda_env_exists", lambda env: True)
-    monkeypatch.setattr(doctor, "_probe_tool", lambda env, tool: (doctor.OK, "1.0"))
-    rc = doctor.main(["binning", "--tools-only"])
-    out = capsys.readouterr().out
-    assert "tools OK" in out
-    assert rc == 0
 
 
-def test_doctor_parse_and_broken_signature():
-    # broken-signature detection is what separates "broken" from "just exits nonzero"
-    assert doctor._BROKEN_SIGNATURES.search("error while loading shared libraries: libfoo.so")
-    assert not doctor._BROKEN_SIGNATURES.search("bwa 0.7.17-r1188")

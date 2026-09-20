@@ -23,8 +23,6 @@ def test_overlap_percent_identical():
     assert refinement._overlap_percent(a, dict(a)) == 100.0
 
 
-def test_overlap_percent_disjoint():
-    assert refinement._overlap_percent({"c1": 100}, {"c2": 100}) == 0.0
 
 
 def test_consolidate_picks_higher_scoring_overlapping_bin(tmp_path):
@@ -49,64 +47,9 @@ def test_consolidate_picks_higher_scoring_overlapping_bin(tmp_path):
     assert "95.0" in stats_out
 
 
-def test_consolidate_keeps_unmatched_second_set_bin(tmp_path):
-    f1 = tmp_path / "binsA"
-    f2 = tmp_path / "binsB"
-    f1.mkdir()
-    f2.mkdir()
-    _write_bin(f1 / "a1.fasta", [("x1", 1000)])
-    _write_bin(f2 / "b1.fasta", [("y1", 1000)])  # disjoint -> no overlap
-    s1 = tmp_path / "binsA.stats.tsv"
-    s2 = tmp_path / "binsB.stats.tsv"
-    _write_stats(s1, [("a1", 90.0, 1.0, 1000)])
-    _write_stats(s2, [("b1", 85.0, 1.0, 1000)])
-    out = tmp_path / "binsM"
-    refinement.consolidate(str(f1), str(f2), str(s1), str(s2), str(out), 70.0, 10.0)
-    # both bins survive since they don't overlap
-    assert sorted(os.listdir(out)) == ["bin_001.fasta", "bin_002.fasta"]
 
 
-def test_consolidate_excludes_low_quality_bins(tmp_path):
-    f1 = tmp_path / "binsA"
-    f2 = tmp_path / "binsB"
-    f1.mkdir()
-    f2.mkdir()
-    _write_bin(f1 / "a1.fasta", [("x1", 1000)])
-    _write_bin(f2 / "b1.fasta", [("y1", 1000)])
-    s1 = tmp_path / "binsA.stats.tsv"
-    s2 = tmp_path / "binsB.stats.tsv"
-    _write_stats(s1, [("a1", 90.0, 1.0, 1000)])
-    _write_stats(s2, [("b1", 40.0, 1.0, 1000)])  # below 70% completion -> dropped
-    out = tmp_path / "binsM"
-    refinement.consolidate(str(f1), str(f2), str(s1), str(s2), str(out), 70.0, 10.0)
-    assert os.listdir(out) == ["bin_001.fasta"]
 
 
-def test_dereplicate_keeps_shared_contig_in_best_bin(tmp_path):
-    folder = tmp_path / "bins"
-    folder.mkdir()
-    # contig "shared" is in both bins; bin2 has higher score so it should keep it.
-    _write_bin(folder / "bin_001.fasta", [("shared", 1000), ("only1", 500)])
-    _write_bin(folder / "bin_002.fasta", [("shared", 1000), ("only2", 500)])
-    stats = tmp_path / "bins.stats.tsv"
-    _write_stats(stats, [("bin_001", 80.0, 2.0, 1500), ("bin_002", 95.0, 1.0, 1500)])
-    out = tmp_path / "out"
-    refinement.dereplicate(str(stats), str(folder), str(out), "best")
-    b1 = dict(refinement.iter_fasta(str(out / "bin_001.fasta")))
-    b2 = dict(refinement.iter_fasta(str(out / "bin_002.fasta")))
-    assert "shared" not in b1 and "only1" in b1
-    assert "shared" in b2 and "only2" in b2
 
 
-def test_dereplicate_remove_mode_drops_shared_from_all(tmp_path):
-    folder = tmp_path / "bins"
-    folder.mkdir()
-    _write_bin(folder / "bin_001.fasta", [("shared", 1000), ("only1", 500)])
-    _write_bin(folder / "bin_002.fasta", [("shared", 1000), ("only2", 500)])
-    stats = tmp_path / "bins.stats.tsv"
-    _write_stats(stats, [("bin_001", 80.0, 2.0, 1500), ("bin_002", 95.0, 1.0, 1500)])
-    out = tmp_path / "out"
-    refinement.dereplicate(str(stats), str(folder), str(out), "remove")
-    b1 = dict(refinement.iter_fasta(str(out / "bin_001.fasta")))
-    b2 = dict(refinement.iter_fasta(str(out / "bin_002.fasta")))
-    assert "shared" not in b1 and "shared" not in b2

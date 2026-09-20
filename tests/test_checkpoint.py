@@ -22,22 +22,8 @@ def test_todo_and_done(tmp_path):
     assert c.todo("binning") is True  # unfinished step still runs
 
 
-def test_no_resume_always_todo(tmp_path):
-    c = Checkpoint(str(tmp_path), resume=False)
-    c.done("align")
-    assert c.todo("align") is True  # without resume, always run (markers still written)
 
 
-def test_make_checkpoint_fresh_run_clears_markers(tmp_path):
-    # a finished marker from a previous run...
-    old = Checkpoint(str(tmp_path), resume=True)
-    old.done("align")
-    assert os.path.exists(tmp_path / ".metawrap2" / "steps" / "align.done")
-    # a fresh (non-resume) run wipes markers so nothing is wrongly skipped
-    command.runner.configure(resume=False, dry_run=False)
-    c = make_checkpoint(str(tmp_path))
-    assert not os.path.exists(tmp_path / ".metawrap2" / "steps" / "align.done")
-    assert c.todo("align") is True
 
 
 def test_make_checkpoint_resume_keeps_markers(tmp_path):

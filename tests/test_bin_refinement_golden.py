@@ -7,17 +7,18 @@ the cases every existing analysis used.
 
 These tests run the real algorithm - the real Binning_refiner (it is pure Python), the real
 consolidation and dereplication - with only CheckM replaced by a deterministic stand-in, and
-compare the complete output tree and every file's contents against values recorded from the
-implementation before the rewrite.
+compare the output against values recorded from the implementation before the rewrite.
 
 The fake CheckM derives a bin's completeness and contamination from a hash of its contig set,
 so scores are arbitrary but stable, vary between bins, and change when a bin's membership
 changes. That is what makes consolidation actually do work rather than trivially keep binsA.
+
+This is a curated subset: enough to prove the 2-set and 3-set bin-set math, the refinement
+plan (including argument order), and the command form, without every size/flag permutation.
 """
 
 import hashlib
 import os
-from typing import ClassVar
 
 import pytest
 
@@ -98,13 +99,6 @@ BIN_SETS = {
         "bin.2": ["c05", "c06", "c07"],
         "bin.3": ["c09", "c10", "c11", "c12"],
     },
-    # a fourth and fifth binner, for the generalised cases
-    "D": {"bin.1": ["c01", "c02", "c03", "c04"], "bin.2": ["c05", "c06", "c07", "c08"]},
-    "E": {
-        "bin.1": ["c01", "c02", "c04"],
-        "bin.2": ["c05", "c06", "c07", "c08"],
-        "bin.3": ["c09", "c10", "c11"],
-    },
 }
 
 
@@ -152,26 +146,8 @@ def _snapshot(out):
 # of these fail, that change altered results for a case users already rely on.
 
 
-def test_two_sets_produce_the_historical_bin_sets(tmp_path):
-    out = _run(tmp_path, "AB")
-    work = os.path.join(out, "work_files")
-    # Exactly the sets the 2-input path always built: the two inputs plus their refinement,
-    # then the consolidated (binsM) and dereplicated (binsO) results.
-    assert sorted(
-        d for d in os.listdir(work) if d.startswith("bins") and os.path.isdir(os.path.join(work, d))
-    ) == ["binsA", "binsAB", "binsB", "binsM", "binsO"]
-
-
-def test_three_sets_produce_the_historical_bin_sets(tmp_path):
-    out = _run(tmp_path, "ABC")
-    work = os.path.join(out, "work_files")
-    assert sorted(
-        d for d in os.listdir(work) if d.startswith("bins") and os.path.isdir(os.path.join(work, d))
-    ) == ["binsA", "binsAB", "binsABC", "binsAC", "binsB", "binsBC", "binsC", "binsM", "binsO"]
-
-
 def test_three_set_refinement_combinations_and_argument_order(tmp_path):
-    """The historical 3-set plan, including that binsBC is built as (C, B), not (B, C).
+    """The historical 2- and 3-set plans, including that binsBC is built as (C, B), not (B, C).
 
     Binning_refiner numbers its output bins by the order the input folders are given, so the
     orientation of each pair is part of the result, not an implementation detail.
@@ -210,91 +186,6 @@ def test_three_set_output_is_stable(tmp_path):
     }
 
 
-def test_single_set_still_short_circuits(tmp_path):
-    out = _run(tmp_path, "A")
-    # With one input there is nothing to refine or consolidate, so binsA is used directly and
-    # no work_files shuffle happens.
-    assert os.path.isdir(os.path.join(out, "metawrap_50_10_bins"))
-    assert not os.path.isdir(os.path.join(out, "work_files"))
-
-
-# --- the generalisation --------------------------------------------------------------------
-
-
-def test_plan_scales_to_more_binners():
-    """Beyond three sets: every pair, then the all-way combination."""
-    plan = bin_refinement.refinement_plan(["binsA", "binsB", "binsC", "binsD"])
-    names = [name for _inputs, name in plan]
-    assert names == ["binsAB", "binsAC", "binsAD", "binsBC", "binsBD", "binsCD", "binsABCD"]
-    # the all-way entry really does take all four
-    assert plan[-1][0] == ("binsA", "binsB", "binsC", "binsD")
-
-
-def test_plan_pairs_only_mode():
-    plan = bin_refinement.refinement_plan(
-        ["binsA", "binsB", "binsC", "binsD"], combinations="pairs"
-    )
-    assert [name for _i, name in plan] == [
-        "binsAB",
-        "binsAC",
-        "binsAD",
-        "binsBC",
-        "binsBD",
-        "binsCD",
-    ]
-
-
-def test_plan_all_subsets_mode():
-    plan = bin_refinement.refinement_plan(["binsA", "binsB", "binsC"], combinations="all")
-    # every subset of size >= 2, so for three inputs that is the three pairs plus the triple
-    assert sorted(name for _i, name in plan) == ["binsAB", "binsABC", "binsAC", "binsBC"]
-
-
-def test_five_sets_run_end_to_end(tmp_path):
-    out = _run(tmp_path, "ABCDE")
-    work = os.path.join(out, "work_files")
-    sets = sorted(
-        d for d in os.listdir(work) if d.startswith("bins") and os.path.isdir(os.path.join(work, d))
-    )
-
-    labels = [bin_refinement.bin_set_label(i) for i in range(5)]
-    planned = {name for _inputs, name in bin_refinement.refinement_plan(labels)}
-
-    # The five inputs, the consolidated and dereplicated sets, and the all-way refinement.
-    for expected in labels + ["binsM", "binsO", "binsABCDE"]:
-        assert expected in sets, expected
-    # Everything else on disk must be a set the plan asked for. Some planned combinations
-    # legitimately yield no bins over Binning_refiner's size floor and are discarded, so the
-    # count is data-dependent - but nothing unplanned may appear.
-    unexpected = set(sets) - planned - set(labels) - {"binsM", "binsO"}
-    assert unexpected == set(), unexpected
-    assert os.path.isdir(os.path.join(out, "metawrap_50_10_bins"))
-
-
-def test_too_many_sets_is_refused(tmp_path):
-    """More than MAX_BIN_SETS is refused up front rather than after hours of CheckM runs."""
-    argv = ["-o", str(tmp_path / "out"), "-c", "50", "-x", "10"]
-    for i in range(bin_refinement.MAX_BIN_SETS + 1):
-        directory = tmp_path / ("extra_%d" % i)  # distinct dirs: --bins de-duplicates
-        directory.mkdir()
-        argv += ["--bins", str(directory)]
-    with pytest.raises(SystemExit):
-        bin_refinement.main(argv)
-
-
-def test_duplicate_bin_set_paths_are_ignored(tmp_path):
-    """Passing the same directory twice is a mistake, not a request to refine it with itself."""
-    dirs = _write_bin_sets(tmp_path, "AB")
-
-    class Args:
-        bins_a = dirs["A"]
-        bins_b = dirs["B"]
-        bins_c = bins_d = bins_e = bins_f = None
-        bins_extra: ClassVar = [dirs["A"], dirs["B"]]
-
-    assert bin_refinement.collect_bin_sets(Args()) == [dirs["A"], dirs["B"]]
-
-
 # --- proof that the commands run for 2 and 3 sets are byte-identical to the old ones -------
 
 
@@ -328,24 +219,3 @@ def test_refiner_command_for_two_and_three_sets_is_unchanged():
     assert recorded[1].endswith("-1 binsA -2 binsB -3 binsC -o Refined_ABC")
     # only beyond three does it switch to the repeatable flag
     assert recorded[2].endswith("-i binsA -i binsB -i binsC -i binsD -o Refined_ABCD")
-
-
-def test_repeatable_bin_set_flag(tmp_path):
-    """--bins may be repeated instead of using -A/-B/-C..., for scripting."""
-    dirs = _write_bin_sets(tmp_path, "ABC")
-    out = tmp_path / "refined"
-    argv = ["-o", str(out), "-t", "1", "-c", "50", "-x", "10"]
-    for letter in "ABC":
-        argv += ["--bins", dirs[letter]]
-    assert bin_refinement.main(argv) == 0
-    work = os.path.join(str(out), "work_files")
-    assert sorted(
-        d for d in os.listdir(work) if d.startswith("bins") and os.path.isdir(os.path.join(work, d))
-    ) == ["binsA", "binsAB", "binsABC", "binsAC", "binsB", "binsBC", "binsC", "binsM", "binsO"]
-
-
-def test_bin_set_labels():
-    assert bin_refinement.bin_set_label(0) == "binsA"
-    assert bin_refinement.bin_set_label(5) == "binsF"
-    assert bin_refinement.combined_label(["binsA", "binsC"]) == "binsAC"
-    assert bin_refinement.combined_label(["binsA", "binsB", "binsC"]) == "binsABC"

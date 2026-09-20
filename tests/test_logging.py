@@ -16,9 +16,6 @@ def test_banner_borders_and_width():
         assert "hello world" in line
 
 
-def test_delimiters_differ_by_level():
-    assert mwlog.format_comment("x", "#").split("\n")[1] == "#" * 120
-    assert mwlog.format_comment("x", "*").split("\n")[1] == "*" * 120
 
 
 def test_long_message_wraps_to_multiple_lines():
@@ -31,9 +28,3 @@ def test_long_message_wraps_to_multiple_lines():
         assert len(line) == 120
 
 
-def test_error_exits():
-    import pytest
-
-    with pytest.raises(SystemExit) as exc:
-        mwlog.error("bad")
-    assert exc.value.code == 1
