@@ -1,6 +1,4 @@
 from metawrap2.modules import classify_bins
-from metawrap2.scripts import classify_bins as classify_helper
-from metawrap2.scripts import prune_blast_hits
 
 
 def test_command_templates_format_cleanly():
@@ -35,9 +33,3 @@ def test_command_templates_format_cleanly():
 def _raw_line(qseqid, staxids):
     cols = [qseqid, "1", "100", "500", "s1", staxids, "10", "110", "200", "0.001", "95", "100"]
     return "\t".join(cols)
-
-
-
-
-
-

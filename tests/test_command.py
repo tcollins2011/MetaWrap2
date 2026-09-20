@@ -1,6 +1,4 @@
-import pytest
-
-from metawrap2.command import CommandRunner, ToolError, run
+from metawrap2.command import CommandRunner, run
 
 
 def test_success_and_stdout_redirect(tmp_path):
@@ -8,10 +6,6 @@ def test_success_and_stdout_redirect(tmp_path):
     rc = run(["python3", "-c", "print('hi')"], tool="echo", stdout_path=str(out))
     assert rc == 0
     assert out.read_text().strip() == "hi"  # stdout captured to the data file
-
-
-
-
 
 
 def test_env_prefix_uses_mamba(monkeypatch):
@@ -32,11 +26,3 @@ def test_env_prefix_uses_mamba(monkeypatch):
     monkeypatch.setattr(command_mod, "_run_flags", lambda mgr: [])
     assert r.env_prefix("metawrap2-binning") == ["mamba", "run", "-n", "metawrap2-binning"]
     assert r.env_prefix(None) == []
-
-
-
-
-
-
-
-

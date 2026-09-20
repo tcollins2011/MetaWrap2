@@ -1,12 +1,7 @@
 import io
 
 from metawrap2.modules import assembly
-from metawrap2.scripts import (
-    fix_megahit_contig_naming,
-    rm_short_contigs,
-    sam_to_fastq,
-    sort_contigs,
-)
+from metawrap2.scripts import rm_short_contigs
 
 
 def test_command_templates_format_cleanly():
@@ -42,17 +37,3 @@ def test_rm_short_contigs_filters_by_actual_sequence_length(tmp_path):
     assert "NODE_1_length_2000" in text
     assert "NODE_3_length_3000" in text  # no longer lost to the early break
     assert "NODE_2_length_500" not in text
-
-
-
-
-
-
-
-
-
-
-
-
-
-

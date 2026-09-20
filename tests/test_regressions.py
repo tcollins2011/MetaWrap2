@@ -9,24 +9,15 @@ full set of near-duplicate permutations that all re-assert the same code path.
 
 import os
 import random
-import sys
-from typing import ClassVar
 
 import pytest
 
 from metawrap2 import checkm
-from metawrap2.modules import (
-    binning,
-    kraken2,
-    quant_bins,
-    read_qc,
-)
+from metawrap2.modules import binning, kraken2, read_qc
 
 # --- MetaWrap2's own helpers must run in the host interpreter ---------------------------
 # The per-module conda envs contain the module's external tools only - no python, no
 # metawrap2, no matplotlib. Invoking "python -m metawrap2..." inside them always failed.
-
-
 
 
 # --- read_qc must never move the user's input files -------------------------------------
@@ -358,8 +349,4 @@ def test_metabat2_non_bin_outputs_are_moved_out_of_the_bin_set(tmp_path, monkeyp
 # --- log noise filtering: command data output must never be filtered ---------------------
 
 
-
-
 # --- relative -o must work even for tools that run with cwd=<output dir> -----------------
-
-

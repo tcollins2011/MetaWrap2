@@ -1,7 +1,4 @@
-import io
-
 from metawrap2.modules import read_qc
-from metawrap2.scripts import select_human_reads, skip_human_reads
 
 
 def test_command_templates_format_cleanly():
@@ -33,14 +30,8 @@ def test_command_templates_format_cleanly():
     assert "{" not in cmd and "-1 a.fastq" in cmd and "-2" not in cmd
 
 
-
-
 def _fastq(names):
     lines = []
     for n in names:
         lines += ["@%s/1" % n, "ACGT", "+", "IIII"]
     return "\n".join(lines) + "\n"
-
-
-
-

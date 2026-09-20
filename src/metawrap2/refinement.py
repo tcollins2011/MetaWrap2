@@ -21,13 +21,7 @@ import shutil
 import sys
 from typing import Dict, List, Optional, Tuple
 
-from .constants import (
-    BIN_EXTENSION,
-    OVERLAP_THRESHOLD,
-    STATS_SUFFIX,
-    bin_filename,
-    bin_stem,
-)
+from .constants import BIN_EXTENSION, OVERLAP_THRESHOLD, STATS_SUFFIX, bin_filename, bin_stem
 from .io.seqio import contig_id, iter_fasta
 from .utils import bin_name_from_filename, quality_score
 

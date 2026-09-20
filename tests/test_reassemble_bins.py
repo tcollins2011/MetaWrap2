@@ -1,5 +1,3 @@
-import sys
-
 from metawrap2.modules import reassemble_bins
 
 
@@ -14,9 +12,3 @@ def test_command_templates_format_cleanly():
         threads=1, mem=8, tmp="/t", contigs="c.fa", r1="a_1.fq", r2="a_2.fq", nano="n.fq", out="/o"
     )
     assert "{" not in spn and "--nanopore n.fq" in spn
-
-
-
-
-
-

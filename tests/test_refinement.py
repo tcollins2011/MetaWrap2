@@ -1,5 +1,3 @@
-import os
-
 from metawrap2 import refinement
 
 
@@ -23,8 +21,6 @@ def test_overlap_percent_identical():
     assert refinement._overlap_percent(a, dict(a)) == 100.0
 
 
-
-
 def test_consolidate_picks_higher_scoring_overlapping_bin(tmp_path):
     f1 = tmp_path / "binsA"
     f2 = tmp_path / "binsB"
@@ -45,11 +41,3 @@ def test_consolidate_picks_higher_scoring_overlapping_bin(tmp_path):
     # B's contigs are identical here; assert stats line carried B's completeness (95)
     stats_out = (tmp_path / "binsM.stats.tsv").read_text()
     assert "95.0" in stats_out
-
-
-
-
-
-
-
-

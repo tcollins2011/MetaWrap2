@@ -1,6 +1,5 @@
 import json
 
-from metawrap2 import provenance
 from metawrap2.provenance import CONFIG_NAME, RunRecorder
 
 
@@ -52,11 +51,3 @@ def test_lineage_propagates_from_mw2_input(tmp_path):
     assert modules == ["assembly", "binning"]
     prov = (bin_dir / "provenance.txt").read_text()
     assert "assembly" in prov and "binning" in prov and "metaspades.py" in prov
-
-
-
-
-
-
-
-

@@ -110,7 +110,7 @@ class ConsoleHandler(logging.StreamHandler):
     logger always writes wherever stdout currently points.
     """
 
-    @property
+    @property  # type: ignore[override]
     def stream(self) -> TextIO:
         return sys.stdout
 

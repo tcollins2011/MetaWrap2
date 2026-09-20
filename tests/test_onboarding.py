@@ -89,8 +89,6 @@ def test_a_shell_config_is_translated():
     assert "SOMETHING_ELSE" in unrecognised
 
 
-
-
 # --- a retired key must not block an unrelated run ----------------------------------------
 
 
@@ -117,5 +115,3 @@ def test_a_retired_module_name_explains_itself(name, capsys):
 
 
 # --- the disk-space check warns rather than refuses -----------------------------------------
-
-

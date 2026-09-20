@@ -22,10 +22,6 @@ def test_todo_and_done(tmp_path):
     assert c.todo("binning") is True  # unfinished step still runs
 
 
-
-
-
-
 def test_make_checkpoint_resume_keeps_markers(tmp_path):
     old = Checkpoint(str(tmp_path), resume=True)
     old.done("align")

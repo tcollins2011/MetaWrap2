@@ -1,4 +1,4 @@
-from metawrap2.commands import completion, config_cmd, doctor
+from metawrap2.commands import config_cmd, doctor
 
 
 def test_config_init_and_show(tmp_path, capsys):
@@ -14,8 +14,6 @@ def test_config_init_and_show(tmp_path, capsys):
     assert "use_conda_envs" in out and str(cfg) in out
 
 
-
-
 def test_doctor_reports_missing_when_no_envs(capsys, monkeypatch):
     # Force the "env absent" answer instead of depending on what is installed on the machine
     # running the tests: otherwise this passes on a fresh checkout and fails as soon as the
@@ -26,7 +24,3 @@ def test_doctor_reports_missing_when_no_envs(capsys, monkeypatch):
     assert "MetaWrap2 module status" in out
     assert "metawrap2-binning" in out and "MISSING" in out
     assert rc == 1
-
-
-
-

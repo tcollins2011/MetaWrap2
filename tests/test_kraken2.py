@@ -1,8 +1,4 @@
-import argparse
-import io
-
 from metawrap2.modules import kraken2
-from metawrap2.scripts import kraken_to_krona
 
 
 def test_command_templates_format_cleanly():
@@ -14,11 +10,3 @@ def test_command_templates_format_cleanly():
 
     cmd = kraken2.KTIMPORTTEXT.format(out="k.html", krona_files="a.krona b.krona")
     assert "{" not in cmd and "ktImportText -o k.html" in cmd
-
-
-
-
-
-
-
-

@@ -24,5 +24,3 @@ def test_split_concoct_bins(tmp_path):
     first = (out / "bin_001.fasta").read_text()
     assert ">contig_1" in first and ">contig_2" in first
     assert ">contig_3" in (out / "bin_002.fasta").read_text()
-
-

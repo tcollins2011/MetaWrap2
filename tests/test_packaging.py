@@ -71,31 +71,13 @@ def test_the_package_version_matches_the_module(pyproject):
     assert pyproject["project"]["version"] == __version__
 
 
-
-
 # --- the Python floor is stated in four places ---------------------------------------------
-
-
-
-
-
-
-
-
 
 
 # --- the runtime dependencies ---------------------------------------------------------------
 
 
-
-
-
-
-
-
 # --- what ships inside the wheel -----------------------------------------------------------
-
-
 
 
 def test_every_env_yaml_sits_inside_the_package():
@@ -106,7 +88,3 @@ def test_every_env_yaml_sits_inside_the_package():
     inside = os.path.join(REPO, "src", "metawrap2", "envs")
     assert os.path.isdir(inside)
     assert [f for f in os.listdir(inside) if f.endswith(".yaml")]
-
-
-
-

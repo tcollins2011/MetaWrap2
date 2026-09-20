@@ -1,5 +1,3 @@
-import os
-
 from metawrap2.modules import bin_refinement
 
 
@@ -12,10 +10,6 @@ def test_command_templates_format_cleanly():
     assert "{" not in plot and plot.endswith("70 10 a.stats b.stats")
 
 
-
-
-
-
 def test_good_bins_thresholds(tmp_path):
     stats = tmp_path / "binsA.stats"
     stats.write_text(
@@ -26,7 +20,3 @@ def test_good_bins_thresholds(tmp_path):
     )
     good = bin_refinement._good_bins(str(stats), comp=70, cont=10)
     assert good == ["bin.1"]
-
-
-
-

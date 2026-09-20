@@ -16,8 +16,6 @@ def test_banner_borders_and_width():
         assert "hello world" in line
 
 
-
-
 def test_long_message_wraps_to_multiple_lines():
     msg = "word " * 40  # far exceeds the 90-char wrap width
     content = [
@@ -26,5 +24,3 @@ def test_long_message_wraps_to_multiple_lines():
     assert len(content) >= 2
     for line in content:
         assert len(line) == 120
-
-

@@ -1,5 +1,3 @@
-import os
-
 from metawrap2.modules import blobology
 
 
@@ -12,9 +10,3 @@ def test_command_templates_format_cleanly():
         table="t", prop=0.005, taxlevel="bin", base="Unbinned"
     )
     assert "{" not in plot and plot.endswith("t 0.005 bin Unbinned")
-
-
-
-
-
-

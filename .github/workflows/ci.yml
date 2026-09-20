@@ -44,8 +44,12 @@ jobs:
       - name: Type check (mypy)
         run: mypy
 
+      # CI has no per-module conda envs, so tests run the tools straight off PATH (via stubs
+      # or monkeypatching). Disable conda-env wrapping for the test run.
       - name: Unit tests (pytest + coverage)
-        run: python -m pytest -q --cov=metawrap2 --cov-report=term-missing
+        run: |
+          printf '[settings]\nuse_conda_envs = false\n' > "$RUNNER_TEMP/mw2-ci.toml"
+          METAWRAP2_CONFIG="$RUNNER_TEMP/mw2-ci.toml" python -m pytest -q --cov=metawrap2 --cov-report=term-missing
 
       - name: Byte-compile the metawrap2 package
         run: python -m compileall -q src/metawrap2

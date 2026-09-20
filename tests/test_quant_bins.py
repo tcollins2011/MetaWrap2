@@ -1,9 +1,6 @@
-import io
-import math
 import sys
 
 from metawrap2.modules import quant_bins
-from metawrap2.scripts import split_salmon_out_into_bins, summarize_salmon_files
 
 
 def test_command_templates_format_cleanly():
@@ -15,9 +12,3 @@ def test_command_templates_format_cleanly():
     # the quant_bins conda env holds salmon, not python+seaborn.
     heat = [a.format(table="t.tab", png="h.png") for a in quant_bins.MAKE_HEATMAP]
     assert heat == [sys.executable, "-m", "metawrap2.scripts.make_heatmap", "t.tab", "h.png"]
-
-
-
-
-
-

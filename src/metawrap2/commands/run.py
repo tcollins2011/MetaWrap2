@@ -156,7 +156,7 @@ def load_sheet(path: str) -> Study:
     """Parse a sample sheet (TOML, or YAML when PyYAML is available)."""
     if path.lower().endswith((".yaml", ".yml")):
         try:
-            import yaml
+            import yaml  # type: ignore[import-untyped]
         except ImportError:
             raise ValueError(
                 "%s looks like YAML but PyYAML is not installed. Either `pip install pyyaml` "

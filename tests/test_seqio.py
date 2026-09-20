@@ -1,4 +1,3 @@
-import bz2
 import gzip
 
 from metawrap2.io import seqio
@@ -21,9 +20,3 @@ def test_detect_and_read_gzip(tmp_path):
     assert seqio.detect_compression(str(p)) == "gzip"
     recs = list(seqio.iter_fasta(str(p)))
     assert [h for h, _ in recs] == ["contig_1 some description", "contig_2"]
-
-
-
-
-
-
