@@ -62,6 +62,29 @@ def test_check_fastq_rejects_a_truncated_gzip(tmp_path):
     assert problem and ("truncated or corrupt" in problem or "could not be read" in problem)
 
 
+def test_check_fastq_accepts_a_large_valid_gzip(tmp_path):
+    """Regression: a complete, valid gzipped FASTQ larger than the read window must pass.
+
+    The old check counted lines in only the last TAIL_BYTES of the file and required that
+    tail-window count to be a multiple of four - which it is not for an arbitrary byte offset,
+    so large valid libraries were wrongly rejected as "truncated". The count must be over the
+    whole file.
+    """
+    records = validate.TAIL_BYTES // len(good_fastq(1)) + 5000  # comfortably exceeds the window
+    path = write_gz(str(tmp_path / "big.fastq.gz"), good_fastq(records))
+    assert validate.check_fastq(path) is None
+
+
+def test_check_fastq_rejects_a_line_truncation(tmp_path):
+    """A file cut on a line boundary to a non-multiple-of-four line count is still caught."""
+    text = (
+        good_fastq(500) + "@read500\nACGTACGTAC\n+\n"
+    )  # 3 extra lines -> total not a multiple of 4
+    path = write_gz(str(tmp_path / "cut.fastq.gz"), text)
+    problem = validate.check_fastq(path)
+    assert problem and "not a multiple of 4" in problem
+
+
 # --- check_fasta --------------------------------------------------------------------------
 
 

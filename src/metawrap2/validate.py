@@ -111,40 +111,43 @@ def check_fastq(path: str, what: str = "FASTQ file") -> Optional[str]:
     problem = require_file(path, what)
     if problem:
         return problem
+    # One streaming pass: validate the first line, count the total lines (a complete FASTQ is a
+    # multiple of four), and remember the last line. Reading the whole stream also surfaces a
+    # truncated gzip (a partial member raises here). We must count *all* lines, not a tail window:
+    # the number of lines in an arbitrary byte-tail is not a multiple of four even for a valid file.
+    n_lines = 0
+    last_line = ""
     try:
         with smart_open(path, "rt") as fh:
             first = fh.readline()
+            if not first:
+                return "%s has no content (%s)" % (_describe(path), what)
+            if not first.startswith("@"):
+                return (
+                    "%s does not look like FASTQ - the first line starts with %r, not '@' (%s)"
+                    % (_describe(path), first[:1], what)
+                )
+            n_lines = 1
+            last_line = first
+            for line in fh:
+                n_lines += 1
+                last_line = line
     except _READ_ERRORS as exc:
-        return "%s could not be read (%s): %s" % (_describe(path), what, exc)
-    if not first:
-        return "%s has no content (%s)" % (_describe(path), what)
-    if not first.startswith("@"):
-        return "%s does not look like FASTQ - the first line starts with %r, not '@' (%s)" % (
-            _describe(path),
-            first[:1],
-            what,
-        )
-    try:
-        tail = _tail_text(path)
-    except _READ_ERRORS as exc:
-        return "%s is truncated or corrupt - reading the end of it failed: %s (%s)" % (
+        return "%s is truncated or corrupt - reading it failed: %s (%s)" % (
             _describe(path),
             exc,
             what,
         )
-    # A complete FASTQ ends on a record boundary: a multiple of four lines.
-    lines = tail.split("\n")
-    if tail and not tail.endswith("\n"):
+    if last_line and not last_line.endswith("\n"):
         return "%s does not end with a newline, so its last record is truncated (%s)" % (
             _describe(path),
             what,
         )
-    complete = [ln for ln in lines if ln != ""] if len(lines) < 5 else lines[:-1]
-    if len(complete) % 4 != 0:
+    if n_lines % 4 != 0:
         return (
-            "%s ends mid-record: the tail holds %d lines, which is not a multiple of 4 "
-            "(%s). The file was probably truncated by a full disk or an interrupted "
-            "download." % (_describe(path), len(complete), what)
+            "%s ends mid-record: it holds %d lines, which is not a multiple of 4 (%s). The file "
+            "was probably truncated by a full disk or an interrupted download."
+            % (_describe(path), n_lines, what)
         )
     return None
 
