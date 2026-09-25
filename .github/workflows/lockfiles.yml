@@ -67,6 +67,10 @@ jobs:
     # Only on the schedule or a manual run: on a PR the point is to verify, not to rewrite.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # bash -el so the conda base environment (with mamba) is active in every run step.
+    defaults:
+      run:
+        shell: bash -el {0}
     permissions:
       contents: write
       pull-requests: write
@@ -74,28 +78,37 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Install micromamba
-        uses: mamba-org/setup-micromamba@v2
+      # Miniforge ships conda + mamba, which is what `metawrap2 install-env` drives to solve the
+      # environments. (setup-micromamba only provides micromamba, so the solve step could not run.)
+      - name: Set up Miniforge (conda + mamba)
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          micromamba-version: latest
-          init-shell: bash
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
+          miniforge-version: latest
           python-version: "3.12"
 
       - name: Install MetaWrap2
         run: pip install -e .
 
-      - name: Re-solve and re-lock
-        shell: bash -el {0}
+      # Two steps on purpose: `--lock` only writes lockfiles for environments that already
+      # exist, so the environments have to be solved first, then locked.
+      - name: Re-solve the environments from the yamls
         run: |
           modules="${{ github.event.inputs.modules }}"
-          if [ -z "$modules" ] || [ "$modules" = "all" ]; then
-            metawrap2 install-env --all -t 4 --force --lock --no-test
+          [ -z "$modules" ] && modules="all"
+          if [ "$modules" = "all" ]; then
+            metawrap2 install-env --all -t 4 --force --no-test
           else
-            metawrap2 install-env $modules -t 4 --force --lock --no-test
+            metawrap2 install-env $modules -t 4 --force --no-test
+          fi
+
+      - name: Re-lock from the solved environments
+        run: |
+          modules="${{ github.event.inputs.modules }}"
+          [ -z "$modules" ] && modules="all"
+          if [ "$modules" = "all" ]; then
+            metawrap2 install-env --all --lock
+          else
+            metawrap2 install-env $modules --lock
           fi
 
       - name: Open a PR if anything changed

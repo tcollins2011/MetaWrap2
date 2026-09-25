@@ -487,9 +487,13 @@ def validate_inputs(context: str, checks: List[tuple]) -> None:
     """Run *checks* and abort with every problem listed if any fail.
 
     See :func:`metawrap2.validate.require_inputs`. Skipped under --dry-run, where the point is
-    to print a plan rather than to touch the data.
+    to print a plan rather than to touch the data, and under --skip-validation, the escape hatch
+    for the rare case where a check wrongly rejects a good file.
     """
     if dry_run():
+        return
+    if _cmd.runner.skip_validation:
+        warning("Skipping input validation for %s (--skip-validation)." % context)
         return
     try:
         _validate.require_inputs(checks, context=context)
@@ -504,7 +508,7 @@ def expect_produced(path: str, what: str, hint: str = "") -> None:
     for FASTA/FASTQ, so an assembler that exits 0 having written a header and nothing else is
     caught here rather than in the next module.
     """
-    if dry_run():
+    if dry_run() or _cmd.runner.skip_validation:
         return
     lower = path.lower()
     if lower.endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz", ".fastq.bz2", ".fq.bz2")):

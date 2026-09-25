@@ -118,6 +118,8 @@ def help_message() -> str:
         "\t%-20s don't collapse repeated tool messages in the captured logs" % "--verbose-logs",
         "\t%-20s start even if the disk-space estimate says there is no room"
         % "--skip-space-check",
+        "\t%-20s skip input/intermediate file validation (use if it flags a valid file)"
+        % "--skip-validation",
         "",
         "\t%-20s show this help message" % "--help | -h",
         "\t%-20s show MetaWrap2 version" % "--version | -v",
@@ -142,6 +144,8 @@ def _apply_global_flags(argv: List[str]) -> List[str]:
             command.set_verbose_logs(True)
         elif tok == "--skip-space-check":
             command.set_skip_space_check(True)
+        elif tok == "--skip-validation":
+            command.set_skip_validation(True)
         else:
             kept.append(tok)
     return kept

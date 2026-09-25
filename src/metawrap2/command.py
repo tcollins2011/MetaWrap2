@@ -55,6 +55,7 @@ __all__ = [
     "set_resume",
     "set_run_logs",
     "set_skip_space_check",
+    "set_skip_validation",
     "set_verbose_logs",
     "tool_path_in_env",
 ]
@@ -164,6 +165,7 @@ class CommandRunner:
     run_stderr_path: Optional[str] = None
     verbose_logs: bool = False  # True disables log noise filtering
     skip_space_check: bool = False  # True disables the preflight disk-space estimate
+    skip_validation: bool = False  # True bypasses input/intermediate file validation
 
     # -- configuration --------------------------------------------------------------------
 
@@ -342,6 +344,10 @@ def set_verbose_logs(value: bool) -> None:
 
 def set_skip_space_check(value: bool) -> None:
     runner.configure(skip_space_check=bool(value))
+
+
+def set_skip_validation(value: bool) -> None:
+    runner.configure(skip_validation=bool(value))
 
 
 _TOOL_PATH_CACHE: dict = {}

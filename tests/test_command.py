@@ -26,3 +26,16 @@ def test_env_prefix_uses_mamba(monkeypatch):
     monkeypatch.setattr(command_mod, "_run_flags", lambda mgr: [])
     assert r.env_prefix("metawrap2-binning") == ["mamba", "run", "-n", "metawrap2-binning"]
     assert r.env_prefix(None) == []
+
+
+def test_skip_validation_flag_bypasses_input_checks():
+    """--skip-validation makes validate_inputs a no-op, even for a would-fail check."""
+    from metawrap2 import command, validate
+    from metawrap2.modules import _common
+
+    command.set_skip_validation(True)
+    try:
+        # A nonexistent file would normally abort the run; with the flag set it is skipped.
+        _common.validate_inputs("test", [(validate.check_fastq, "/no/such/file.fastq", "reads")])
+    finally:
+        command.set_skip_validation(False)
