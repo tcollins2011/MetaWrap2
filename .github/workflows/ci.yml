@@ -47,8 +47,10 @@ jobs:
       # No METAWRAP2_CONFIG here on purpose: tests/conftest.py pins use_conda_envs per test, so
       # the suite no longer depends on the config the machine happens to have. Writing one here
       # instead hid that - the suite passed in CI and failed on a developer's machine.
+      # Through the same small-machine wrapper the pre-push hook uses, so a push that passed
+      # locally cannot fail here because the runner has fewer cores or less disk than a laptop.
       - name: Unit tests (pytest + coverage)
-        run: python -m pytest -q --cov=metawrap2 --cov-report=term-missing
+        run: python tests/run_on_small_machine.py -q --cov=metawrap2 --cov-report=term-missing
 
       - name: Byte-compile the metawrap2 package
         run: python -m compileall -q src/metawrap2

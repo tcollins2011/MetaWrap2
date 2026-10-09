@@ -160,4 +160,6 @@ testpaths = ["tests"]
 markers = [
     # Run with use_conda_envs = true: for the few tests about env resolution itself. See conftest.
     "conda_envs: the test needs conda env wrapping switched on",
+    # Sees the host's real cores/memory/disk instead of conftest's fixed test machine.
+    "real_machine: the test measures the actual host rather than the fixed test machine",
 ]

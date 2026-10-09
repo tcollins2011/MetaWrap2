@@ -113,3 +113,39 @@ def test_every_env_yaml_sits_inside_the_package():
     inside = os.path.join(REPO, "src", "metawrap2", "envs")
     assert os.path.isdir(inside)
     assert [f for f in os.listdir(inside) if f.endswith(".yaml")]
+
+
+def test_the_pre_commit_hooks_run_the_same_formatter_versions_ci_does(pyproject):
+    """Two CI failures came from this: the hook and CI disagreeing about what is correctly formatted.
+
+    CI installs the dev extras and runs black/ruff/isort at the versions pinned there; the commit
+    hook fetches its own copy at the `rev` in .pre-commit-config.yaml. When those differ - ruff
+    v0.6.9 against 0.16.8, then black 24.8.0 against 26.5.1 - the hook rewrites a file one way,
+    CI's check wants it the other, and a push that passed every local gate fails remotely.
+    """
+    import re
+
+    pins = {}
+    for spec in pyproject["project"]["optional-dependencies"]["dev"]:
+        found = re.match(r"^\s*([A-Za-z0-9_.-]+)==([^;\s]+)", spec)
+        if found:
+            pins[found.group(1).lower()] = found.group(2)
+
+    with open(os.path.join(REPO, ".pre-commit-config.yaml")) as fh:
+        config = fh.read()
+    hooks = {
+        "black": r"psf/black\s*\n\s*rev:\s*v?(\S+)",
+        "isort": r"pycqa/isort\s*\n\s*rev:\s*v?(\S+)",
+        "ruff": r"ruff-pre-commit\s*\n\s*rev:\s*v?(\S+)",
+    }
+    for tool, pattern in hooks.items():
+        found = re.search(pattern, config)
+        assert found, "no %s hook found in .pre-commit-config.yaml" % tool
+        assert tool in pins, "%s is not pinned with == in pyproject's dev extras" % tool
+        assert (
+            found.group(1) == pins[tool]
+        ), "the %s pre-commit hook is %s but CI installs %s; set both to the same version" % (
+            tool,
+            found.group(1),
+            pins[tool],
+        )

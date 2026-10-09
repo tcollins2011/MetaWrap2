@@ -30,14 +30,17 @@ def machine(cores: int = 64, memory_gb: int = 256, gpus: int = 0, monkeypatch=No
 # --- measuring the machine ----------------------------------------------------------------
 
 
+@pytest.mark.real_machine
 def test_cores_never_zero():
     assert limits.machine_cores() >= 1
 
 
+@pytest.mark.real_machine
 def test_memory_never_zero():
     assert limits.machine_memory_bytes() >= 1
 
 
+@pytest.mark.real_machine
 def test_cgroup_quota_caps_the_affinity_count(monkeypatch):
     # The case this exists for: a container that can see the host's cores but may not use them.
     monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(192)), raising=False)
@@ -77,6 +80,7 @@ def test_missing_cgroup_file_reads_as_no_limit(tmp_path):
     assert limits._read_int(str(tmp_path / "absent")) is None
 
 
+@pytest.mark.real_machine
 def test_gpus_respect_cuda_visible_devices(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,5")
     assert limits.machine_gpus() == 2
@@ -94,6 +98,7 @@ def test_no_nvidia_smi_means_no_gpus(monkeypatch):
     assert limits.machine_gpus() == 0
 
 
+@pytest.mark.real_machine
 def test_the_gpu_probe_runs_once_per_process(monkeypatch):
     # The budget is resolved from more than one place, and the answer cannot change mid-run.
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)

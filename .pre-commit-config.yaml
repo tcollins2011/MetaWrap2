@@ -63,9 +63,9 @@ repos:
         pass_filenames: false
       - id: pytest
         name: pytest
-        # No config juggling: tests/conftest.py pins use_conda_envs per test, so the suite does
-        # not depend on whatever ~/.metawrap2/config.toml this machine has.
-        entry: python -m pytest -q
+        # Run as a 2-core, 4 GB, nearly-full-disk machine - the same way CI runs it - so a test
+        # that depends on this laptop's cores or disk fails here rather than after the push.
+        entry: python tests/run_on_small_machine.py -q
         language: system
         stages: [pre-push]
         pass_filenames: false

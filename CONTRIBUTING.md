@@ -13,9 +13,21 @@ pre-commit install --hook-type pre-push  # run the full gate before anything lea
 
 ## Running the tests
 ```
-python -m pytest -q                 # the env-independent unit + integration tests
-metawrap2 doctor                    # probe module conda envs, software and databases
+python tests/run_on_small_machine.py -q   # the suite, exactly as the pre-push hook and CI run it
+python -m pytest -q tests/test_x.py       # one file, quickly, while you work
+metawrap2 doctor                          # probe module conda envs, software and databases
 ```
+
+The suite must give the same answer on any machine. Two rules keep it that way:
+
+- Don't let a test depend on the host. `tests/conftest.py` gives every test the same fixed
+  machine (32 cores, 128 GB, no GPU, plenty of free disk) and the same `use_conda_envs` setting,
+  whatever it is really running on. If your test needs a different machine, monkeypatch
+  `limits.machine_cores` / `machine_memory_bytes` / `shutil.disk_usage` in the test; if it is about
+  measuring the real host, mark it `@pytest.mark.real_machine`.
+- Run it through `tests/run_on_small_machine.py` before you push (the pre-push hook does this for
+  you). It pretends to be a 2-core, 4 GB, 95%-full machine, so a test that only passes on a big
+  laptop fails here rather than on a CI runner after the push.
 No bioinformatics tool is needed for the test suite. Two kinds of test are worth knowing about
 before you change behaviour:
 
@@ -62,7 +74,9 @@ diff shows what the output used to be.
 - `black` formats, `isort` orders imports, `ruff` lints, `mypy` type-checks. `ruff-format` is
   deliberately not enabled: two formatters fight each other over the same files.
 - `black`, `isort`, `ruff`, `mypy` and `pytest` must all pass before a push (the pre-push hooks
-  run them), and CI gates the same five on Python 3.10-3.13. Formatting is *checked*, never
+  run them), and CI gates the same five on Python 3.10-3.13. The hook and CI use the same tool
+  versions - pinned in `pyproject.toml`'s dev extras and in `.pre-commit-config.yaml`, which must
+  agree (a test checks this). When you bump one, bump both. Formatting is *checked*, never
   applied, in CI - a job that rewrites your code and then passes teaches you nothing.
 - `pre-commit` also enforces the "no .sh/.pl/.R" rule; so does CI.
 
