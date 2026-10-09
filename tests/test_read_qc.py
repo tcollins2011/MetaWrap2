@@ -149,6 +149,9 @@ def test_trim_galore_output_is_renamed_from_its_own_convention(tmp_path, monkeyp
 
     Asked for explicitly, since fastp holds the default slot now.
     """
+    from metawrap2 import limits
+
+    monkeypatch.setattr(limits, "machine_cores", lambda: 64)  # -t 32 must not be clamped first
     calls = []
     _fake_trimmer(tmp_path, monkeypatch, calls)
     r1 = tmp_path / "s_1.fastq"

@@ -62,6 +62,9 @@ def test_fetch_prints_the_size_and_downloads_nothing_without_yes(tmp_path, monke
         raise AssertionError("downloaded without --yes")
 
     monkeypatch.setattr(cmd._fetch, "_download", explode)
+    # The disk check runs first and refuses a download that cannot land, so on a machine without
+    # 95 GB free - a CI runner - this would stop there and never reach the question under test.
+    monkeypatch.setattr(cmd._fetch, "disk_verdict", lambda plan, budget=None: (True, "fits"))
     rc = cmd.main(["fetch", "cami2_gi", "--dest", str(tmp_path / "d")])
     out = capsys.readouterr().out
     assert rc == 1
