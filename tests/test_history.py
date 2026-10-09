@@ -41,14 +41,14 @@ def test_record_captures_the_context_a_user_needs(hist):
         hist,
         output=".",
         databases={"CHECKM_DB": "/db/checkm", "BLASTDB": ""},
-        conda_env="metawrap2-binning",
+        conda_env="metawrap2-bins",
     )
     entry = next(history.read(hist))
     assert entry["module"] == "binning"
     assert entry["version"] == "2.1.0"
     assert entry["command"] == ["metawrap2", "binning"]
     assert entry["output"] == os.path.abspath(".")
-    assert entry["conda_env"] == "metawrap2-binning"
+    assert entry["conda_env"] == "metawrap2-bins"
     assert entry["databases"] == {"CHECKM_DB": "/db/checkm"}  # blank values dropped
     assert entry["time"] and entry["user"] and entry["host"] and entry["python"]
 

@@ -42,6 +42,15 @@ class Checkpoint:
         with open(self._marker(step), "w") as fh:
             fh.write("done\n")
 
+    def clear(self, step: str) -> None:
+        """Forget that *step* finished, so a later --resume runs it again.
+
+        For a stage whose outputs a module deliberately throws away: resuming past it would then
+        feed the next stage files that are no longer there.
+        """
+        if os.path.exists(self._marker(step)):
+            os.remove(self._marker(step))
+
     def reset(self) -> None:
         """Clear all markers (used for a fresh, non-resume run)."""
         parent = os.path.dirname(self.dir)

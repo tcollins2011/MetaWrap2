@@ -12,7 +12,6 @@ because concurrent solver output interleaved into one stream is unreadable.
 
 from __future__ import annotations
 
-import argparse
 import concurrent.futures
 import os
 import platform
@@ -21,11 +20,9 @@ import subprocess
 import tempfile
 from typing import List, Optional, Tuple
 
-from ..command import run
-from ..config import MODULE_ENVS, OPTIONAL_ENVS, conda_env_exists
-
-#: The opt-in envs keyed by the yaml/module name they are built from, so --lock can find them.
-OPTIONAL_ENVS_BY_MODULE = {name[len("metawrap2-") :]: name for name in OPTIONAL_ENVS.values()}
+from ..cliformat import make_parser
+from ..command import run, runner
+from ..config import ALL_MODULE_ENVS, MODULE_ENVS, OPTIONAL_ENVS_BY_MODULE, conda_env_exists
 
 # Env creation is dominated by solving and downloading, both of which are per-env
 # independent, so building several at once is close to a linear speedup. Default is modest
@@ -56,8 +53,37 @@ def envs_dir() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "envs"))
 
 
-def _env_yaml(module: str) -> str:
-    return os.path.join(envs_dir(), "%s.yaml" % module)
+def _env_yaml(env: str) -> str:
+    """Locate the yaml that builds conda environment *env*.
+
+    The yaml is named after the environment, not after the module: every env is
+    ``metawrap2-<basename>`` and every spec is ``<basename>.yaml``. Resolving it this way is what
+    lets several modules share one environment - ``coverage`` maps to ``metawrap2-bins`` because it
+    runs the same aligner and samtools binning does, and there is no ``coverage.yaml`` to write.
+    """
+    base = env.removeprefix("metawrap2-")
+    return os.path.join(envs_dir(), "%s.yaml" % base)
+
+
+def _env_for(name: str) -> str:
+    """Name the conda env *name* installs into, whether *name* is a module or an environment.
+
+    Three things a user can reasonably type, all of which have to work because all three appear in
+    the docs:
+
+    * a module - ``binning`` -> ``metawrap2-bins``.
+    * an opt-in env's own name - ``learned`` -> ``metawrap2-learned``.
+    * a shared env's own name - ``bins`` -> ``metawrap2-bins``. This is the one that is neither a
+      module nor an opt-in env, and without the last line it resolved to the bare word ``bins``, so
+      `install-env bins --lock` reported "bins does not exist yet" about an env that did.
+    """
+    direct = MODULE_ENVS.get(name) or OPTIONAL_ENVS_BY_MODULE.get(name)
+    if direct:
+        return direct
+    prefixed = "metawrap2-%s" % name
+    if prefixed in ALL_MODULE_ENVS:
+        return prefixed
+    return name
 
 
 def ensure_mamba() -> bool:
@@ -159,18 +185,26 @@ def _create_one(
     interleaved solver output is unreadable. The log path is reported on failure.
     """
     log = os.path.join(log_dir, "install-env-%s.log" % module)
-    cmd = ["mamba", "env", "create", "-y", "-f", yaml]
+    # Recreating means removing first. `mamba env create --force` is gone in mamba 2.x - the command
+    # is micromamba's `create`, which rejects the flag outright ("The following argument was not
+    # expected: --force"), so --force failed every rebuild instead of doing one. Only reached when
+    # the user asked for a rebuild of an env MetaWrap2 itself built.
+    steps = [["mamba", "env", "create", "-y", "-f", yaml]]
     if force:
-        cmd.append("--force")
+        steps.insert(0, ["mamba", "env", "remove", "-y", "-n", env])
+    rc = 0
     with open(log, "w") as fh:
-        fh.write("$ %s\n\n" % " ".join(cmd))
-        fh.flush()
-        rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT)
+        for cmd in steps:
+            fh.write("$ %s\n\n" % " ".join(cmd))
+            fh.flush()
+            rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT)
+            if rc != 0 and cmd[2] == "create":
+                break
     return module, rc == 0, log
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(
+    ap = make_parser(
         prog="metawrap2 install-env",
         description="Create the per-module conda environments, several at a time.",
     )
@@ -209,8 +243,15 @@ def main(argv: List[str]) -> int:
         help="where to write per-env build logs (default: a temp directory)",
     )
     args = ap.parse_args(argv)
+    # `--force` is also a global flag, and the CLI strips global flags wherever they appear - so
+    # `metawrap2 install-env x --force` never reaches this parser and the flag documented above did
+    # nothing at all. Read both: whichever way it was spelled, the user asked for a rebuild.
+    force = args.force or runner.force
 
-    modules = sorted(MODULE_ENVS) if args.all else args.modules
+    # By env name, not by module name: several modules share an env now, so iterating MODULE_ENVS
+    # would ask mamba to build metawrap2-reads four times. The names are interchangeable here -
+    # _module_env falls through to the name itself for anything that is not a module.
+    modules = [e[len("metawrap2-") :] for e in ALL_MODULE_ENVS] if args.all else args.modules
     if not modules:
         ap.error("specify one or more modules, or --all")
 
@@ -218,7 +259,7 @@ def main(argv: List[str]) -> int:
         # Locking reads existing environments; it does not need mamba bootstrapped.
         rc = 0
         for module in modules:
-            env = MODULE_ENVS.get(module) or OPTIONAL_ENVS_BY_MODULE.get(module, module)
+            env = _env_for(module)
             if not conda_env_exists(env):
                 print("%s does not exist yet; create it before locking it." % env)
                 rc = 1
@@ -236,17 +277,24 @@ def main(argv: List[str]) -> int:
 
     rc = 0
     todo = []
+    queued_envs = set()
     for module in modules:
-        yaml = _env_yaml(module)
+        env = _env_for(module)
+        yaml = _env_yaml(env)
         if not os.path.isfile(yaml):
             print("No env file for module '%s' (%s); skipping." % (module, yaml))
             rc = 1
             continue
-        env = MODULE_ENVS[module]
-        if conda_env_exists(env) and not args.force:
+        if env in queued_envs:
+            # Two modules sharing one env: `--all` reaches both, and building it twice at once would
+            # have two mamba solves writing the same prefix.
+            print("%s is already queued for this run; skipping (%s shares it)." % (env, module))
+            continue
+        if conda_env_exists(env) and not force:
             print("%s already exists; skipping (use --force to recreate)." % env)
             continue
         todo.append((module, env, yaml))
+        queued_envs.add(env)
 
     if not todo:
         print("Nothing to create.")
@@ -265,7 +313,7 @@ def main(argv: List[str]) -> int:
         done = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_create_one, m, e, y, args.force, log_dir): (m, e) for m, e, y in todo
+                pool.submit(_create_one, m, e, y, force, log_dir): (m, e) for m, e, y in todo
             }
             for future in concurrent.futures.as_completed(futures):
                 module, env = futures[future]

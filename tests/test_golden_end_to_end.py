@@ -60,6 +60,19 @@ _PREAMBLE = (
 )
 
 STUBS: Dict[str, str] = {
+    # binning's default aligner. "-d" builds the index; anything else maps, writing SAM to stdout
+    # for the samtools sort on the other side of binning's pipe.
+    "minimap2": (
+        "import sys\n"
+        "if '-d' in sys.argv:\n"
+        "    open(sys.argv[sys.argv.index('-d') + 1], 'w').write('MMI')\n"
+        "else:\n"
+        "    sys.stdout.write('@HD\\tVN:1.6\\n')\n"
+        "    for i in (1, 2, 3, 4):\n"
+        "        sys.stdout.write('r%d\\t0\\tc%d\\t1\\t60\\t4M\\t*\\t0\\t0\\tACGT\\tIIII\\n'\n"
+        "                         % (i, i))\n"
+    ),
+    # reassemble_bins still aligns with bwa, and binning offers it behind --aligner.
     "bwa": (
         "import sys\n"
         "if sys.argv[1] == 'mem':\n"
@@ -68,16 +81,30 @@ STUBS: Dict[str, str] = {
         "        sys.stdout.write('r%d\\t0\\tc%d\\t1\\t60\\t4M\\t*\\t0\\t0\\tACGT\\tIIII\\n'\n"
         "                         % (i, i))\n"
     ),
-    "samtools": (
-        "import sys\n"
-        "if 'sort' in sys.argv and '-o' in sys.argv:\n"
-        "    open(sys.argv[sys.argv.index('-o') + 1], 'w').write('BAM')\n"
-    ),
-    "jgi_summarize_bam_contig_depths": _PREAMBLE
+    # Drains stdin like the real sort: binning pipes the aligner into it, and a sort that exits
+    # early SIGPIPEs the aligner, which pipefail then reports as a failed run.
+    # samtools also supplies the pileup the depth table is computed from. There is no
+    # jgi_summarize_bam_contig_depths stub any more because there is no such call: the table is built
+    # by metawrap2.depth, so the fake data has to be alignments rather than a finished answer.
+    "samtools": _PREAMBLE
     + (
-        "p = sys.argv[sys.argv.index('--outputDepth') + 1]\n"
-        "rows = ''.join('c%d\\t%d\\t5\\t5\\n' % (i, CONTIG_LEN) for i in (1, 2, 3, 4))\n"
-        "open(p, 'w').write('contigName\\tcontigLen\\ttotalAvgDepth\\ts.bam\\n' + rows)\n"
+        "a = sys.argv\n"
+        "CONTIGS = ['c%d' % i for i in (1, 2, 3, 4)]\n"
+        "if 'sort' in a:\n"
+        "    sys.stdin.read()\n"
+        "    if '-o' in a:\n"
+        "        open(a[a.index('-o') + 1], 'w').write('BAM')\n"
+        "elif 'view' in a and '-H' in a:\n"
+        "    sys.stdout.write('@HD\\tVN:1.6\\n')\n"
+        "    for c in CONTIGS:\n"
+        "        sys.stdout.write('@SQ\\tSN:%s\\tLN:%d\\n' % (c, CONTIG_LEN))\n"
+        "elif 'view' in a:\n"
+        "    sys.stdout.write('ALIGNMENTS\\n')\n"
+        "elif 'depth' in a:\n"
+        "    sys.stdin.read()\n"
+        "    for c in CONTIGS:\n"
+        "        for pos in range(1, CONTIG_LEN + 1):\n"
+        "            sys.stdout.write('%s\\t%d\\t5\\n' % (c, pos))\n"
     ),
     # The two binners agree that c1+c2 belong together and disagree about c3/c4. That gives
     # bin_refinement one bin worth keeping and one worth arguing over - a set where every binner
@@ -258,6 +285,9 @@ def test_refinement_consumes_binning_output_and_names_its_results(
             "50",
             "-x",
             "10",
+            # GUNC needs a 6.7 GB reference database; what this test checks is the join between
+            # binning and refinement, which does not depend on it.
+            "--skip-gunc",
             "--config",
             config,
             "-A",
@@ -318,6 +348,7 @@ def refined(tmp_path, binned, config, fake_checkm):
                 "50",
                 "-x",
                 "10",
+                "--skip-gunc",  # see above: no 6.7 GB reference database in a unit test
                 "--config",
                 config,
                 "-A",

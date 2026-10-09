@@ -10,9 +10,21 @@ from __future__ import annotations
 
 import bz2
 import gzip
-from typing import IO, cast
+import os
+from typing import IO, Sequence, cast
 
-from ..constants import BZIP2_MAGIC, GZIP_MAGIC
+from ..constants import BZIP2_MAGIC, FASTA_EXTENSIONS_WITH_GZ, GZIP_MAGIC, is_unbinned_name
+
+#: Bases a binner can learn a composition from. Anything else in a record - N, an IUPAC ambiguity
+#: code, a gap character - carries no k-mer signal, so a record made of nothing but these is not a
+#: contig for binning purposes however long it is: its tetranucleotide vector is all zeros and no
+#: read aligns to it. Shared by `binning` and `coverage` so the two filter the same thing.
+INFORMATIVE_BASES = frozenset("ACGTUacgtu")
+
+
+def is_binnable(seq: str) -> bool:
+    """Whether *seq* carries any signal a binner could use. Empty and all-N sequences do not."""
+    return bool(INFORMATIVE_BASES.intersection(seq))
 
 
 def detect_compression(path: str) -> str:
@@ -81,6 +93,30 @@ def contig_id(header: str) -> str:
     the first token is the only identity that is consistent end to end.
     """
     return header.split()[0] if header else header
+
+
+def fasta_files(folder: str, extensions: Sequence[str] = FASTA_EXTENSIONS_WITH_GZ) -> list[str]:
+    """Paths of the FASTA files in *folder*, sorted, compressed ones included.
+
+    A bin folder is not guaranteed to hold only bins. Once a bin set has been through another
+    module it also holds ``.stats.tsv`` tables and whole tool subdirectories (``checkm/``,
+    ``gunc/``), and code that walked the folder with a bare ``os.listdir`` handed those to a FASTA
+    reader: a stray table read as an empty bin, and a subdirectory raised ``IsADirectoryError``
+    with no indication of which folder or which entry was at fault.
+
+    The unbinned catch-all is a FASTA and still not a bin, so it is excluded too. `binning` writes the
+    contigs no CONCOCT cluster claimed to ``concoct_bins/unbinned.fasta`` on purpose, so a user can see
+    what was left over; every caller here is asking for candidate genomes, and each of them - CheckM,
+    prokka, taxator, SPAdes, CoverM, sylph, the AMBER scorer - will answer about the leftovers as
+    readily as about a genome. See :func:`metawrap2.constants.is_unbinned_name`.
+
+    Sorted, because several callers number or order their output by the order bins are read in.
+    """
+    return sorted(
+        os.path.join(folder, name)
+        for name in os.listdir(folder)
+        if name.endswith(tuple(extensions)) and not is_unbinned_name(name)
+    )
 
 
 def iter_fasta(path: str):

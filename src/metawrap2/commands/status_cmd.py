@@ -16,13 +16,13 @@ verification ``--resume`` applies - completed, outputs intact, inputs unchanged 
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shlex
 from typing import Any, Dict, List, Optional
 
 from .. import usage as _usage
+from ..cliformat import make_parser
 from ..manifest import COMPLETED, MANIFEST_NAME, Manifest
 
 #: Must match metawrap2.commands.run._STATE_DIR. Imported lazily in manifest_path() rather than
@@ -125,7 +125,7 @@ def _print_audit(manifest: Manifest, root: str) -> int:
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(
+    ap = make_parser(
         prog="metawrap2 status",
         description="Show what has run in a study directory, and what --resume would do next.",
     )

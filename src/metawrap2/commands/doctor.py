@@ -1,8 +1,8 @@
 """`metawrap2 test [module ...]` - check every module's conda env and software, run the
 unit tests, and print a readable installed / missing / broken map.
 
-For each module it: confirms the `metawrap2-<module>` conda env exists, then goes *into*
-that env and probes each key tool (present on PATH? does it run, or is it broken by e.g. a
+For each module it: confirms the module's conda env exists (several modules share one), then
+goes *into* that env and probes each key tool (present on PATH? does it run, or is it broken by e.g. a
 missing shared library / import error?). It also runs the Python unit-test suite (which
 covers the env-independent core). The result is a per-module status table so a user can see
 at a glance what is ready, what needs installing, and what is broken.
@@ -10,7 +10,6 @@ at a glance what is ready, what needs installing, and what is broken.
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import subprocess
@@ -18,8 +17,15 @@ import sys
 from typing import Dict, List, Optional, Tuple
 
 from .. import dbcheck as _dbcheck
+from ..cliformat import make_parser
 from ..command import _run_flags
-from ..config import MODULE_ENVS, MODULE_TOOLS, conda_env_exists
+from ..config import (
+    MODULE_ENVS,
+    MODULE_TOOLS,
+    OPTIONAL_ENVS_BY_MODULE,
+    OPTIONAL_TOOLS_BY_MODULE,
+    conda_env_exists,
+)
 
 # Signatures in a tool's output that mean it's installed but broken (not just "exits nonzero
 # on --version", which many healthy tools do).
@@ -46,11 +52,13 @@ _PROBES = {
     "taxator": "taxator --help",
     "blastn": "blastn -version",
     "trim_galore": "trim_galore --version",
+    "fastp": "fastp --version",
     "fastqc": "fastqc --version",
     "metabat2": "metabat2 -h",
     "concoct": "concoct --version",
     "minimap2": "minimap2 --version",
     "checkm": "checkm -h",
+    "gunc": "gunc --version",
 }
 
 # Status glyphs / labels.
@@ -105,8 +113,39 @@ def _probe_tool(env: str, tool: str) -> Tuple[str, str]:
     return OK, "present"
 
 
+def _tools_for(module: str, env: str) -> List[str]:
+    """Every tool *module* should be able to run, for a module name or for a bare env name.
+
+    Three ways in, because all three are names a user can type at `doctor` and `install-env`:
+
+    * a module (``binning``) - that module's tools.
+    * an opt-in env's yaml name (``learned``) - the tools that env is supposed to hold.
+    * an env shared by several modules, named by the env (``bins``) - the union of their tools, since
+      the env is only healthy if every module that will reach for it can run.
+
+    The third case is why this is not a dictionary lookup. Several modules share an env now, so
+    ``bins`` is not a key of MODULE_TOOLS at all, and looking it up directly returned nothing - which
+    `doctor` then reported as "0/0 tools OK": a pass that had probed nothing. install-env runs exactly
+    that check after building an env, so the one command whose job is to verify a build was the one
+    reporting success without looking.
+    """
+    direct = MODULE_TOOLS.get(module) or OPTIONAL_TOOLS_BY_MODULE.get(module)
+    if direct:
+        return list(direct)
+    shared: List[str] = []
+    for name, module_env in MODULE_ENVS.items():
+        if module_env != env:
+            continue
+        for tool in MODULE_TOOLS.get(name, []):
+            if tool not in shared:
+                shared.append(tool)
+    return shared
+
+
 def _check_module(module: str) -> dict:
-    env = MODULE_ENVS.get(module, "metawrap2-%s" % module)
+    # An opt-in env is named after its yaml, so `doctor bin_refinement-gunc` (and the verification
+    # install-env runs after building one) lands here with a name MODULE_ENVS does not hold.
+    env = MODULE_ENVS.get(module) or OPTIONAL_ENVS_BY_MODULE.get(module, "metawrap2-%s" % module)
     if not conda_env_exists(env):
         return {
             "module": module,
@@ -117,7 +156,7 @@ def _check_module(module: str) -> dict:
         }
     tools = []
     n_missing = n_broken = 0
-    for tool in MODULE_TOOLS.get(module, []):
+    for tool in _tools_for(module, env):
         status, detail = _probe_tool(env, tool)
         tools.append((tool, status, detail))
         if status == MISSING:
@@ -131,6 +170,50 @@ def _check_module(module: str) -> dict:
         mod_status = OK
         detail = "%d/%d tools OK" % (len(tools), len(tools))
     return {"module": module, "env": env, "status": mod_status, "detail": detail, "tools": tools}
+
+
+def _check_optional_envs(modules: List[str]) -> List[dict]:
+    """The opt-in envs belonging to *modules*, probed if they exist.
+
+    Reported but never counted towards the exit code: an absent opt-in env is a choice, not a
+    fault. A *present but broken* one is worth seeing, which is why they are probed at all - GUNC
+    runs by default in bin_refinement, so "the env is there and gunc does not run" is a failure a
+    user should hear about before a four-hour refinement does.
+    """
+    from ..config import OPTIONAL_ENV_OWNERS, OPTIONAL_ENV_TOOLS, OPTIONAL_ENVS
+
+    rows: List[dict] = []
+    for flag, env in sorted(OPTIONAL_ENVS.items()):
+        owner = OPTIONAL_ENV_OWNERS.get(flag)
+        if owner is None or owner not in modules:
+            continue
+        if not conda_env_exists(env):
+            rows.append(
+                {
+                    "flag": flag,
+                    "env": env,
+                    "status": MISSING,
+                    "detail": "not created (opt-in)",
+                    "tools": [],
+                }
+            )
+            continue
+        tools = [(t, *_probe_tool(env, t)) for t in OPTIONAL_ENV_TOOLS.get(flag, [flag])]
+        unhealthy = [t for t in tools if t[1] != OK]
+        rows.append(
+            {
+                "flag": flag,
+                "env": env,
+                "status": BROKEN if unhealthy else OK,
+                "detail": (
+                    "%d of %d tools not healthy" % (len(unhealthy), len(tools))
+                    if unhealthy
+                    else "%d/%d tools OK" % (len(tools), len(tools))
+                ),
+                "tools": tools,
+            }
+        )
+    return rows
 
 
 def _find_tests_dir() -> Optional[str]:
@@ -217,7 +300,7 @@ MODULE_DATABASES: Dict[str, List[str]] = {
     "kraken2": ["KRAKEN2_DB"],
     "blobology": ["BLASTDB", "TAXDUMP"],
     "classify_bins": ["BLASTDB", "TAXDUMP"],
-    "bin_refinement": ["CHECKM_DB"],
+    "bin_refinement": ["CHECKM_DB", "GUNC_DB"],
     "reassemble_bins": ["CHECKM_DB"],
     "binning": ["CHECKM_DB"],
     "annotate_bins": [],
@@ -276,7 +359,7 @@ def _report_databases(modules: List[str], config: Optional[str], verbose: bool =
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(prog="metawrap2 test")
+    ap = make_parser(prog="metawrap2 test")
     ap.add_argument("modules", nargs="*", help="modules to test (default: all)")
     ap.add_argument("--no-unit-tests", action="store_true", help="skip the Python unit tests")
     ap.add_argument("--tools-only", action="store_true", help="only probe tools/envs")
@@ -324,6 +407,15 @@ def main(argv: List[str]) -> int:
         "  %d OK, %d missing, %d broken (of %d modules)"
         % (counts[OK], counts[MISSING], counts[BROKEN], len(results))
     )
+
+    optional = _check_optional_envs(modules)
+    if optional:
+        print("\nOpt-in environments (absent is a choice, not a fault)\n")
+        for r in optional:
+            print("  %-16s %-30s %-8s %s" % (r["flag"], r["env"], r["status"], r["detail"]))
+            for tool, st, detail in r["tools"]:
+                if st != OK or args.verbose:
+                    print("      - %-18s %-8s %s" % (tool, st, detail))
 
     db_bad = 0
     if not args.tools_only and not args.no_databases:

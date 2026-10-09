@@ -1,0 +1,32 @@
+# Everything that touches reads: QC, assembly, re-assembly, and the blob plot.
+#
+# One env rather than four. read_qc, assembly, reassemble_bins and blobology run the same aligners
+# and samtools, and SPAdes is shared by two of them, so splitting them up meant solving the same
+# dependency graph four times and keeping four copies of it current. They also run in sequence in a
+# normal study, so there is no case where you want one and not the others.
+#
+# python <3.12 is QUAST's constraint, not a choice: QUAST 5.x still imports distutils, which 3.12
+# removed from the stdlib, so an unpinned solve produces an env where `quast` dies on import.
+#
+# All three aligners ship so that --aligner needs no second install. bwa is the assembly module's
+# default, where the registry's minimap2 is binning's: that choice was made on depth agreement,
+# which is not what the hybrid path reads out of an alignment.
+name: metawrap2-reads
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python <3.12
+  - trim-galore >=0.6.10
+  - fastp >=0.24.0
+  - fastqc >=0.12.1
+  - bmtagger >=3.101
+  - bowtie2 >=2.5
+  - spades >=3.15
+  - megahit >=1.2.9
+  - quast >=5.2.0
+  - blast >=2.13
+  - bwa >=0.7.17
+  - bwa-mem2 >=2.2
+  - minimap2 >=2.24
+  - samtools >=1.15

@@ -7,7 +7,7 @@ repos:
     hooks:
       - id: isort
   - repo: https://github.com/psf/black
-    rev: 24.8.0
+    rev: 26.5.1
     hooks:
       - id: black
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -63,8 +63,9 @@ repos:
         pass_filenames: false
       - id: pytest
         name: pytest
-        # CI has no per-module conda envs; run tools off PATH so the gate is portable.
-        entry: bash -c 'f=$(mktemp); printf "[settings]\nuse_conda_envs = false\n" > "$f"; METAWRAP2_CONFIG="$f" python -m pytest -q'
+        # No config juggling: tests/conftest.py pins use_conda_envs per test, so the suite does
+        # not depend on whatever ~/.metawrap2/config.toml this machine has.
+        entry: python -m pytest -q
         language: system
         stages: [pre-push]
         pass_filenames: false

@@ -3,11 +3,12 @@
 Two sets of numbers in MetaWrap2 are asserted rather than measured:
 
 * :data:`metawrap2.scratch.SPACE_MULTIPLIERS` - peak disk need as a multiple of input size;
-* the memory budget a user passes with ``-m``, divided between workers.
+* the memory and thread budget from ``[limits]``, divided between concurrent steps.
 
-Every run already records, per step, the size of each input, the size of each output, and (since
-per-step measurement was added) peak RSS and CPU time. So the observed values can be compared
-against the constants instead of the constants being trusted.
+Every run records, per step, the size of each input, the size of each output, peak RSS, CPU time,
+and the share of the budget the step was granted (see :mod:`metawrap2.limits`). So the observed
+values can be compared against the constants instead of the constants being trusted - and, for the
+budget, against what the step was actually allowed rather than only against itself.
 
     metawrap2 calibrate study1/ study2/          # table per module
     metawrap2 calibrate study*/ --suggest        # constants that fit the observations
@@ -19,15 +20,19 @@ it got at its peak. A multiplier below the observed output ratio is therefore de
 above it may still be too low. Peak memory, by contrast, is measured exactly. The report says which
 is which rather than presenting both as equally solid, because a confidently wrong disk estimate is
 how a run fills a filesystem four hours in.
+
+The budget table is measured on both sides - grant and peak - so it carries no such caveat. What it
+cannot tell you is whether a tool *would* have used more had it been offered more; a step at 30% of
+its grant is evidence the grant is generous, not proof the tool cannot use memory it was given.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from ..cliformat import make_parser
 from ..manifest import COMPLETED, Manifest
 from ..scratch import SPACE_MULTIPLIERS, human
 from ..usage import human as human_bytes
@@ -55,6 +60,18 @@ def _total(entries: List[Dict[str, Any]]) -> int:
     return total
 
 
+def _cores_busy(usage: Dict[str, Any], wall: Optional[float]) -> Optional[float]:
+    """Cores actually busy over the step's wall time, or None if it was not measured.
+
+    Read against the thread grant this is the answer to "did it thread at all": a step given 24
+    threads and busy on 1.2 cores will not go faster for being given 48.
+    """
+    user, system = usage.get("user_seconds"), usage.get("system_seconds")
+    if user is None or system is None or not wall:
+        return None
+    return round((user + system) / wall, 2)
+
+
 def observations(study_dirs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     """Per-module observations gathered from each study's manifest."""
     found: Dict[str, List[Dict[str, Any]]] = {}
@@ -69,6 +86,9 @@ def observations(study_dirs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
             if inputs < MIN_INPUT_BYTES:
                 continue
             usage = step.get("usage") or {}
+            grant = step.get("grant") or {}
+            wall = usage.get("wall_seconds") or step.get("duration_seconds")
+            cores_busy = _cores_busy(usage, wall)
             found.setdefault(_module_of(step["name"]), []).append(
                 {
                     "study": study,
@@ -77,6 +97,10 @@ def observations(study_dirs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
                     "output_bytes": _total(step.get("outputs") or []),
                     "peak_rss_bytes": usage.get("peak_rss_bytes"),
                     "wall_seconds": step.get("duration_seconds"),
+                    # What the step was allowed, so the measurement can be read against it.
+                    "granted_memory_gb": grant.get("memory_gb"),
+                    "granted_threads": grant.get("threads"),
+                    "cores_busy": cores_busy,
                 }
             )
     return found
@@ -93,6 +117,17 @@ def summarise(found: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         entries = found[module]
         ratios = [_ratio(e) for e in entries]
         memories = [e["peak_rss_bytes"] for e in entries if e["peak_rss_bytes"]]
+        # Only steps that recorded both a grant and a measurement can be compared. Runs made
+        # before the budget existed have no grant, and are simply not counted here.
+        against_grant = [
+            e for e in entries if e.get("granted_memory_gb") and e.get("peak_rss_bytes")
+        ]
+        used = [e["peak_rss_bytes"] / (e["granted_memory_gb"] * 1024**3) for e in against_grant]
+        threaded = [
+            e["cores_busy"] / e["granted_threads"]
+            for e in entries
+            if e.get("cores_busy") and e.get("granted_threads")
+        ]
         rows.append(
             {
                 "module": module,
@@ -106,6 +141,17 @@ def summarise(found: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
                     if memories
                     else None
                 ),
+                "runs_with_grant": len(against_grant),
+                "max_granted_memory_gb": (
+                    max(e["granted_memory_gb"] for e in against_grant) if against_grant else None
+                ),
+                #: Peak RSS as a fraction of the memory the step was granted. Above 1 means the
+                #: grant was exceeded (the kernel allowed it; a tool that honoured -m would not
+                #: have), well below it means the grant was never the constraint.
+                "max_memory_used_fraction": max(used) if used else None,
+                #: Cores actually busy as a fraction of the threads granted. A step at 0.1 is not
+                #: threading, and giving it more threads will not make it finish sooner.
+                "max_thread_used_fraction": max(threaded) if threaded else None,
             }
         )
     return rows
@@ -154,6 +200,61 @@ def _print_table(rows: List[Dict[str, Any]]) -> None:
     )
 
 
+def _budget_verdict(row: Dict[str, Any]) -> str:
+    """How the budget the steps were granted compares with what they went on to use."""
+    used = row["max_memory_used_fraction"]
+    if used is None:
+        return "no grant recorded"
+    if used > 1.0:
+        return "EXCEEDED the grant by %.0f%%" % ((used - 1) * 100)
+    if used > 0.85:
+        return "close to the grant"
+    if used < 0.25:
+        return "used under a quarter of it"
+    return "comfortable"
+
+
+def _print_budget_table(rows: List[Dict[str, Any]]) -> None:
+    """Granted versus used, which is the question `-m` and `[limits]` are answers to."""
+    measured = [r for r in rows if r["runs_with_grant"]]
+    if not measured:
+        print(
+            "  No step recorded the budget it was granted, so there is nothing to compare peak\n"
+            "  memory against. Runs made by `metawrap2 run` record it from now on.\n"
+        )
+        return
+    print(
+        "  %-16s %5s %9s %9s %7s %7s  %s"
+        % ("module", "runs", "granted", "peak", "used", "threads", "verdict")
+    )
+    print("  " + "-" * 104)
+    for row in measured:
+        print(
+            "  %-16s %5d %9s %9s %7s %7s  %s"
+            % (
+                row["module"],
+                row["runs_with_grant"],
+                "%d GB" % row["max_granted_memory_gb"],
+                human_bytes(row["max_peak_rss_bytes"]) if row["max_peak_rss_bytes"] else "-",
+                "%.0f%%" % (row["max_memory_used_fraction"] * 100),
+                (
+                    "%.0f%%" % (row["max_thread_used_fraction"] * 100)
+                    if row["max_thread_used_fraction"]
+                    else "-"
+                ),
+                _budget_verdict(row),
+            )
+        )
+    print("  " + "-" * 104)
+    print(
+        "  'granted' is the largest -m any of these steps was given, 'peak' the largest peak RSS\n"
+        "  measured, 'used' the second as a fraction of the first, and 'threads' how much of the\n"
+        "  thread grant was actually busy. A module well under its grant can have [limits]\n"
+        "  max_memory_fraction lowered (or -j raised to run more steps at once); one over it\n"
+        "  is not honouring -m, and only a smaller grant or fewer concurrent steps will help.\n"
+    )
+
+
 def _print_suggestions(rows: List[Dict[str, Any]]) -> None:
     """Print a SPACE_MULTIPLIERS block that is at least consistent with what was seen."""
     print("\n  A SPACE_MULTIPLIERS block no observation here contradicts:\n")
@@ -174,7 +275,7 @@ def _print_suggestions(rows: List[Dict[str, Any]]) -> None:
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(
+    ap = make_parser(
         prog="metawrap2 calibrate",
         description="Compare MetaWrap2's built-in disk and memory estimates against real runs.",
     )
@@ -206,18 +307,32 @@ def main(argv: List[str]) -> int:
         return 0
 
     _print_table(rows)
+    _print_budget_table(rows)
     if args.per_step:
-        print("  %-28s %12s %12s %11s" % ("step", "inputs", "outputs", "peak memory"))
-        print("  " + "-" * 70)
+        print(
+            "  %-28s %12s %12s %11s %9s %7s"
+            % ("step", "inputs", "outputs", "peak memory", "granted", "cores")
+        )
+        print("  " + "-" * 88)
         for module in sorted(found):
             for entry in found[module]:
                 print(
-                    "  %-28s %12s %12s %11s"
+                    "  %-28s %12s %12s %11s %9s %7s"
                     % (
                         entry["step"],
                         human(entry["input_bytes"]),
                         human(entry["output_bytes"]),
                         human_bytes(entry["peak_rss_bytes"]) if entry["peak_rss_bytes"] else "-",
+                        (
+                            "%d GB" % entry["granted_memory_gb"]
+                            if entry["granted_memory_gb"]
+                            else "-"
+                        ),
+                        (
+                            "%.1f/%d" % (entry["cores_busy"], entry["granted_threads"])
+                            if entry["cores_busy"] and entry["granted_threads"]
+                            else "-"
+                        ),
                     )
                 )
         print()

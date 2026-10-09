@@ -9,27 +9,35 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from .. import __version__
+from .. import aligners as _aligners
 from .. import command as _cmd
 from .. import history as _history
 from .. import interrupt as _interrupt
+from .. import limits as _limits
 from .. import logging as _log
 from .. import runlock as _runlock
 from .. import scratch as _scratch
 from .. import validate as _validate
 from ..checkpoint import make_checkpoint
-from ..command import ToolError, run  # re-exported for modules
-from ..config import MODULE_ENVS, Settings, conda_env_exists
+from ..command import ToolError, run, runner  # re-exported for modules
+from ..config import MODULE_ENVS, OPTIONAL_ENVS, Settings, conda_env_exists
+from ..constants import FASTA_EXTENSIONS
 from ..io import reads as _reads
+from ..io.seqio import fasta_files as fasta_files_in
 from ..provenance import RunRecorder
 
 #: The lock held on the current run's output directory, if any. Deliberately not a field on
 #: RunRecorder: everything on the recorder is serialised into run_config.json, and a RunLock is
 #: not JSON-serialisable.
 _active_lock: Optional[_runlock.RunLock] = None
+
+#: The disk high-water monitor for the current run, held here for the same reason as the lock.
+_active_disk_monitor: Optional[_limits.DiskMonitor] = None
 
 # Banner logging (same look as the original comm/announcement/warning/error).
 comm = _log.comm
@@ -55,15 +63,20 @@ __all__ = [
     "expect_produced",
     "file_size",
     "finish_run",
+    "force",
     "fs_copy",
     "fs_move",
     "fs_remove",
+    "fs_replace_dir",
     "listdir",
     "make_checkpoint",
+    "memory_arg",
+    "optional_env_for",
     "read_layout",
     "require_databases",
     "require_file",
     "require_nonempty_dir",
+    "resolve_memory_gb",
     "resolve_threads",
     "run",
     "start_run",
@@ -71,6 +84,24 @@ __all__ = [
     "validate_inputs",
     "warning",
 ]
+
+
+def _require_env_manager(env: str) -> None:
+    """Fail now if the thing that runs tools inside envs is not on PATH.
+
+    Two preconditions have to hold before anything can run in a conda env: the env has to exist, and
+    the env manager has to be findable. Only the first was checked up front. The second was checked
+    where the argv is built, which is not the start of a run but the first step that happens to need
+    an env - and a module can do real work before that. bin_refinement runs Binning_refiner in
+    process, so a missing mamba surfaced after every bin-set combination had been built, at CheckM.
+
+    The message itself is good and is raised unchanged; the only thing wrong with it was when the
+    user got to read it.
+    """
+    if runner.dry_run:
+        return
+    if shutil.which(runner.env_manager) is None:
+        error(str(_cmd.EnvManagerMissing(runner.env_manager, env)))
 
 
 def env_for(module: str, settings: Settings) -> Optional[str]:
@@ -84,6 +115,8 @@ def env_for(module: str, settings: Settings) -> Optional[str]:
     if not settings.use_conda_envs:
         return None
     env = MODULE_ENVS.get(module)
+    if env:
+        _require_env_manager(env)
     if env and not conda_env_exists(env):
         error(
             "The conda environment '%s' for the %s module does not exist.\n"
@@ -91,6 +124,39 @@ def env_for(module: str, settings: Settings) -> Optional[str]:
             "    metawrap2 install-env %s\n"
             "or run the module's tools straight off your PATH by setting "
             "use_conda_envs = false under [settings] in metawrap2.toml." % (env, module, module)
+        )
+    return env
+
+
+def optional_env_for(key: str, settings: Settings, needed_by: str) -> Optional[str]:
+    """Conda env name for the opt-in tool *key* names, or None if conda envs are off.
+
+    The same fail-fast as :func:`env_for`, for the envs that are not a module's own. It matters more
+    here, not less. A module env is missing before anything runs, so the user finds out in the
+    first second either way; an opt-in env is reached at whatever point in the pipeline its tool is
+    called, which for a binner is after every read has been aligned. Without this check that is an
+    hour or more of work followed by a message from ``mamba run`` about a missing prefix.
+
+    Modules should call this up front rather than at the point of use, for exactly that reason.
+
+    *needed_by* is how the message tells the user what asked for the env, and it is the caller's
+    argument rather than something derived from *key* because the obvious derivation is wrong.
+    ``"--" + key`` happens to be right for ``--semibin2`` and ``--checkm2``, but GUNC runs by
+    default and is turned *off* with ``--skip-gunc``, and CoverM is selected as
+    ``--quantifier coverm``, so printing ``--gunc`` or ``--coverm`` would tell the user to pass a
+    flag that does not exist.
+    """
+    if not settings.use_conda_envs:
+        return None
+    env = OPTIONAL_ENVS[key]
+    _require_env_manager(env)
+    if not conda_env_exists(env):
+        error(
+            "The conda environment '%s' does not exist, and %s needs it.\n"
+            "Create it with:\n"
+            "    metawrap2 install-env %s\n"
+            "or run the tool straight off your PATH by setting use_conda_envs = false under "
+            "[settings] in metawrap2.toml." % (env, needed_by, env[len("metawrap2-") :])
         )
     return env
 
@@ -115,6 +181,13 @@ def require_databases(module: str, settings: Settings, keys: List[str]) -> None:
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def _describe_overrides(overrides: dict) -> str:
+    """``--max-threads 8, --max-gpus 0`` - the flags as the user typed them, not the field names."""
+    return ", ".join(
+        "--%s %s" % (key.replace("_", "-"), value) for key, value in sorted(overrides.items())
+    )
 
 
 def start_run(
@@ -146,6 +219,17 @@ def start_run(
 
     params = {k: v for k, v in vars(args).items()}
     inputs = [p for p in inputs if p]
+
+    # Resolved once, here, and reported once. The whole point of the governor is that a run has a
+    # single budget rather than one per tool, so this is the only place that measures the machine -
+    # and saying it out loud is what lets a user notice they are using half a box when they meant
+    # to use all of it, before waiting a day to find out.
+    budget = _limits.resolve(settings.limits)
+    comm("Resource budget: %s" % budget.describe())
+    overrides = _limits.overrides()
+    if overrides:
+        comm("Budget overridden on the command line: %s" % _describe_overrides(overrides))
+
     rec = RunRecorder(
         module=module,
         version=__version__,
@@ -154,6 +238,7 @@ def start_run(
         conda_env=env,
         databases=dict(settings.databases),
         inputs=inputs,
+        budget=budget.as_dict(),
     )
     _cmd.set_recorder(rec)
 
@@ -196,6 +281,12 @@ def start_run(
         # its first command still says what it was running with.
         rec.record_environment(output)
 
+    # Watch the disk for the whole run, not just before each step. check_disk_space measures once,
+    # up front; a step that starts with room and writes for six hours can still fill the
+    # filesystem at hour five, and that is the case this catches.
+    if output and not _cmd.runner.dry_run:
+        _start_disk_monitor(module, settings, output, budget)
+
     # A durable, machine-wide record of the run, outside any output directory. Written at the
     # start so an interrupted or killed run still leaves a trace; finish_run appends the outcome.
     if not _cmd.runner.dry_run:
@@ -210,6 +301,32 @@ def start_run(
             conda_env=env,
         )
     return rec
+
+
+def _start_disk_monitor(
+    module: str, settings: Settings, output_dir: str, budget: _limits.Budget
+) -> None:
+    """Begin watching this run's filesystems, unless the space checks were turned off.
+
+    Honours ``--skip-space-check`` for the same reason the preflight does: a user who has told us
+    they know better about their own filesystem should not then be stopped by us mid-run.
+    """
+    if _cmd.runner.skip_space_check or getattr(settings, "skip_space_check", False):
+        return
+
+    def report(state: _limits.DiskState) -> None:
+        warning(
+            "Stopping %s: %s. Nothing is wrong with the run - it is being stopped so it does not "
+            "fill the filesystem. Free some space (or set scratch_dir under [settings] to point "
+            "somewhere roomier) and re-run with --resume. To allow a fuller disk, raise [limits] "
+            "max_disk_fraction." % (module, state.describe())
+        )
+
+    global _active_disk_monitor
+    _active_disk_monitor = _limits.DiskMonitor(
+        [output_dir, _scratch.scratch_root(settings, output_dir)], budget, on_stop=report
+    )
+    _active_disk_monitor.start()
 
 
 def _outcome_from_context() -> str:
@@ -264,10 +381,15 @@ def finish_run(
         _log.configure_run_log(None)
         _cmd.set_recorder(None)
         _cmd.set_run_logs(None, None)
-        global _active_lock
+        global _active_lock, _active_disk_monitor
         if _active_lock is not None:
             _active_lock.release()
             _active_lock = None
+        # Stopped here rather than left to the daemon flag, so the thread cannot outlive the run
+        # and trip an interrupt into whatever the process does next.
+        if _active_disk_monitor is not None:
+            _active_disk_monitor.stop()
+            _active_disk_monitor = None
 
 
 # Characters in a path that tend to break downstream shell pipelines / tools.
@@ -317,41 +439,115 @@ def read_layout(args) -> _reads.ReadSet:
 
 
 def resolve_threads(args, settings: Settings) -> int:
-    """Final thread count for a run: an explicit ``-t`` wins, else the config, else 1.
+    """Final thread count for a run: an explicit ``-t`` wins, else the config, else the budget.
 
     ``-t`` defaults to ``None`` in every module so that "user did not say" is
-    distinguishable from "user asked for 1". Accepts ``-t all`` for every core on the
-    machine. Without this, a user who set ``threads`` in metawrap2.toml still silently got
-    single-threaded assemblies and alignments, which on a metagenome is the difference
-    between hours and days.
+    distinguishable from "user asked for 1". Accepts ``-t all``, which now means every core
+    the *budget* allows rather than every core on the machine. Without this, a user who set
+    ``threads`` in metawrap2.toml still silently got single-threaded assemblies and
+    alignments, which on a metagenome is the difference between hours and days.
+
+    With neither flag nor config the answer is the budget, the same as ``-m``: a default of 1
+    thread on a machine the budget says may use 96 of them is not a cautious choice, it is a
+    run that takes two days instead of two hours for no reason anyone asked for.
+
+    This is also where the ``[limits]`` thread ceiling is enforced, because it is the one
+    place every module's thread count passes through. A request above the ceiling is capped
+    rather than refused: the user asked for more parallelism than the budget allows, which is
+    a preference to be clamped, not a mistake to stop the run over.
     """
     requested = getattr(args, "threads", None)
+    budget = _limits.resolve(settings.limits)
     if requested is None:
-        threads = settings.threads or 1
+        threads = settings.threads or budget.threads
     else:
         threads = requested
     if threads < 1:
         error("--threads must be at least 1 (got %s)." % threads)
-    available = os.cpu_count() or 1
-    if threads > available:
-        warning(
-            "Asked for %d threads but this machine has %d cores; using %d."
-            % (threads, available, available)
-        )
-        threads = available
+    if threads > budget.threads:
+        # Only worth saying when the user typed -t. A config-wide `threads` default capped by a
+        # budget the same user set is not news, and the budget line start_run prints covers it;
+        # warning about it every run would train people to ignore the warnings that matter.
+        if requested is not None:
+            if threads > budget.machine_cores:
+                warning(
+                    "Asked for %d threads but this machine has %d cores; using %d."
+                    % (threads, budget.machine_cores, budget.threads)
+                )
+            else:
+                warning(
+                    "Asked for %d threads but the budget allows %d of this machine's %d cores; "
+                    "using %d. Raise [limits] max_thread_fraction or max_threads to use more."
+                    % (threads, budget.threads, budget.machine_cores, budget.threads)
+                )
+        threads = budget.threads
     args.threads = threads
     return threads
 
 
+def resolve_memory_gb(args, settings: Settings) -> int:
+    """Final memory allowance in GB for a run: an explicit ``-m`` wins, else the budget.
+
+    ``-m`` defaults to ``None`` in every module that has it, for the same reason ``-t`` does: so
+    "user did not say" is distinguishable from a number they actually chose. Unset, it now
+    resolves to the ``[limits]`` budget rather than a fixed constant, which is the point of having
+    a budget - the old per-module constants (24 GB for an assembly, 4 GB for binning) were chosen
+    without reference to the machine, and on a large one they left most of it unused while
+    metaSPAdes failed for want of memory and CheckM ran pplacer single-threaded.
+
+    An explicit request above the ceiling is capped, matching :func:`resolve_threads`.
+    """
+    requested = getattr(args, "memory", None)
+    budget = _limits.resolve(settings.limits)
+    allowed = max(1, int(budget.memory_gb))
+    if requested is None:
+        args.memory = allowed
+        return allowed
+    if requested < 1:
+        error("--memory must be at least 1 GB (got %s)." % requested)
+    memory = requested
+    if memory > allowed:
+        warning(
+            "Asked for %d GB but the budget allows %d GB of this machine's %s; using %d. "
+            "Raise [limits] max_memory_fraction or max_memory_gb to use more."
+            % (memory, allowed, _limits.human(budget.machine_memory_bytes), allowed)
+        )
+        memory = allowed
+    args.memory = memory
+    return memory
+
+
+def memory_arg(parser) -> None:
+    """Add the standard ``-m/--memory`` option (default: the ``[limits]`` memory budget)."""
+    help_text = (
+        "memory in GB the tools may use (default: the [limits] budget, "
+        "%d%% of this machine's RAM)" % round(_limits.DEFAULT_MEMORY_FRACTION * 100)
+    )
+    parser.add_argument(
+        "-m",
+        "--memory",
+        type=int,
+        default=None,
+        # argparse %-formats help strings against the action's own attributes, so a literal
+        # percent sign has to be doubled or `--help` raises instead of printing.
+        help=help_text.replace("%", "%%"),
+    )
+
+
 def threads_arg(parser) -> None:
     """Add the standard ``-t/--threads`` option (default: the config's threads setting)."""
+    help_text = (
+        "number of threads ('all' for every core the budget allows; default: [settings] "
+        "threads in metawrap2.toml, else the [limits] budget, %d%% of this machine's cores)"
+        % round(_limits.DEFAULT_THREAD_FRACTION * 100)
+    )
     parser.add_argument(
         "-t",
         "--threads",
         type=_threads_value,
         default=None,
-        help="number of threads ('all' for every core; "
-        "default: [settings] threads in metawrap2.toml, else 1)",
+        # See memory_arg: argparse %-formats help strings, so the percent sign must be doubled.
+        help=help_text.replace("%", "%%"),
     )
 
 
@@ -376,6 +572,17 @@ def _threads_value(text: str) -> int:
 def dry_run() -> bool:
     """True if this is a --dry-run (no commands are actually executed)."""
     return bool(_cmd.runner.dry_run)
+
+
+def force() -> bool:
+    """True if this run was told to overwrite an existing output directory (--force).
+
+    A module that clears a previous run's artifacts has to ask, because ``--resume`` reaches the same
+    code with the same already-exists output folder and means the opposite thing. bin_refinement's
+    clean did not ask, so resuming a run whose refine step was already done deleted the bin sets it
+    was about to skip rebuilding.
+    """
+    return bool(_cmd.runner.force)
 
 
 def expect_file(path: str, message: str, allow_empty: bool = False) -> bool:
@@ -403,13 +610,30 @@ def fs_move(src: str, dest: str) -> None:
     os.replace(src, dest)
 
 
+def fs_replace_dir(src: str, dest: str) -> None:
+    """``os.replace``, but clearing *dest* first if it is a directory. Skipped under --dry-run.
+
+    ``os.replace`` overwrites a file and refuses a directory with anything in it, so a step that moves
+    a directory into place works the first time and raises the second - which is every rerun into the
+    same output folder, whether by ``--force`` or ``--resume``. It raises at the *end*, after the work,
+    which is the expensive way to find out. What sits at *dest* is always an earlier run's version of
+    the thing being moved, so replacing it is what the move already meant.
+
+    Safe to call where *src* may be either, which is what the tidy-up loops moving bin sets and their
+    .stats.tsv sidecars in the same pass need.
+    """
+    if dry_run():
+        return
+    if os.path.isdir(dest):
+        shutil.rmtree(dest, ignore_errors=True)
+    os.replace(src, dest)
+
+
 def fs_copy(src: str, dest: str) -> None:
     """shutil.copy, skipped under --dry-run."""
     if dry_run():
         return
-    import shutil as _shutil
-
-    _shutil.copy(src, dest)
+    shutil.copy(src, dest)
 
 
 def fs_remove(path: str) -> None:
@@ -434,6 +658,20 @@ def listdir(path: str) -> List[str]:
             return []
         return []
     return os.listdir(path)
+
+
+def list_bins(path: str, extensions: Sequence[str] = FASTA_EXTENSIONS) -> List[str]:
+    """Sorted filenames of the bins in *path* - :func:`fasta_files`, as names rather than paths.
+
+    The modules that build an output name per bin (prokka's per-bin directory, the ``.orig.fa`` copy,
+    the per-bin read files) want the filename, not the path, and reaching for ``os.listdir`` to get it
+    is how three of them came to treat the unbinned catch-all as a genome. This is the same listing,
+    so there is one definition of what a bin folder contains.
+
+    Empty rather than raising for a directory that does not exist, via :func:`listdir`, because every
+    caller is inside a module that has already validated its inputs or is running ``--dry-run``.
+    """
+    return [os.path.basename(p) for p in fasta_files_in(path, extensions)]
 
 
 #: Argument names that hold a filesystem path, and so should be made absolute up front.
@@ -562,6 +800,20 @@ def check_disk_space(module: str, settings: Settings, inputs: List[str], output_
     if dry_run() or _cmd.runner.skip_space_check or getattr(settings, "skip_space_check", False):
         return
     targets = [output_dir, _scratch.scratch_root(settings, output_dir)]
+
+    # The ceiling is a different kind of check from the estimate below, and gets a different
+    # answer. This one is a measurement - the filesystem is already fuller than the budget allows -
+    # so there is nothing to be wrong about and no reason to start a step that would only be
+    # stopped by the monitor minutes later.
+    budget = _limits.resolve(settings.limits)
+    under_ceiling, ceiling_message = _limits.check_ceiling(targets, budget)
+    if not under_ceiling:
+        error(
+            "Not starting %s: %s\nThis is the [limits] max_disk_fraction ceiling, and it is "
+            "measured rather than estimated. Free some space, point scratch_dir somewhere "
+            "roomier, or raise max_disk_fraction." % (module, ceiling_message)
+        )
+
     ok, message = _scratch.check_space(module, inputs, targets)
     if ok:
         comm("disk space check: %s" % message)
@@ -580,3 +832,93 @@ def check_disk_space(module: str, settings: Settings, inputs: List[str], output_
         "[settings]; to make this stop the run in future, set strict_space_check = true."
         % (module, message.replace("\n", "\n    "))
     )
+
+
+# --- aligning reads to a reference ---------------------------------------------------------
+
+#: The aligner streams straight into ``samtools sort``, so the SAM never reaches disk. Written out
+#: first it was roughly 25 GB of uncompressed text per sample, deleted again minutes later, and on a
+#: multi-sample run that was the largest transient footprint of the whole module. ``pipefail``
+#: because bash otherwise reports only the sort's status, and a failed alignment piped into a sort
+#: that happily writes an empty BAM looks exactly like success.
+ALIGN_SORT = "set -o pipefail; {align} | samtools sort -T {tmp} -@ {threads} -O BAM -o {bam} -"
+
+#: Threads given to ``samtools sort``. The aligner and the sort run at the same time, so handing
+#: both the full thread count oversubscribes the machine; the sort saturates well before the aligner
+#: does, and the benchmark that picked minimap2 held it at 8 throughout.
+SORT_THREADS = 8
+
+
+# Read subsampling for coverage was implemented here, measured, and removed. Kept as a note because the
+# idea recurs: alignment is the whole cost of measuring coverage, so thinning the reads looks like free
+# speed. It is not free, and it is not where the cost is. Measured on CAMI2 GI with metaBAT2, against
+# AMBER: half the reads keeps 33 of 37 high-quality MAGs for 53% of the step's cpu, a quarter keeps 25,
+# a tenth keeps 12. The trade is better than proportional, but binning is under 2% of a default run - so
+# halving it saves about 1% of the pipeline and gives up 11% of the genomes. Anyone reaching for this
+# should thin reads before *assembly*, which is 86% of the run, not before coverage.
+#
+# Read capping where it does pay is reassemble_bins --max-coverage, which thins each bin's recruited
+# reads to 50x of that bin's own assembled length: there the input is per bin and an abundant organism
+# really does hand SPAdes hundreds of times the coverage it can use.
+
+
+def align_read_sets(
+    reference: str,
+    reads: Sequence[str],
+    out_dir: str,
+    *,
+    aligner: str,
+    threads: int,
+    env: Optional[str] = None,
+    single_end: bool = False,
+    interleaved: bool = False,
+) -> List[str]:
+    """Map each read set in *reads* to *reference*, leaving one sorted BAM per sample in *out_dir*.
+
+    Returns the BAM paths in sample order. One place for this because two stages want exactly the
+    same thing from an aligner and would otherwise each own a copy: `binning` maps every sample to
+    one assembly, and the cohort coverage stage maps every sample to the concatenated catalogue of
+    all of them. The difference between those is which reference is passed in, which is not a reason
+    for two loops.
+
+    A BAM that already exists is left alone, so an interrupted pass resumes at the sample it died
+    on rather than redoing the ones before it.
+
+    """
+    spec = _aligners.ALIGNERS[aligner]
+    index = _aligners.index_path(reference, aligner)
+    run(
+        spec["index_cmd"].format(assembly=reference, index=index),
+        env=env,
+        tool="%s index" % aligner,
+    )
+    tmp = os.path.join(out_dir, "tmp-samtools")
+    sort_threads = min(threads, SORT_THREADS)
+    sets = (
+        collect_reads(list(reads))
+        if (single_end or interleaved)
+        else collect_read_pairs(list(reads))
+    )
+
+    bams = []
+    for entry in sets:
+        sample = entry[0]
+        bam = os.path.join(out_dir, sample + ".bam")
+        bams.append(bam)
+        if not dry_run() and os.path.isfile(bam):
+            comm("skipping aligning %s reads; %s already exists" % (sample, bam))
+            continue
+        comm("Aligning and sorting %s reads back to assembly" % sample)
+        if single_end:
+            align = spec["single"].format(threads=threads, index=index, reads=entry[1])
+        elif interleaved:
+            align = spec["interleaved"].format(threads=threads, index=index, reads=entry[1])
+        else:
+            _s, r1, r2 = entry
+            align = spec["paired"].format(threads=threads, index=index, r1=r1, r2=r2)
+        run(
+            ["bash", "-c", ALIGN_SORT.format(align=align, tmp=tmp, threads=sort_threads, bam=bam)],
+            env=env,
+            tool="%s | samtools sort" % aligner,
+        )
+    return bams

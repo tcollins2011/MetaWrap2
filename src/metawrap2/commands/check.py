@@ -11,9 +11,9 @@ where they actually live, inside each env.
 
 from __future__ import annotations
 
-import argparse
 from typing import List
 
+from ..cliformat import make_parser
 from ..config import (
     DB_KEYS,
     MODULE_ENVS,
@@ -34,7 +34,7 @@ def _status(ok: bool) -> str:
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(prog="metawrap2 check")
+    ap = make_parser(prog="metawrap2 check")
     ap.add_argument("modules", nargs="*", help="modules to check (default: all)")
     ap.add_argument("--config", help="path to metawrap2.toml")
     args = ap.parse_args(argv)
@@ -85,8 +85,9 @@ def main(argv: List[str]) -> int:
     if missing_dbs:
         print(
             "\n%d database(s) the selected modules need are not set or not present: %s"
-            "\nSet them under [databases] in metawrap2.toml (see "
-            "installation/database_installation.md)." % (len(missing_dbs), ", ".join(missing_dbs))
+            "\nInstall them with `metawrap2 install-db`, which writes their paths into your "
+            "config, or set them yourself under [databases] in metawrap2.toml."
+            % (len(missing_dbs), ", ".join(missing_dbs))
         )
     if missing or missing_dbs:
         print()

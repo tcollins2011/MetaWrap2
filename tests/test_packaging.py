@@ -71,6 +71,31 @@ def test_the_package_version_matches_the_module(pyproject):
     assert pyproject["project"]["version"] == __version__
 
 
+def test_the_version_is_the_same_in_every_file_that_states_it():
+    """Four files carry it, and a release that bumps three of them ships a lie in the fourth.
+
+    `metawrap2 -v`, the wheel's metadata, the conda recipe and CITATION.cff are all read by
+    somebody - the last one by anybody citing this - so they are checked together rather than by
+    whoever remembers at release time.
+    """
+    import re
+
+    from metawrap2 import __version__
+
+    for name, pattern in (
+        ("CITATION.cff", r'^version:\s*"([^"]+)"'),
+        (os.path.join("conda_pkg", "meta.yaml"), r'^\s*version:\s*"([^"]+)"'),
+    ):
+        with open(os.path.join(REPO, name)) as fh:
+            found = re.search(pattern, fh.read(), re.MULTILINE)
+        assert found, "%s states no version" % name
+        assert found.group(1) == __version__, "%s says %s, not %s" % (
+            name,
+            found.group(1),
+            __version__,
+        )
+
+
 # --- the Python floor is stated in four places ---------------------------------------------
 
 

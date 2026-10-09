@@ -1,0 +1,31 @@
+# Everything that turns contigs into a MAG catalogue: binning, cross-sample coverage,
+# dereplication and abundance.
+#
+# One env rather than six. These four modules run back to back and share the aligner stack; the two
+# tools that used to be opt-in for size (coverm, fairy) are single static binaries that cost nothing
+# to include, and keeping them out only meant a second install command for no saving.
+#
+# Note what is *not* here: the learned binners (see learned.yaml). They bring pytorch, which is the
+# one dependency in this part of the pipeline heavy enough to be worth a separate solve.
+name: metawrap2-bins
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - metabat2 >=2.15
+  - maxbin2 >=2.2.7
+  - concoct >=1.1.0
+  - minimap2 >=2.24
+  - bwa >=0.7.17
+  - bwa-mem2 >=2.2
+  - samtools >=1.15
+  - skani >=0.2.2
+  # sylph (Shaw & Yu, Nat Biotechnol 2025) profiles against a genome set with zero-inflated Poisson
+  # k-mer statistics instead of read alignment, so its cost barely grows with sequencing depth.
+  - sylph >=0.6.0
+  # salmon is still the choice when the magnitudes matter rather than the ranking: it estimated them
+  # measurably better. Same env, so switching between the two costs no install.
+  - salmon >=1.10
+  - coverm >=0.7.0
+  # The k-mer coverage route for `coverage --coverage fairy`.
+  - fairy >=0.5.7

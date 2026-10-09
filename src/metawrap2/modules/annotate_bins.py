@@ -17,7 +17,8 @@ import os
 import shutil
 from typing import List
 
-from ..config import OPTIONAL_ENVS, load_settings
+from ..cliformat import make_parser
+from ..config import MODULE_ENVS, load_settings
 from ..constants import FASTA_EXTENSIONS
 from ..progress import bar
 from ..scripts import shorten_contig_names
@@ -30,6 +31,7 @@ from ._common import (
     env_for,
     error,
     finish_run,
+    list_bins,
     make_checkpoint,
     require_nonempty_dir,
     resolve_threads,
@@ -40,7 +42,7 @@ from ._common import (
     warning,
 )
 
-CONDA_ENV = "metawrap2-annotate_bins"
+CONDA_ENV = MODULE_ENVS["annotate_bins"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 PROKKA = "prokka --quiet --cpus {threads} --outdir {outdir} --prefix {prefix} {input}"
@@ -53,7 +55,7 @@ DEFAULT_THREADS = 1
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = make_parser(
         prog="metawrap2 annotate_bins",
         usage="metawrap2 annotate_bins [options] -o output_dir -b bin_folder",
         description="Functionally annotate a set of bins with PROKKA.",
@@ -86,8 +88,7 @@ def _write_shortened(bin_file: str, tmp_bin: str) -> None:
 def _annotator(args, settings):
     """Return (name, conda env, gff extension) for the selected annotator."""
     if args.bakta:
-        env = OPTIONAL_ENVS["bakta"] if settings.use_conda_envs else None
-        return "bakta", env, ".gff3"
+        return "bakta", env_for("annotate_bins", settings), ".gff3"
     return "prokka", env_for("annotate_bins", settings), ".gff"
 
 
@@ -149,11 +150,7 @@ def main(argv: List[str]) -> int:
             ensure_dir(prokka_out)
 
             tmp_bin = os.path.join(args.output, "tmp_bin.fa")
-            bin_files = [
-                f
-                for f in sorted(os.listdir(args.bins))
-                if f.endswith(FASTA_EXTENSIONS) and os.path.isfile(os.path.join(args.bins, f))
-            ]
+            bin_files = list_bins(args.bins)
             if not bin_files:
                 error(
                     "No fasta bins (%s) found in %s. Exiting."

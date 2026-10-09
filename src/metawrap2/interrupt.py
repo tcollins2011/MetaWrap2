@@ -13,7 +13,8 @@ the conventional 128 + signal number.
 
 This is deliberately *not* a general signal framework. Only the signals that mean "stop now,
 your outputs are not finished" are touched; SIGINT keeps Python's own behaviour, which already
-raises KeyboardInterrupt.
+raises KeyboardInterrupt - except in the one case where there is no such behaviour to keep, which
+:func:`install_handlers` explains.
 """
 
 from __future__ import annotations
@@ -61,8 +62,32 @@ def exit_code(default: int = 130) -> int:
     return 128 + _received if _received is not None else default
 
 
+def _inherited_ignored_sigint() -> List[str]:
+    """``["SIGINT"]`` if this process inherited SIGINT as ignored, otherwise ``[]``.
+
+    A shell puts a background job's SIGINT and SIGQUIT to SIG_IGN, and the disposition is
+    inherited; CPython only installs its own SIGINT handler when it finds SIG_DFL, so a run
+    started with ``&`` or under nohup - exactly what a long run is started with - cannot be
+    interrupted by SIGINT at all. "kill -INT" on it does nothing, silently, and the only way left
+    to stop it is SIGTERM.
+
+    Taking SIGINT over in that case restores the behaviour the rest of this module assumes rather
+    than overriding it: where Python's handler exists it is left alone, and where the shell threw
+    it away it is put back.
+    """
+    if getattr(signal, "SIGINT", None) is None:
+        return []
+    try:
+        return ["SIGINT"] if signal.getsignal(signal.SIGINT) is signal.SIG_IGN else []
+    except (OSError, ValueError):
+        return []
+
+
 def install_handlers(signals: Optional[List[str]] = None) -> Dict[str, bool]:
     """Route each of *signals* to :class:`Stopped`. Returns which ones were installed.
+
+    SIGINT is added to them only when it was inherited as ignored - see
+    :func:`_inherited_ignored_sigint`.
 
     Safe to call more than once and on any platform: a signal this OS does not have, or that
     cannot be handled from the current thread, is skipped rather than raising. Losing the
@@ -76,7 +101,7 @@ def install_handlers(signals: Optional[List[str]] = None) -> Dict[str, bool]:
         _received = signum
         raise Stopped(signum)
 
-    for name in signals or STOP_SIGNALS:
+    for name in list(signals or STOP_SIGNALS) + _inherited_ignored_sigint():
         signum = getattr(signal, name, None)
         if signum is None:
             installed[name] = False

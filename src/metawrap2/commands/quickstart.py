@@ -23,12 +23,12 @@ batch script) it never asks and never downloads.
 
 from __future__ import annotations
 
-import argparse
 import shutil
 import sys
 import time
 from typing import List, Optional, Sequence, Tuple
 
+from ..cliformat import make_parser
 from ..config import MODULE_ENVS
 from ..logging import announcement, comm, warning
 
@@ -50,6 +50,29 @@ BINNING_DATABASES: Tuple[str, ...] = ("checkm", "host")
 #: How many database downloads to run at once. Network-bound, so a few in parallel is close to
 #: linear, but more than this mostly just saturates a link.
 DEFAULT_DB_JOBS = 3
+
+
+def _default_tier_envs() -> List[str]:
+    """Opt-in env names the shipped binning tier needs, so an install covers a plain run.
+
+    The shipped tier is metaBAT2 + SemiBin2, and SemiBin2 lives in metawrap2-learned with the other
+    learned binners because they are all pytorch. Without this, `quickstart` finished reporting
+    everything healthy and the first `metawrap2 run` stopped at binning asking for an env.
+
+    Derived from the tier rather than listed, so moving binning.DEFAULT_PRESET moves this with it:
+    a tier of classical binners only needs nothing extra, and this returns an empty list.
+    """
+    from ..config import OPTIONAL_ENVS
+    from ..modules.binning import DEFAULT_PRESET, PRESETS
+
+    names = []
+    for binner in PRESETS[DEFAULT_PRESET]:
+        env = OPTIONAL_ENVS.get(binner)
+        if env:
+            name = env.removeprefix("metawrap2-")
+            if name not in names:
+                names.append(name)
+    return names
 
 
 def _package_manager() -> Optional[str]:
@@ -146,8 +169,7 @@ def _print_next_steps(threads: int, small: bool) -> None:
         "\n    metawrap2 run samples.toml -o study/ -t %d"
         "\n\n  or one module at a time, e.g.:\n"
         "\n    metawrap2 binning -a assembly.fasta -o binning_out -t %d \\"
-        "\n        --metabat2 --maxbin2 --concoct sampleA_1.fastq sampleA_2.fastq\n"
-        % (threads, threads)
+        "\n        --metabat2 --maxbin2 sampleA_1.fastq sampleA_2.fastq\n" % (threads, threads)
     )
     if small:
         comm(
@@ -195,7 +217,7 @@ def _run_doctor(modules: Sequence[str], config: Optional[str], databases: bool) 
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(
+    ap = make_parser(
         prog="metawrap2 quickstart",
         description="Install everything MetaWrap2 needs and verify it, in one command.",
         epilog="Every step is an ordinary metawrap2 command; run them separately if you prefer.",
@@ -274,13 +296,19 @@ def main(argv: List[str]) -> int:
     started = time.time()
     announcement("METAWRAP2 QUICKSTART")
 
+    # The modules' own envs plus whatever opt-in env the default binning tier reaches into. The
+    # modules alone are what `doctor` is asked about, since "learned" is not a module.
+    envs_to_build = list(modules)
+    if "binning" in modules:
+        envs_to_build += _default_tier_envs()
+
     if not args.skip_envs:
-        _step(1, "creating %d conda environment(s)" % len(modules))
+        _step(1, "creating %d conda environment(s)" % len(envs_to_build))
         comm("This is the slow part. Existing environments are skipped, so a retry is cheap.")
-        if _run_install_env(modules, args.threads, args.from_lock) != 0:
+        if _run_install_env(envs_to_build, args.threads, args.from_lock) != 0:
             _explain_failure(
                 "Environment creation",
-                "metawrap2 install-env %s -t %d" % (" ".join(modules), args.threads),
+                "metawrap2 install-env %s -t %d" % (" ".join(envs_to_build), args.threads),
             )
             return 1
 

@@ -12,6 +12,7 @@ import sys
 from typing import List, Optional
 
 from . import __version__
+from .command import EnvManagerMissing
 from .config import ConfigError
 
 # module name -> (import path, one-line description shown in help)
@@ -21,6 +22,10 @@ MODULES = {
     "kraken2": ("metawrap2.modules.kraken2", "Taxonomy profiling of reads/contigs with KRAKEN2"),
     "blobology": ("metawrap2.modules.blobology", "GC-vs-abundance blobplots of contigs and bins"),
     "binning": ("metawrap2.modules.binning", "Initial binning (metaBAT2, MaxBin2, CONCOCT)"),
+    "coverage": (
+        "metawrap2.modules.coverage",
+        "One cross-sample depth table for a cohort, split per assembly",
+    ),
     "bin_refinement": (
         "metawrap2.modules.bin_refinement",
         "Consolidate bin sets into a refined set",
@@ -30,6 +35,10 @@ MODULES = {
         "Reassemble bins from recruited reads",
     ),
     "quant_bins": ("metawrap2.modules.quant_bins", "Estimate bin abundance across samples"),
+    "dereplicate": (
+        "metawrap2.modules.dereplicate",
+        "Collapse several samples' bins into one non-redundant catalogue",
+    ),
     "classify_bins": ("metawrap2.modules.classify_bins", "Assign taxonomy to genomic bins"),
     "annotate_bins": ("metawrap2.modules.annotate_bins", "Functional annotation of draft genomes"),
 }
@@ -42,6 +51,10 @@ UTILITIES = {
         "Install everything and verify it, in one command (start here)",
     ),
     "run": ("metawrap2.commands.run", "Run the whole pipeline for a study from a sample sheet"),
+    "cohort": (
+        "metawrap2.commands.cohort",
+        "Run a study per sample and dereplicate into one genome catalogue",
+    ),
     "check": ("metawrap2.commands.check", "Verify tools/databases (and conda envs) for a module"),
     "install-env": (
         "metawrap2.commands.install_env",
@@ -59,6 +72,10 @@ UTILITIES = {
     "calibrate": (
         "metawrap2.commands.calibrate",
         "Check the built-in disk/memory estimates against real runs",
+    ),
+    "benchmark": (
+        "metawrap2.commands.benchmark",
+        "Measure tools and settings against known-truth datasets",
     ),
     "test": (
         "metawrap2.commands.doctor",
@@ -121,6 +138,16 @@ def help_message() -> str:
         "\t%-20s skip input/intermediate file validation (use if it flags a valid file)"
         % "--skip-validation",
         "",
+        # Wider column than the block above: these flag names do not fit in 20 characters, and a
+        # description that starts mid-word is worse than a column that does not line up with it.
+        "  Resource budget (override [limits] in metawrap2.toml for this run):",
+        "\t%-24s thread ceiling for the whole run" % "--max-threads N",
+        "\t%-24s or, as a share of this machine's cores (default 0.50)" % "--max-thread-fraction F",
+        "\t%-24s memory ceiling for the whole run" % "--max-memory-gb N",
+        "\t%-24s or, as a share of this machine's RAM (default 0.80)" % "--max-memory-fraction F",
+        "\t%-24s stop when a filesystem is this full (default 0.70)" % "--max-disk-fraction F",
+        "\t%-24s how many GPUs the run may use (0 for none)" % "--max-gpus N",
+        "",
         "\t%-20s show this help message" % "--help | -h",
         "\t%-20s show MetaWrap2 version" % "--version | -v",
         "",
@@ -128,13 +155,35 @@ def help_message() -> str:
     return "\n".join(lines)
 
 
-def _apply_global_flags(argv: List[str]) -> List[str]:
-    """Strip global flags (--dry-run, --force) from argv and apply them to the runner."""
-    from . import command
+#: Global flags that carry a value, mapped to the ``[limits]`` field they override. Kept as a
+#: table rather than more branches below because every one of them behaves identically, and
+#: because the same table is what makes ``--flag=value`` work without repeating the parsing.
+_LIMIT_FLAGS = {
+    "--max-threads": "max_threads",
+    "--max-thread-fraction": "max_thread_fraction",
+    "--max-memory-gb": "max_memory_gb",
+    "--max-memory-fraction": "max_memory_fraction",
+    "--max-disk-fraction": "max_disk_fraction",
+    "--max-gpus": "max_gpus",
+    "--disk-check-interval": "disk_check_interval",
+}
 
-    kept = []
+
+def _apply_global_flags(argv: List[str]) -> List[str]:
+    """Strip global flags (--dry-run, --force, the --max-* budget) and apply them.
+
+    Done by hand rather than with argparse because these come *before* the module name, and each
+    module owns its own parser for everything after it.
+    """
+    from . import command, limits
+
+    kept: List[str] = []
+    pending: Optional[str] = None
     for tok in argv:
-        if tok == "--dry-run":
+        if pending is not None:
+            limits.set_override(_LIMIT_FLAGS[pending], tok)
+            pending = None
+        elif tok == "--dry-run":
             command.set_dry_run(True)
         elif tok == "--force":
             command.set_force(True)
@@ -146,8 +195,15 @@ def _apply_global_flags(argv: List[str]) -> List[str]:
             command.set_skip_space_check(True)
         elif tok == "--skip-validation":
             command.set_skip_validation(True)
+        elif tok in _LIMIT_FLAGS:
+            pending = tok
+        elif "=" in tok and tok.split("=", 1)[0] in _LIMIT_FLAGS:
+            flag, value = tok.split("=", 1)
+            limits.set_override(_LIMIT_FLAGS[flag], value)
         else:
             kept.append(tok)
+    if pending is not None:
+        raise limits.LimitsError("%s needs a value" % pending)
     return kept
 
 
@@ -160,7 +216,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("MetaWrap2 v=%s" % __version__)
         return 0
 
-    argv = _apply_global_flags(argv)
+    from .limits import LimitsError
+
+    try:
+        argv = _apply_global_flags(argv)
+    except LimitsError as exc:
+        # A bad budget flag is a user error, and one worth catching before any module starts.
+        print("\n%s\n" % exc, file=sys.stderr)
+        return 2
     if not argv:
         print(help_message())
         return 0
@@ -184,9 +247,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     mod = importlib.import_module(entry[0])
     try:
         return int(mod.main(rest) or 0)
-    except ConfigError as exc:
+    except (ConfigError, EnvManagerMissing) as exc:
         # A mistyped config key is a user error, not a bug, so it gets a message rather than a
         # traceback - and it is caught here so every module and utility benefits.
+        #
+        # EnvManagerMissing is the same kind of thing: mamba not being on PATH is something the user
+        # fixes, and the exception exists purely to say so in two sentences with both ways out. It
+        # was still escaping as a traceback, which buried its own message under a stack and made a
+        # PATH problem look like a crash - the exact confusion it was written to prevent.
         print("\n%s\n" % exc, file=sys.stderr)
         return 2
     except KeyboardInterrupt:

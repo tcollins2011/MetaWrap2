@@ -1,52 +1,55 @@
-# Per-module conda environments
+# Conda environments, one per workflow
 
 The MetaWrap2 core is light: `python>=3.10`, `biopython`, and the plotting/table stack
-(the `metawrap2` conda package installs these). The heavy third-party tools
-each module drives (SPAdes, CheckM, salmon, kraken2, ...) live in their own
-per-module environments here instead of one large shared environment.
+(the `metawrap2` conda package installs these). The heavy third-party tools the modules drive
+(SPAdes, CheckM, kraken2, ...) live in the environments described here.
 
-Splitting them up means each tool's dependencies resolve on their own, so
-adding or updating one tool no longer has to satisfy every other tool at the
-same time. This is the main fix for the install/solver problems people have
-hit with the older single-environment setup.
+There are five of them, plus four that stay separate for reasons given below. **The grouping is by
+workflow, not by module and not by tool.** Modules that run one after another and share tools share an
+environment: there is no sense in solving the same aligner-and-samtools graph five times, or in asking
+a user to install five things to get from reads to an assembly.
 
-Each environment is named `metawrap2-<module>` and holds only that module's
-tools. Duplication across envs (e.g. `bwa`/`samtools` in several) is intentional
-so each one solves independently.
+Every grouping below was **solved before it was written down**. The two places the pipeline is split in
+an awkward-looking way are splits the solver forced, not preferences:
+
+* **CheckM2 cannot be solved with CheckM1 + GUNC + DAS Tool.** No common solution exists against
+  conda-forge + bioconda, so it keeps its own file.
+* **GTDB-Tk cannot be solved with taxator-tk.** Same situation, and GTDB-Tk is also the one tool here
+  with a 100+ GB reference database, so a user who wants it is opting in anyway.
 
 ## Environments
 
-| File | Env name | Module | Tools |
+| File | Env name | Modules | Tools |
 |---|---|---|---|
-| `read_qc.yaml` | `metawrap2-read_qc` | read_qc | trim-galore, fastqc, bmtagger, bowtie2 |
-| `assembly.yaml` | `metawrap2-assembly` | assembly | spades, megahit, quast |
-| `binning.yaml` | `metawrap2-binning` | binning | metabat2, maxbin2, concoct, bowtie2, bwa, samtools |
-| `bin_refinement.yaml` | `metawrap2-bin_refinement` | bin_refinement (default) | checkm-genome (CheckM1), pplacer |
-| `reassemble_bins.yaml` | `metawrap2-reassemble_bins` | reassemble_bins | spades, bwa, samtools |
-| `quant_bins.yaml` | `metawrap2-quant_bins` | quant_bins | salmon, bwa, samtools |
-| `classify_bins.yaml` | `metawrap2-classify_bins` | classify_bins (default) | taxator-tk |
-| `annotate_bins.yaml` | `metawrap2-annotate_bins` | annotate_bins (default) | prokka |
-| `kraken2.yaml` | `metawrap2-kraken2` | kraken2 | kraken2, krona |
-| `blobology.yaml` | `metawrap2-blobology` | blobology | blast, bowtie2, samtools, python, biopython, pandas, matplotlib-base, metawrap2 |
+| `reads.yaml` | `metawrap2-reads` | read_qc, assembly, reassemble_bins, blobology | trim-galore, fastp, fastqc, bmtagger, bowtie2, spades, megahit, quast, blast, minimap2, bwa, bwa-mem2, samtools |
+| `bins.yaml` | `metawrap2-bins` | binning, coverage, dereplicate, quant_bins | metabat2, maxbin2, concoct, minimap2, bwa, bwa-mem2, samtools, skani, sylph, salmon, coverm, fairy |
+| `binqc.yaml` | `metawrap2-binqc` | bin_refinement | checkm-genome (CheckM1), pplacer, gunc, das_tool |
+| `taxonomy.yaml` | `metawrap2-taxonomy` | classify_bins, kraken2 | kraken2, krona, taxator-tk, blast |
+| `annotate.yaml` | `metawrap2-annotate` | annotate_bins | prokka, bakta |
+
+Four tools that used to have an environment each are now inside one of the five above, because keeping
+them out only meant a second install command: **GUNC** (which runs by default unless `--skip-gunc`, so
+it was never really optional), **DAS Tool** (an alternative consolidator for the step CheckM1 serves),
+**CoverM** and **fairy** (single static binaries), and **Bakta** (which solves with Prokka).
 
 ## Usage
 
-Create the environment(s) for the module(s) you plan to run, e.g.:
+Normally you do not touch these files - `metawrap2 install-env` reads them:
 
 ```bash
-conda env create -f src/metawrap2/envs/assembly.yaml
-conda env create -f src/metawrap2/envs/binning.yaml
-conda env create -f src/metawrap2/envs/bin_refinement.yaml
+metawrap2 install-env --all          # the five workflow envs, each built once
+metawrap2 install-env bins binqc     # or just the ones you need
+metawrap2 install-env learned        # the opt-in ones, by name
 ```
 
-Or with mamba (faster solver):
+Directly, if you prefer:
 
 ```bash
-mamba env create -f src/metawrap2/envs/assembly.yaml
+mamba env create -f src/metawrap2/envs/bins.yaml
 ```
 
-You only need the environments for the modules you use. Activate the matching
-environment before running a module, or let the module pick it up on the PATH.
+You only need the environments for the modules you use. The modules find theirs by name, so nothing
+has to be activated first.
 
 ## Where these files live
 
@@ -78,28 +81,33 @@ Alternatively, generate cross-platform lockfiles with
 
 ```bash
 conda-lock -f src/metawrap2/envs/binning.yaml -p linux-64 --lockfile src/metawrap2/envs/locks/binning.conda-lock.yml
-mamba create -n metawrap2-binning --file src/metawrap2/envs/locks/binning.conda-lock.yml
+mamba create -n metawrap2-bins --file src/metawrap2/envs/locks/bins.conda-lock.yml
 ```
 
 Committing the generated lockfiles pins exact builds; regenerate them when you intend to
 update a tool.
 
-## Modern opt-in tools
+## The four that stay separate
 
-Newer engines are offered as opt-in alternatives, each in its own environment and selected by
-a module flag. The default environments keep the original tools and behaviour, so existing
-analyses reproduce unchanged; the scores and labels these produce are *not* interchangeable
-with the defaults, so pick one and stay with it within a study.
+Each of these is separate for a stated reason, and the reason is never "it belongs to a different
+module". The scores and labels an alternative tool produces are *not* interchangeable with the
+default's, so pick one and stay with it within a study.
 
-| File | Env name | Flag that selects it |
-|---|---|---|
-| `bin_refinement-checkm2.yaml` | `metawrap2-bin_refinement-checkm2` | `bin_refinement --checkm2` - CheckM2, avoids the CheckM1/pplacer memory cost |
-| `classify_bins-gtdbtk.yaml` | `metawrap2-classify_bins-gtdbtk` | `classify_bins --gtdbtk` - GTDB-Tk classification (needs GTDB reference data) |
-| `annotate_bins-bakta.yaml` | `metawrap2-annotate_bins-bakta` | `annotate_bins --bakta` - Bakta annotation (needs a Bakta database) |
+| File | Env name | Why it is not in one of the five | Selected by |
+|---|---|---|---|
+| `checkm2.yaml` | `metawrap2-checkm2` | **Forced**: no common solution with CheckM1 + GUNC + DAS Tool | `bin_refinement --checkm2` |
+| `gtdbtk.yaml` | `metawrap2-gtdbtk` | **Forced**: no common solution with taxator-tk. Also needs 100+ GB of reference data | `classify_bins --gtdbtk` |
+| `learned.yaml` | `metawrap2-learned` | **Size**: pytorch, ~1.5 GB, which nobody who only wants metaBAT2 should wait for | `binning --semibin2` / `--vamb` / `--comebin` |
+| `benchmark-amber.yaml` | `metawrap2-benchmark-amber` | Benchmark-only, and pins matplotlib below 3.9 | `benchmark score` |
+
+`learned.yaml` holds all three learned binners in one environment: they are all pytorch applications
+and they solve together, so three environments were three copies of the same dependency graph. Its
+pytorch is CUDA-capable, so `binning --device cuda` needs no second install - there is no separate GPU
+environment to build.
 
 Install one the same way as any other environment:
 ```bash
-metawrap2 install-env bin_refinement-checkm2
+metawrap2 install-env checkm2
 ```
 
 ## Why these environments contain no Python

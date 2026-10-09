@@ -6,6 +6,12 @@ scaffolds are pulled out, and those leftovers are assembled with MEGAHIT (which 
 on low-coverage data); the two assemblies are then combined, sorted, and short contigs are
 removed. The final assembly is QC'd with QUAST.
 
+The remapping step in that hybrid path reads one bit out of the alignment - whether a read mapped -
+so the aligner is a filter here rather than a measuring instrument, and `--aligner` picks it from the
+same registry `binning` and `blobology` use (`metawrap2.aligners`). Its default is bwa, not the
+registry's minimap2, and `HYBRID_ALIGNER` says why: the 5.7x saving was measured on depth agreement,
+which is not the property this stage depends on.
+
 This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
 block below, and the tunable numbers/defaults in the CONSTANTS block. Change a flag there
 and it takes effect — no need to follow the orchestration logic underneath.
@@ -20,8 +26,11 @@ import os
 import shutil
 from typing import List
 
-from ..config import load_settings
-from ..scripts import fix_megahit_contig_naming, rm_short_contigs, sam_to_fastq, sort_contigs
+from ..aligners import ALIGNERS, INDEX_SUFFIXES, index_path
+from ..cliformat import make_parser
+from ..config import MODULE_ENVS, load_settings
+from ..pyrun import PY
+from ..scripts import fix_megahit_contig_naming, rm_short_contigs, sort_contigs
 from ._common import (
     absolutize_paths,
     announcement,
@@ -37,6 +46,8 @@ from ._common import (
     finish_run,
     fs_move,
     make_checkpoint,
+    memory_arg,
+    resolve_memory_gb,
     resolve_threads,
     run,
     scratch_dir,
@@ -46,29 +57,65 @@ from ._common import (
     warning,
 )
 
-CONDA_ENV = "metawrap2-assembly"
+CONDA_ENV = MODULE_ENVS["assembly"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 METASPADES = "metaspades.py --tmp-dir {tmp} -t {threads} -m {mem} -o {out} -1 {r1} -2 {r2}"
 METASPADES_RESTART = (
     "metaspades.py -o {out} --restart-from last -t {threads} -m {mem} --tmp-dir {tmp}"
 )
-BWA_INDEX = "bwa index {assembly}"
-BWA_MEM = "bwa mem -t {threads} {assembly} {r1} {r2}"
+# The aligner streams into the FASTQ conversion, so the alignment never lands on disk. pipefail is
+# what makes that safe: the converter exits 0 on a truncated stream, so without it an aligner that
+# ran out of memory would leave a short FASTQ and the hybrid assembly would quietly be built on a
+# slice of the unassembled reads. PY is the host interpreter by absolute path, which resolves even
+# though the left-hand side of the pipe runs inside this module's conda env.
+#
+# {align} comes from metawrap2.aligners rather than being spelled out here, so the three modules that
+# map reads back to an assembly cannot drift apart on which aligners they offer.
+EXTRACT_UNMAPPED = (
+    "set -o pipefail; {align}"
+    " | " + PY + " -m metawrap2.scripts.sam_to_fastq --unmapped - > {fastq}"
+)
 MEGAHIT_LEFTOVERS = "megahit -r {reads} -o {out} -t {threads} -m {mem} --tmp-dir {tmp}"
 MEGAHIT_PAIRED = "megahit -1 {r1} -2 {r2} -o {out} --tmp-dir {tmp} -t {threads} -m {mem} --continue"
 QUAST = "quast -t {threads} -o {out} -m {quast_min} {assembly}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
-DEFAULT_MEM_GB = 24
 MIN_CONTIG_LEN = 1000  # -l default; contigs shorter than this are dropped
 METASPADES_KEEP_LEN = 1500  # scaffolds kept for the leftover-read remapping step
 QUAST_MIN_CONTIG = 500  # QUAST -m; ignore contigs shorter than this in the report
 MEGAHIT_MEM_BYTES = 1_000_000_000  # MEGAHIT -m takes bytes, so memory_gb * this
+# --aligner default, and deliberately not aligners.DEFAULT_ALIGNER, which is minimap2.
+#
+# The registry's evidence does not reach this stage, and measuring it here reversed the answer. There
+# the aligner is an implementation detail of a coverage estimator and the output is a depth vector,
+# which minimap2 and bwa agree on closely enough (Spearman 0.984) that the bins come out the same.
+# Here it is a filter: the only thing read out of the alignment is the unmapped bit, and whichever
+# reads carry it are what MEGAHIT assembles.
+#
+# Measured on the real thing - the 273k-scaffold metaSPAdes assembly from the `assembler` benchmark
+# arm, filtered to METASPADES_KEEP_LEN, and the 3-sample co-assembly reads it was built from:
+#
+#   bwa       5.45 CPU-hours, 4.5 GB peak, recruits 2,867,680 reads as unassembled
+#   minimap2  0.62 CPU-hours, 1.7 GB peak, recruits 4,113,486 - 44% more
+#
+# 8.8x cheaper, and not a drop-in. The disagreement is one-sided: minimap2 calls 1,249,798 reads
+# unmapped that bwa placed on a scaffold, while bwa calls only 3,992 unmapped that minimap2 placed
+# (Jaccard 0.695). So minimap2's `sr` preset is simply less sensitive on a fragmented real assembly,
+# and the reads it misses are handed to MEGAHIT as "unassembled" - which means MEGAHIT reassembles
+# sequence metaSPAdes already assembled, and _format_assembly concatenates both copies without being
+# able to tell. The cheaper aligner changes what the assembly contains, in the bad direction, which
+# is the one outcome a cost saving cannot buy. `--aligner minimap2` is there for anyone who wants the
+# 8.8x knowing that.
+#
+# Note this is the opposite conclusion to the binning registry's, from the same two tools, because
+# the property read out of the alignment is different. That is the argument for measuring per
+# question rather than per tool.
+HYBRID_ALIGNER = "bwa"
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = make_parser(
         prog="metawrap2 assembly",
         usage="metawrap2 assembly [options] -1 reads_1.fastq -2 reads_2.fastq -o output_dir",
         description="Assemble paired-end reads with MEGAHIT and/or metaSPAdes (.gz accepted).",
@@ -76,9 +123,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument("-1", dest="reads_1", required=True, help="forward fastq reads")
     p.add_argument("-2", dest="reads_2", required=True, help="reverse fastq reads")
     p.add_argument("-o", "--output", required=True, help="output directory")
-    p.add_argument(
-        "-m", "--memory", type=int, default=DEFAULT_MEM_GB, help="memory in GB (default 24)"
-    )
+    memory_arg(p)
     threads_arg(p)
     p.add_argument(
         "-l",
@@ -91,7 +136,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--metaspades",
         action="store_true",
-        help="assemble with metaSPAdes (with --megahit too, runs the hybrid pipeline)",
+        help="assemble with metaSPAdes: longer contigs, but measured at 3x the CPU-hours and "
+        "~140 GB peak memory on a 3-sample co-assembly (with --megahit too, runs the hybrid "
+        "pipeline)",
+    )
+    p.add_argument(
+        "--aligner",
+        choices=sorted(ALIGNERS),
+        default=HYBRID_ALIGNER,
+        help="aligner used to find the reads metaSPAdes could not place, in the hybrid "
+        "(--megahit --metaspades) path only (default %s)" % HYBRID_ALIGNER,
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -143,31 +197,40 @@ def _extract_unmapped(args, env, spades_out):
                 "work. Exiting."
             )
 
-    run(BWA_INDEX.format(assembly=long_scaffolds), env=env, tool="bwa index")
-    aln_sam = os.path.join(args.output, "aligned_to_metaspades.sam")
-    unused_sam = os.path.join(args.output, "unused_by_metaspades.sam")
+    aligner = ALIGNERS[args.aligner]
+    index = index_path(long_scaffolds, args.aligner)
     run(
-        BWA_MEM.format(
-            threads=args.threads, assembly=long_scaffolds, r1=args.reads_1, r2=args.reads_2
-        ),
+        aligner["index_cmd"].format(assembly=long_scaffolds, index=index),
         env=env,
-        tool="bwa mem",
-        log_path=aln_sam,
+        tool="%s index" % args.aligner,
     )
     unused_fastq = os.path.join(args.output, "unused_by_metaspades.fastq")
+    run(
+        [
+            "bash",
+            "-c",
+            EXTRACT_UNMAPPED.format(
+                align=aligner["paired"].format(
+                    threads=args.threads, index=index, r1=args.reads_1, r2=args.reads_2
+                ),
+                fastq=unused_fastq,
+            ),
+        ],
+        env=env,
+        tool="%s | sam_to_fastq" % args.aligner,
+    )
     if dry_run():
         return
-    # keep only reads that did NOT map (aligned records carry the NM:i: edit-distance tag)
-    with open(aln_sam) as inp, open(unused_sam, "w") as out:
-        for line in inp:
-            if "NM:i:" not in line:
-                out.write(line)
-    with open(unused_fastq, "w") as out:
-        sam_to_fastq.sam_to_fastq(unused_sam, out)
-    os.remove(aln_sam)
-    os.remove(unused_sam)
     if not os.path.getsize(unused_fastq):
         error("Something went wrong with pulling out unassembled reads. Exiting.")
+    # The index is spent the moment the FASTQ exists: nothing else in the module reads an alignment,
+    # and the stage is checkpointed, so a --resume that reaches here rebuilds it anyway. Worth
+    # sweeping rather than leaving, because it is not small next to what it was built from -
+    # minimap2's .mmi for a 176 MB scaffold set is larger than the fasta.
+    for suffix in INDEX_SUFFIXES:
+        spent = long_scaffolds + suffix
+        if os.path.exists(spent):
+            os.remove(spent)
 
 
 def _run_megahit(args, env, megahit_out, spades_out, hybrid, settings):
@@ -254,11 +317,18 @@ def main(argv: List[str]) -> int:
     args = _parse_args(argv)
 
     do_metaspades = args.metaspades
-    do_megahit = args.megahit or not args.metaspades  # default to MEGAHIT if nothing was picked
+    # MEGAHIT when nothing was picked, and the benchmark says to keep it that way. On three CAMI2
+    # gut samples co-assembled (benchmarks/results/cami2_gi.tsv, 2026-09-30) metaSPAdes returned a
+    # 38% longer N50 (12.9 kb vs 9.3 kb) for 3.2x the CPU-hours (245 vs 77) and 9.7x the peak RSS
+    # (140 GB vs 15 GB), while assembling 14% *fewer* total bases. The contiguity is real and worth
+    # having when you can afford it - hence --metaspades - but 140 GB of resident memory is more
+    # than most machines can give, so it cannot be what happens to someone who passed no flag.
+    do_megahit = args.megahit or not args.metaspades
     hybrid = do_megahit and do_metaspades
 
     settings = load_settings(args.config)
     resolve_threads(args, settings)
+    resolve_memory_gb(args, settings)
     absolutize_paths(args)
     validate_inputs(
         "assembly",

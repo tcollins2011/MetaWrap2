@@ -18,8 +18,9 @@ import os
 from typing import List
 
 from .. import blastdb as _blastdb
-from ..config import OPTIONAL_ENVS, load_settings
-from ..constants import BIN_EXTENSION, FASTA_EXTENSIONS, TSV_SUFFIX
+from ..cliformat import make_parser
+from ..config import MODULE_ENVS, load_settings
+from ..constants import BIN_EXTENSION, FASTA_EXTENSIONS, FASTA_EXTENSIONS_WITH_GZ, TSV_SUFFIX
 from ..io.seqio import contig_id, iter_fasta
 from ..scripts import classify_bins as _classify_helper
 from ..scripts import prune_blast_hits
@@ -32,7 +33,9 @@ from ._common import (
     env_for,
     error,
     finish_run,
+    list_bins,
     make_checkpoint,
+    optional_env_for,
     require_nonempty_dir,
     resolve_threads,
     run,
@@ -41,7 +44,7 @@ from ._common import (
     validate_inputs,
 )
 
-CONDA_ENV = "metawrap2-classify_bins"
+CONDA_ENV = MODULE_ENVS["classify_bins"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 BLASTN = (
@@ -81,7 +84,7 @@ BINNER_GENUS_CUTOFF = 0.6  # binner -i genus:<cutoff>
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = make_parser(
         prog="metawrap2 classify_bins",
         usage="metawrap2 classify_bins [options] -b bin_folder -o output_dir",
         description="Assign a consensus taxonomy to each bin with MEGABLAST + taxator-tk.",
@@ -102,11 +105,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 
 
 def _concat_all_contigs(bin_folder: str, all_contigs: str) -> None:
-    """Merge every bin's contigs into one fasta (supports .gz bins)."""
+    """Merge every bin's contigs into one fasta (supports .gz bins).
+
+    The unbinned catch-all is not one of the bins, so taxator is not asked to place it: it would be
+    classified and reported alongside the bins, which reads as a taxonomy for a genome that no binner
+    proposed.
+    """
     if os.path.isfile(all_contigs):
         os.remove(all_contigs)
     with open(all_contigs, "w") as out:
-        for f in sorted(os.listdir(bin_folder)):
+        for f in list_bins(bin_folder, FASTA_EXTENSIONS_WITH_GZ):
             out.writelines(
                 ">%s\n%s\n" % (contig_id(header), seq)
                 for header, seq in iter_fasta(os.path.join(bin_folder, f))
@@ -137,7 +145,7 @@ def _classify_with_gtdbtk(args, settings, ckpt) -> None:
     files; we merge them into the single two-column bin_taxonomy.tab the rest of MetaWrap2
     (and users' downstream scripts) expect from this module.
     """
-    env = OPTIONAL_ENVS["gtdbtk"] if settings.use_conda_envs else None
+    env = optional_env_for("gtdbtk", settings, "--gtdbtk")
     ensure_dir(args.output)
     gtdb_out = os.path.join(args.output, "gtdbtk_out")
 

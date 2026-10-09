@@ -19,7 +19,7 @@ from metawrap2 import interrupt
 def _restore_handlers():
     """Put the process's signal handlers back, so one test cannot affect another."""
     saved = {}
-    for name in interrupt.STOP_SIGNALS:
+    for name in interrupt.STOP_SIGNALS + ["SIGINT"]:
         signum = getattr(signal, name, None)
         if signum is not None:
             saved[signum] = signal.getsignal(signum)
@@ -46,6 +46,30 @@ def test_sigterm_unwinds_a_finally_block(monkeypatch):
         finally:
             cleaned.append("recorded the outcome")
     assert cleaned == ["recorded the outcome"]
+
+
+def test_a_background_runs_ignored_sigint_is_taken_back(monkeypatch):
+    """A shell sets a background job's SIGINT to SIG_IGN, and Python then leaves it ignored.
+
+    That is the state every long run starts in - "&", nohup, a batch scheduler - so "kill -INT" on
+    one did nothing at all, silently: no KeyboardInterrupt, no message, the tool kept running.
+    """
+    monkeypatch.setattr(interrupt, "_received", None, raising=False)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    assert interrupt.install_handlers(["SIGTERM"])["SIGINT"] is True
+
+    with pytest.raises(interrupt.Stopped):
+        os.kill(os.getpid(), signal.SIGINT)
+    assert interrupt.received() == signal.SIGINT
+
+
+def test_pythons_own_sigint_handling_is_left_alone(monkeypatch):
+    """Where Ctrl-C already works, this module has nothing to add - and KeyboardInterrupt from the
+    interpreter is not a Stopped, so nothing reports an interactive Ctrl-C as a scheduler kill."""
+    monkeypatch.setattr(interrupt, "_received", None, raising=False)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    assert "SIGINT" not in interrupt.install_handlers(["SIGTERM"])
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
 
 def test_the_signal_that_stopped_us_is_recorded(monkeypatch):

@@ -18,8 +18,8 @@ on:
     - cron: "17 4 * * 1"
   workflow_dispatch:
     inputs:
-      modules:
-        description: "Modules to check (space-separated, or 'all')"
+      envs:
+        description: "Environments to check (space-separated, or 'all')"
         default: "all"
   pull_request:
     # A PR that edits a lockfile or an environment spec must prove the result still resolves.
@@ -33,10 +33,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The full set would take hours. These four cover the shapes that actually break:
-        # a large bioconda solve (binning), pinned Python tooling (bin_refinement), a JVM
-        # dependency (read_qc), and the smallest env as a control (quant_bins).
-        module: [binning, bin_refinement, read_qc, quant_bins]
+        # Named by environment, not by module - several modules share one env, and the lockfiles
+        # are per env. These cover the shapes that actually break: a large bioconda solve (bins),
+        # CheckM1's pinned Python tooling (binqc), a JVM dependency (reads), and the smallest env
+        # as a control (annotate). The full set would take hours.
+        conda_env: [bins, binqc, reads, annotate]
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -50,9 +51,9 @@ jobs:
       - name: Create the environment from its lockfile
         shell: bash -el {0}
         run: |
-          lock="src/metawrap2/envs/locks/${{ matrix.module }}.linux-64.lock"
+          lock="src/metawrap2/envs/locks/${{ matrix.conda_env }}.linux-64.lock"
           if [ ! -f "$lock" ]; then
-            echo "::error::$lock is missing. Generate it with: metawrap2 install-env ${{ matrix.module }} --lock"
+            echo "::error::$lock is missing. Generate it with: metawrap2 install-env ${{ matrix.conda_env }} --lock"
             exit 1
           fi
           micromamba create -y -n "lockcheck" --file "$lock"
@@ -93,22 +94,22 @@ jobs:
       # exist, so the environments have to be solved first, then locked.
       - name: Re-solve the environments from the yamls
         run: |
-          modules="${{ github.event.inputs.modules }}"
-          [ -z "$modules" ] && modules="all"
-          if [ "$modules" = "all" ]; then
+          envs="${{ github.event.inputs.envs }}"
+          [ -z "$envs" ] && envs="all"
+          if [ "$envs" = "all" ]; then
             metawrap2 install-env --all -t 4 --force --no-test
           else
-            metawrap2 install-env $modules -t 4 --force --no-test
+            metawrap2 install-env $envs -t 4 --force --no-test
           fi
 
       - name: Re-lock from the solved environments
         run: |
-          modules="${{ github.event.inputs.modules }}"
-          [ -z "$modules" ] && modules="all"
-          if [ "$modules" = "all" ]; then
+          envs="${{ github.event.inputs.envs }}"
+          [ -z "$envs" ] && envs="all"
+          if [ "$envs" = "all" ]; then
             metawrap2 install-env --all --lock
           else
-            metawrap2 install-env $modules --lock
+            metawrap2 install-env $envs --lock
           fi
 
       - name: Open a PR if anything changed

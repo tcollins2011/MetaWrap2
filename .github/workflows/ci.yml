@@ -44,12 +44,11 @@ jobs:
       - name: Type check (mypy)
         run: mypy
 
-      # CI has no per-module conda envs, so tests run the tools straight off PATH (via stubs
-      # or monkeypatching). Disable conda-env wrapping for the test run.
+      # No METAWRAP2_CONFIG here on purpose: tests/conftest.py pins use_conda_envs per test, so
+      # the suite no longer depends on the config the machine happens to have. Writing one here
+      # instead hid that - the suite passed in CI and failed on a developer's machine.
       - name: Unit tests (pytest + coverage)
-        run: |
-          printf '[settings]\nuse_conda_envs = false\n' > "$RUNNER_TEMP/mw2-ci.toml"
-          METAWRAP2_CONFIG="$RUNNER_TEMP/mw2-ci.toml" python -m pytest -q --cov=metawrap2 --cov-report=term-missing
+        run: python -m pytest -q --cov=metawrap2 --cov-report=term-missing
 
       - name: Byte-compile the metawrap2 package
         run: python -m compileall -q src/metawrap2
@@ -61,13 +60,13 @@ jobs:
         run: |
           metawrap2 --version
           metawrap2 --help
-          for module in read_qc assembly kraken2 blobology binning bin_refinement \
-                        reassemble_bins quant_bins classify_bins annotate_bins; do
+          for module in read_qc assembly kraken2 blobology binning coverage bin_refinement \
+                        reassemble_bins quant_bins dereplicate classify_bins annotate_bins; do
             echo "--- $module --help"
             metawrap2 "$module" --help > /dev/null
           done
           for util in quickstart check doctor install-env install-db history status calibrate \
-                      run test config completion; do
+                      run cohort benchmark test config completion; do
             echo "--- $util --help"
             metawrap2 "$util" --help > /dev/null || true
           done

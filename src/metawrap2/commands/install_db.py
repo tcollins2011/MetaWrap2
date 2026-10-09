@@ -20,8 +20,8 @@ you want for a smoke test of the pipeline rather than a production analysis.
 
 from __future__ import annotations
 
-import argparse
 import concurrent.futures
+import gzip
 import os
 import shutil
 import subprocess
@@ -30,7 +30,8 @@ import tarfile
 import threading
 from typing import Callable, Dict, List, NamedTuple, Optional
 
-from ..config import find_config
+from ..cliformat import make_parser
+from ..config import MODULE_ENVS, OPTIONAL_ENVS, find_config
 
 # Databases are independent of each other and mostly network-bound, so fetching several at
 # once is close to a linear speedup. Modest default so a slow link is not swamped.
@@ -52,6 +53,9 @@ class Database(NamedTuple):
     size: str
     small_size: Optional[str]
     describe: str
+    #: Written into the config instead of the install directory, when the tool wants a file rather
+    #: than a directory - GUNC takes ``--db_file``, so GUNC_DB has to name the .dmnd itself.
+    key_file: Optional[str] = None
 
 
 DATABASES: Dict[str, Database] = {
@@ -82,6 +86,22 @@ DATABASES: Dict[str, Database] = {
         size="~300 GB",
         small_size="~2 GB",
         describe="NCBI nt (--small: complete representative prokaryote genomes)",
+    ),
+    "checkm2": Database(
+        key="CHECKM2DB",
+        used_by="bin_refinement --checkm2, binning --run-checkm --checkm2",
+        size="1.7 GB download",
+        small_size=None,
+        describe="CheckM2's DIAMOND reference (uniref100.KO, ~3 GB unpacked; not CheckM1's data)",
+        key_file=os.path.join("CheckM2_database", "uniref100.KO.1.dmnd"),
+    ),
+    "gunc": Database(
+        key="GUNC_DB",
+        used_by="bin_refinement (unless --skip-gunc)",
+        size="6.7 GB download",
+        small_size=None,
+        describe="GUNC proGenomes 2.1 reference (diamond .dmnd; unpacks larger than it downloads)",
+        key_file="gunc_db_progenomes2.1.dmnd",
     ),
     "host": Database(
         key="BMTAGGER_DB",
@@ -129,10 +149,56 @@ def _fetch(url: str, dest: str) -> bool:
 
 
 def _untar(archive: str, into: str) -> None:
+    """Unpack *archive* into *into*, refusing members that would land outside it.
+
+    These archives come off the public internet, and a bare `extractall` writes wherever a member's
+    name says to - including `/etc/...` and `../../..`. Python 3.12's `data` filter rejects exactly
+    that (and strips the ownership and mode bits a database tarball has no business setting); the
+    explicit check below is the same guard for older versions, so the refusal does not depend on
+    which interpreter happens to be running.
+    """
     print("  unpacking %s" % os.path.basename(archive))
     with tarfile.open(archive) as tf:
-        tf.extractall(into)
+        safe = []
+        for member in tf.getmembers():
+            if _escapes(member):
+                print("  skipping %s: it would be written outside %s" % (member.name, into))
+                continue
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                # A device node or fifo in a database tarball is not something to write out.
+                print("  skipping %s: not a file, directory or link" % member.name)
+                continue
+            safe.append(member)
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(into, members=safe, filter="data")
+        else:
+            tf.extractall(into, members=safe)
     os.remove(archive)
+
+
+def _gunzip(archive: str, dest: str) -> bool:
+    """Decompress *archive* to *dest*, removing the archive. Streamed, not read into memory."""
+    print("  unpacking %s" % os.path.basename(archive))
+    tmp = dest + ".part"
+    with gzip.open(archive, "rb") as src, open(tmp, "wb") as out:
+        shutil.copyfileobj(src, out, length=8 << 20)
+    os.replace(tmp, dest)
+    os.remove(archive)
+    return os.path.isfile(dest) and os.path.getsize(dest) > 0
+
+
+def _escapes(member: tarfile.TarInfo) -> bool:
+    """Would extracting *member* write outside the destination directory?
+
+    Checked on the link target as well as the name: a symlink to `/etc` is how the next member in
+    the archive gets written there.
+    """
+    for name in (member.name, member.linkname or ""):
+        if name.startswith(("/", "\\")):
+            return True
+        if ".." in name.replace("\\", "/").split("/"):
+            return True
+    return False
 
 
 def _mamba_run(env: str, cmd: List[str]) -> int:
@@ -158,13 +224,21 @@ def _install_checkm(target: str, small: bool, jobs: int = 8) -> bool:
             return False
         _untar(archive, target)
 
-    # CheckM stores this path itself, inside its own env. Forgetting this step is the single
-    # most common bin_refinement failure, so do it here rather than leaving it to the user.
+    # CheckM stores this path inside its own env, so this is belt and braces rather than the
+    # mechanism: every CheckM1 call also gets CHECKM_DATA_PATH from the configured CHECKM_DB (see
+    # checkm.checkm1_data_env), which is what makes the setting survive the env being rebuilt. Doing it
+    # anyway means `checkm` run by hand from the env also works.
+    #
+    # The env name comes from MODULE_ENVS rather than being written out: it used to be spelled
+    # "metawrap2-bin_refinement" here, and consolidating the envs left this line pointing at one that
+    # no longer exists - which fails quietly, since the message below is only a NOTE.
+    checkm_env = MODULE_ENVS["bin_refinement"]
     print("  pointing CheckM at the data (checkm data setRoot)")
-    if _mamba_run("metawrap2-bin_refinement", ["checkm", "data", "setRoot", target]) != 0:
+    if _mamba_run(checkm_env, ["checkm", "data", "setRoot", target]) != 0:
         print(
-            "  NOTE: could not run `checkm data setRoot` automatically. Run this yourself:\n"
-            "        mamba run -n metawrap2-bin_refinement checkm data setRoot %s" % target
+            "  NOTE: could not run `checkm data setRoot` automatically. CHECKM_DATA_PATH is passed\n"
+            "        per call so bin_refinement will work regardless, but to use `checkm` directly:\n"
+            "        mamba run -n %s checkm data setRoot %s" % (checkm_env, target)
         )
     return os.path.isfile(os.path.join(target, "taxon_marker_sets.tsv"))
 
@@ -227,7 +301,10 @@ def _install_blast(target: str, small: bool, jobs: int = 8) -> bool:
             return False
     else:
         print("  downloading NCBI nt with update_blastdb.pl (this is very large)")
-        if _mamba_run("metawrap2-classify_bins", ["update_blastdb.pl", "--decompress", "nt"]) != 0:
+        if (
+            _mamba_run(MODULE_ENVS["classify_bins"], ["update_blastdb.pl", "--decompress", "nt"])
+            != 0
+        ):
             return False
     return True
 
@@ -267,6 +344,54 @@ rm -f all_genomes.fna
 """
 
 
+def _install_checkm2(target: str, small: bool, jobs: int = 8) -> bool:
+    """CheckM2's DIAMOND reference, fetched by CheckM2 itself.
+
+    ``checkm2 database --download`` is the only supported way to get this: the file lives on Zenodo
+    under a versioned record that CheckM2 pins, and a hand-picked URL goes stale the next time
+    CheckM2 is upgraded. So this installer runs the tool rather than fetching a URL of its own.
+
+    It is a different database from ``checkm``, which is the one thing about CheckM2 that reliably
+    catches people out - both are "the CheckM database", they share no files, and having one
+    installed does nothing for the other. ``--small`` is ignored: completeness estimates come from a
+    model trained against this exact reference, so a trimmed copy would not be a faster CheckM2 but
+    a differently-calibrated one.
+    """
+    dmnd = os.path.join(target, DATABASES["checkm2"].key_file or "")
+    if os.path.isfile(dmnd) and os.path.getsize(dmnd):
+        print("  CheckM2 database already present.")
+        return True
+    os.makedirs(target, exist_ok=True)
+    if (
+        _mamba_run(
+            OPTIONAL_ENVS["checkm2"],
+            ["checkm2", "database", "--download", "--path", target],
+        )
+        != 0
+    ):
+        return False
+    return os.path.isfile(dmnd) and os.path.getsize(dmnd) > 0
+
+
+def _install_gunc(target: str, small: bool, jobs: int = 8) -> bool:
+    """The GUNC proGenomes 2.1 diamond database.
+
+    One file, so there is no indexing step and nothing to configure inside a conda env - which makes
+    this the simplest installer here. ``--small`` is ignored because GUNC's verdict is only as good
+    as the breadth of what it compares against: a capped reference would report bins as
+    under-represented rather than as clean, which is a worse answer than a slower one.
+    """
+    dmnd = os.path.join(target, DATABASES["gunc"].key_file or "")
+    if os.path.isfile(dmnd) and os.path.getsize(dmnd):
+        print("  GUNC database already present.")
+        return True
+    os.makedirs(target, exist_ok=True)
+    archive = dmnd + ".gz"
+    if not _fetch("https://swifter.embl.de/~fullam/gunc/gunc_db_progenomes2.1.dmnd.gz", archive):
+        return False
+    return _gunzip(archive, dmnd)
+
+
 def _install_host(target: str, small: bool, jobs: int = 8) -> bool:
     fasta = os.path.join(target, "hg38.fa")
     os.makedirs(target, exist_ok=True)
@@ -299,7 +424,8 @@ def _install_host(target: str, small: bool, jobs: int = 8) -> bool:
         print("  building the bmtagger bitmask (bmtool)")
         if (
             _mamba_run(
-                "metawrap2-read_qc", ["bmtool", "-d", fasta, "-o", bitmask, "-A", "0", "-w", "18"]
+                MODULE_ENVS["read_qc"],
+                ["bmtool", "-d", fasta, "-o", bitmask, "-A", "0", "-w", "18"],
             )
             != 0
         ):
@@ -309,7 +435,7 @@ def _install_host(target: str, small: bool, jobs: int = 8) -> bool:
         print("  building the srprism index (this is the slow step)")
         if (
             _mamba_run(
-                "metawrap2-read_qc",
+                MODULE_ENVS["read_qc"],
                 ["srprism", "mkindex", "-i", fasta, "-o", srprism, "-M", "60000"],
             )
             != 0
@@ -323,6 +449,8 @@ INSTALLERS: Dict[str, Callable[..., bool]] = {
     "taxdump": _install_taxdump,
     "kraken2": _install_kraken2,
     "blast": _install_blast,
+    "checkm2": _install_checkm2,
+    "gunc": _install_gunc,
     "host": _install_host,
 }
 
@@ -374,7 +502,7 @@ def _set_config_keys(path: str, values: Dict[str, str]) -> None:
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(
+    ap = make_parser(
         prog="metawrap2 install-db",
         description="Download, index, and configure the databases MetaWrap2 modules need.",
     )
@@ -419,9 +547,11 @@ def main(argv: List[str]) -> int:
         print("Unknown database(s): %s\nKnown: %s" % (", ".join(unknown), ", ".join(DATABASES)))
         return 1
 
-    if not shutil.which("mamba") and any(n in ("checkm", "blast", "host") for n in names):
+    if not shutil.which("mamba") and any(
+        n in ("checkm", "checkm2", "blast", "host") for n in names
+    ):
         print(
-            "mamba is not on PATH, and checkm/blast/host need tools from the module envs.\n"
+            "mamba is not on PATH, and checkm/checkm2/blast/host need tools from the module envs.\n"
             "Install the envs first: metawrap2 install-env --all"
         )
         return 1
@@ -444,18 +574,19 @@ def main(argv: List[str]) -> int:
         except Exception as exc:  # noqa: BLE001 - one bad database must not stop the others
             _say("  ERROR installing %s: %s" % (name, exc))
             ok = False
-        return name, target, db.key, ok
+        value = os.path.join(target, db.key_file) if db.key_file else target
+        return name, value, db.key, ok
 
     workers = max(1, min(args.threads, len(names)))
     print(
         "\nInstalling %d database(s) into %s with %d worker(s).\n" % (len(names), args.dir, workers)
     )
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for name, target, key, ok in pool.map(install, names):
+        for name, value, key, ok in pool.map(install, names):
             if ok:
                 _say("  OK: %s installed" % name)
                 if key:
-                    installed[key] = target
+                    installed[key] = value
             else:
                 _say("  FAILED: %s" % name)
                 failed.append(name)

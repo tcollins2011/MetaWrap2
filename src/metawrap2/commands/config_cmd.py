@@ -10,10 +10,10 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 from typing import Dict, List, Optional, Tuple
 
+from ..cliformat import make_parser
 from ..config import RETIRED_DB_KEYS, find_config, load_settings
 
 #: The starter config. This is the single source of truth: ``metawrap2.toml.example`` at the
@@ -25,11 +25,32 @@ DEFAULT_CONFIG = """\
 # Anything you don't set falls back to the in-code defaults documented in each module.
 
 [settings]
-# Default thread count when a module isn't given -t. Modules use this instead of silently
-# running single-threaded, so it is worth setting to something sensible for your machine.
-threads = 8
+# Default thread count when a module isn't given -t. Leave it unset and modules use the
+# [limits] budget below, which is usually what you want: it follows the machine instead of
+# pinning every run to one number. Set it to override that for every module.
+# threads = 8
 # Set false to run tools directly off your PATH instead of per-module conda envs.
 use_conda_envs = true
+
+[limits]
+# How much of this machine one MetaWrap2 run may take. The defaults below are the ones in
+# effect if you delete this whole section, and they are fractions on purpose: a fraction
+# travels between a laptop and a large node, an absolute number does not. Whatever you set
+# here is divided between concurrent steps, never multiplied - `metawrap2 run -j 4` gives each
+# of four samples a quarter of it, so four samples never ask for four machines' worth of RAM.
+#
+# max_thread_fraction = 0.5   # half the cores (cgroup- and affinity-aware, not just nproc)
+# max_memory_fraction = 0.8   # 80% of RAM, what an unset -m resolves to
+# max_disk_fraction = 0.7     # stop the run if a filesystem it writes to passes 70% full
+# max_gpus = 0                # unset means every GPU this machine has; 0 means use none
+#
+# Absolutes win over fractions when you give them, and are still clamped to the machine:
+# max_threads = 32
+# max_memory_gb = 128
+#
+# Every one of these has a command-line equivalent for a single run: --max-threads,
+# --max-memory-gb, --max-disk-fraction, --max-gpus, and so on. See `metawrap2 --help`.
+# `metawrap2 calibrate` compares what runs were granted against what they really used.
 
 [databases]
 # Point these at your own databases, or let `metawrap2 install-db` fill them in.
@@ -114,7 +135,8 @@ def render_config(databases: Dict[str, str], threads: Optional[int] = None) -> s
         "# Check the paths below, then move this to ~/.metawrap2/config.toml (or pass --config).",
         "",
         "[settings]",
-        "# Default thread count when a module is not given -t.",
+        "# Default thread count when a module is not given -t. Comment it out to use the",
+        "# [limits] budget (half this machine's cores) instead of a fixed number.",
         "threads = %d" % (threads or 8),
         "use_conda_envs = true",
         "",
@@ -188,7 +210,10 @@ def _show(args) -> int:
     settings = load_settings(args.config)
     print("\nMetaWrap2 configuration")
     print("  config file:    %s" % (path or "<none found; using built-in defaults>"))
-    print("  threads:        %d" % settings.threads)
+    print(
+        "  threads:        %s"
+        % (settings.threads if settings.threads else "<unset; using the [limits] budget>")
+    )
     print("  use_conda_envs: %s" % settings.use_conda_envs)
     print("  databases:")
     if settings.databases:
@@ -202,7 +227,7 @@ def _show(args) -> int:
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(prog="metawrap2 config")
+    ap = make_parser(prog="metawrap2 config")
     sub = ap.add_subparsers(dest="action", required=True)
 
     p_init = sub.add_parser("init", help="write a starter config file")

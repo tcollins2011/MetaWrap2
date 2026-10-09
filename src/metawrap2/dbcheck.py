@@ -23,7 +23,7 @@ import hashlib
 import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .config import NON_PATH_DB_KEYS, Settings
+from .config import FILE_DB_KEYS, NON_PATH_DB_KEYS, Settings
 
 OK, MISSING, INCOMPLETE = "OK", "MISSING", "INCOMPLETE"
 
@@ -149,6 +149,20 @@ def describe(path: str, key: str) -> Dict[str, Any]:
     entry["kind"] = "database"
     if not path:
         entry["status"] = MISSING
+        return entry
+    if key in FILE_DB_KEYS:
+        # This key names the database file itself (GUNC's --db_file), so "is it a directory" is the
+        # wrong question and asking it marked every correct install as missing.
+        if not os.path.isfile(path):
+            entry["status"] = MISSING
+            entry["problem"] = "not a file"
+            return entry
+        entry["status"] = OK
+        entry["files"] = 1
+        try:
+            entry["key_file_bytes"] = os.path.getsize(path)
+        except OSError:
+            entry["key_file_bytes"] = 0
         return entry
     if not os.path.isdir(path):
         entry["status"] = MISSING

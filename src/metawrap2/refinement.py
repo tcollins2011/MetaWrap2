@@ -71,6 +71,52 @@ def _overlap_percent(a: Dict[str, int], b: Dict[str, int]) -> float:
     return max(ratio_a, ratio_b)
 
 
+def passes(
+    completeness: float, contamination: float, min_completion: float, max_contamination: float
+) -> bool:
+    """Whether a bin clears the quality thresholds, for every code path that has to decide.
+
+    The comparisons are strict on both sides, which is inherited and is the convention every number
+    measured for this project was produced under. It matters only for a bin landing exactly on a
+    threshold, and it is defined here once so the single-bin-set path and consolidation cannot drift
+    apart on it.
+    """
+    return completeness > min_completion and contamination < max_contamination
+
+
+def select_passing(
+    folder: str,
+    stats_path: str,
+    out_folder: str,
+    min_completion: float,
+    max_contamination: float,
+) -> int:
+    """Copy just the bins that clear the thresholds into ``out_folder``, renumbered. Returns count.
+
+    Consolidation applies the thresholds as a side effect of merging, so with two or more bin sets the
+    final folder contains only bins that passed. With exactly one there is nothing to merge, and the
+    folder was being filled with every input bin - including bins at 0% completeness - under a name
+    that states a threshold. This is that filter on its own.
+    """
+    header, raw, stats = _read_stats(stats_path)
+    keeping = sorted(
+        name
+        for name, v in stats.items()
+        if passes(v[0], v[1], min_completion, max_contamination)
+        and os.path.isfile(os.path.join(folder, name))
+    )
+
+    os.makedirs(out_folder, exist_ok=True)
+    summary = [header] if header else []
+    for bin_ct, name in enumerate(keeping, start=1):
+        shutil.copy(os.path.join(folder, name), os.path.join(out_folder, bin_filename(bin_ct)))
+        summary.append("%s\t%s" % (bin_stem(bin_ct), "\t".join(raw[name].split("\t")[1:])))
+
+    with open(out_folder + STATS_SUFFIX, "w") as fh:
+        fh.write("".join(summary))
+    return len(keeping)
+
+
 def consolidate(
     folder_1: str,
     folder_2: str,
@@ -91,7 +137,7 @@ def consolidate(
         return {
             name: v
             for name, v in stats.items()
-            if v[0] > min_completion and v[1] < max_contamination
+            if passes(v[0], v[1], min_completion, max_contamination)
         }
 
     header1, raw1, stats1 = _read_stats(stats_1)

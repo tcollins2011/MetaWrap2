@@ -7,6 +7,12 @@ core lives in :mod:`metawrap2.refinement` (consolidate/dereplicate) and
 :mod:`metawrap2.checkm` (CheckM); this module orchestrates them and preserves the original
 output layout.
 
+``--consolidator`` replaces that middle part with an external tool (currently DAS_Tool), which
+decides from single-copy genes in one pass instead of from CheckM on every combination. Both
+routes leave one bin set in ``binsO``, and everything after that - re-scoring, the -c/-x cut, the
+plots, the final layout, GUNC - is the same code either way, which is what makes the two
+comparable on the NC MAGs each recovers, with each route's cost reported beside that.
+
 This file is meant to be read and edited: the commands each external tool runs live in the
 COMMANDS block below and the tunable numbers in the CONSTANTS block.
 """
@@ -21,8 +27,10 @@ import shutil
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .. import checkm as _checkm
+from .. import gunc as _gunc
 from .. import refinement as _refinement
-from ..config import OPTIONAL_ENVS, load_settings
+from ..cliformat import bounded_float, make_parser, percent
+from ..config import MODULE_ENVS, load_settings
 from ..constants import (
     BIN_EXTENSION,
     CONTIGS_SUFFIX,
@@ -30,11 +38,16 @@ from ..constants import (
     MAX_BIN_SIZE,
     MIN_BIN_SIZE,
     STATS_SUFFIX,
+    bin_filename,
+    is_refined_bins_dirname,
+    is_unbinned_name,
+    refined_bins_dirname,
 )
-from ..io.seqio import contig_id, iter_fasta
+from ..io.seqio import contig_id, fasta_files, iter_fasta
 from ..progress import bar
 from ..pyrun import PY
 from ..utils import strip_trailing_slash
+from ..validate import check_fasta
 from ._common import (
     absolutize_paths,
     announcement,
@@ -44,9 +57,14 @@ from ._common import (
     env_for,
     error,
     finish_run,
+    force,
+    fs_replace_dir,
     listdir,
     make_checkpoint,
+    memory_arg,
+    optional_env_for,
     require_nonempty_dir,
+    resolve_memory_gb,
     resolve_threads,
     run,
     start_run,
@@ -55,7 +73,7 @@ from ._common import (
     warning,
 )
 
-CONDA_ENV = "metawrap2-bin_refinement"
+CONDA_ENV = MODULE_ENVS["bin_refinement"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 # These are MetaWrap2's own helpers, so they run in the host interpreter (env=None), not in
@@ -64,8 +82,13 @@ BINNING_REFINER = PY + " -m metawrap2.vendor.binning_refiner -1 {b1} -2 {b2} -o 
 BINNING_REFINER_3 = PY + " -m metawrap2.vendor.binning_refiner -1 {b1} -2 {b2} -3 {b3} -o {out}"
 BINNING_REFINER_N = PY + " -m metawrap2.vendor.binning_refiner {bins} -o {out}"
 PLOT_BINNING = PY + " -m metawrap2.scripts.plot_binning_results {comp} {cont} {stats}"
+# --search_engine diamond, not the DAS_Tool default: the default is usearch, which is not free
+# software and is not in the env, so the default command would simply fail to find it.
+DAS_TOOL = (
+    "DAS_Tool -i {tables} -l {labels} -c {assembly} -o {prefix} -t {threads}"
+    " --search_engine diamond --score_threshold {score} --write_bins"
+)
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
-DEFAULT_MEM_GB = 40
 DEFAULT_MIN_COMPLETION = 70  # -c; bins must exceed this % completion to be "good"
 DEFAULT_MAX_CONTAM = 10  # -x; bins must stay below this % contamination
 # bin_refinement ignores bins outside this size range (bytes); see constants.py
@@ -79,11 +102,23 @@ MAX_BIN_SETS = 6
 #: code always did (every pair, plus the all-way combination); see refinement_plan().
 COMBINATION_MODES = ("pairs-and-all", "pairs", "all")
 DEFAULT_COMBINATIONS = "pairs-and-all"
+#: How the bin sets are turned into one set. "metawrap" is this module's own algorithm - hybridise
+#: every combination with Binning_refiner, score each with CheckM, then pick the best version of
+#: each bin. "dastool" scores the input bins directly on single-copy genes and aggregates in one
+#: pass, which is a different accuracy/cost point rather than a different implementation of the same
+#: idea. The default is "metawrap" because it is the incumbent, not because it has been shown to
+#: win: that is decided on NC MAGs recovered once the comparison has run, with cost beside it. On
+#: per-sample bins so far, metawrap recovers 13 to DAS Tool's 10, for 4.52 cpu-hours against 0.62.
+CONSOLIDATORS = ("metawrap", "dastool")
+DEFAULT_CONSOLIDATOR = "metawrap"
+#: DAS_Tool's own default score threshold. Named here because it is a quality floor on the bins it
+#: keeps, so it belongs next to -c/-x rather than buried in a command string.
+DEFAULT_DASTOOL_SCORE = 0.5
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = make_parser(
         prog="metawrap2 bin_refinement",
         usage="metawrap2 bin_refinement [options] -o output_dir -A bin_folderA "
         "[-B bin_folderB ... -F bin_folderF]  |  --bins DIR [--bins DIR ...]",
@@ -92,22 +127,20 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     )
     p.add_argument("-o", "--output", required=True, help="output directory")
     threads_arg(p)
-    p.add_argument(
-        "-m", "--memory", type=int, default=DEFAULT_MEM_GB, help="RAM in GB (default 40)"
-    )
+    memory_arg(p)
     p.add_argument(
         "-c",
         "--completeness",
-        type=float,
+        type=percent(),
         default=DEFAULT_MIN_COMPLETION,
-        help="minimum %% completion of bins [should be >50] (default 70)",
+        help="minimum %% completion of bins; below 50 is not a genome by any MIMAG tier",
     )
     p.add_argument(
         "-x",
         "--contamination",
-        type=float,
+        type=percent(),
         default=DEFAULT_MAX_CONTAM,
-        help="maximum acceptable %% contamination of bins (default 10)",
+        help="maximum acceptable %% contamination of bins",
     )
     # -A..-F name the bin sets positionally, as they always have. --bins may be repeated
     # instead, which is easier to generate from a script or a loop.
@@ -141,10 +174,23 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="don't use Binning_refiner to make refined bins from binner combinations",
     )
     p.add_argument(
+        "--score-everything",
+        action="store_true",
+        help="score every bin with CheckM, including ones whose size or fragmentation already rules "
+        "them out. Slower, and the only reason to pass it is to check the filter is not wrong",
+    )
+    p.add_argument(
         "--skip-checkm",
         dest="run_checkm",
         action="store_false",
         help="don't run CheckM to assess bins",
+    )
+    p.add_argument(
+        "--skip-gunc",
+        dest="run_gunc",
+        action="store_false",
+        help="don't run GUNC on the final bins; skips the chimerism check CheckM cannot make "
+        "(and its reference database)",
     )
     p.add_argument(
         "--skip-consolidation",
@@ -177,7 +223,28 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--checkm2",
         action="store_true",
         help="score bins with CheckM2 instead of CheckM1 (fast, no pplacer memory "
-        "wall; needs the metawrap2-bin_refinement-checkm2 env)",
+        "wall; needs the metawrap2-checkm2 env)",
+    )
+    p.add_argument(
+        "--consolidator",
+        choices=CONSOLIDATORS,
+        default=DEFAULT_CONSOLIDATOR,
+        help="how to turn the bin sets into one set: 'metawrap' (default) hybridises every "
+        "combination and scores each with CheckM; 'dastool' scores the input bins on "
+        "single-copy genes and aggregates in one pass, which needs -a and the "
+        "metawrap2-bin_refinement-dastool env",
+    )
+    p.add_argument(
+        "-a",
+        "--assembly",
+        help="assembly the bins came from (required by --consolidator dastool, which reads the "
+        "contigs itself; MetaWrap2's own consolidation does not need it)",
+    )
+    p.add_argument(
+        "--dastool-score",
+        type=bounded_float(0, 1),
+        default=DEFAULT_DASTOOL_SCORE,
+        help="DAS_Tool --score_threshold: minimum bin score to keep",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -309,20 +376,56 @@ def _fix_contig_naming(path: str) -> bool:
 
 
 def _copy_bins(src: str, dest: str) -> int:
-    """Copy size-filtered bins from *src* into *dest* as bin-name.fa. Returns count kept."""
+    """Copy size-filtered bins from *src* into *dest* as bin-name.fa. Returns count kept.
+
+    The unbinned catch-all is not a bin and is skipped by name. A bin set is allowed to carry one:
+    `binning` writes CONCOCT's leftovers to ``concoct_bins/unbinned.fasta`` on purpose, so that a
+    user can see what no binner claimed, and the AMBER scorer skips it for the same reason - scoring
+    the leftovers as a genome would be scoring a bin nobody proposed. Here it was being copied in as
+    a candidate genome, which puts it through CheckM, into every pairwise Binning_refiner
+    combination, and into the dereplication that decides which bin each contig belongs in. On the
+    CAMI2 GI run it happened not to matter, because CONCOCT's leftovers came to 69.8 MB and the size
+    filter below drops anything over 20 MB - the right outcome reached for the wrong reason, and only
+    while the catch-all stays large. A tighter CONCOCT run leaves a smaller one, and a smaller one
+    gets refined as if it were a genome.
+
+    What the size filter drops is summarised at the end, separately for the two ends, because the
+    two mean different things and the per-bin lines above do not add up to either. Over the ceiling
+    is a catch-all bin - too much sequence to be one genome, so it could never have become a MAG and
+    losing it costs nothing but the recall figure. Under the floor is a fragment, which might have
+    grown into something had a different binner been in the set. On a CAMI2 CONCOCT set this filter
+    silently took 10 of 99 bins holding 41% of the set's sequence - 7 over the ceiling, the largest
+    131.8 Mb - which is most of the recall that refinement appears to lose; a run that does not say
+    so leaves that looking like refinement's doing. Measured on file size rather than base count,
+    which is what the filter itself compares.
+    """
     ensure_dir(dest)
     n = 0
+    dropped: dict[str, list[int]] = {"over": [], "under": []}
+    total = 0
     for name in sorted(os.listdir(src)):
         full = os.path.join(src, name)
         if not os.path.isfile(full):
             continue
+        if is_unbinned_name(name):
+            comm("Skipping %s because it is the unbinned leftovers, not a bin" % full)
+            continue
         size = os.path.getsize(full)  # portable (no `stat -c`)
+        total += size
         if MIN_SIZE < size < MAX_SIZE:
             base = os.path.splitext(name)[0]
             shutil.copy(full, os.path.join(dest, base + BIN_EXTENSION))
             n += 1
         else:
+            dropped["over" if size >= MAX_SIZE else "under"].append(size)
             comm("Skipping %s because the bin size is not between 50kb and 20Mb" % full)
+    for end, label in (("over", "above the 20Mb ceiling"), ("under", "below the 50kb floor")):
+        sizes = dropped[end]
+        if sizes:
+            comm(
+                "  %d bin(s) %s, holding %.1f%% of the set's sequence (largest %.1fMb)"
+                % (len(sizes), label, 100.0 * sum(sizes) / total, max(sizes) / 1e6)
+            )
     return n
 
 
@@ -332,6 +435,137 @@ def _count_bins(path: str) -> int:
         if os.path.isdir(path)
         else 0
     )
+
+
+def write_contig_table(bins_dir: str, path: str) -> int:
+    """Write *bins_dir*'s contig-to-bin membership to *path* as TSV. Returns the row count.
+
+    Two consumers want the same table for different reasons. Anvio and similar tools read the one
+    laid down beside each final bin set, and DAS_Tool takes one per input bin set as its only view
+    of what each binner decided. Writing it in one place keeps those identical, which matters
+    because a consolidator reading a differently-shaped table silently consolidates nothing.
+    """
+    rows = 0
+    with open(path, "w") as out_fh:
+        for name in sorted(os.listdir(bins_dir)):
+            if not name.endswith(BIN_EXTENSION):
+                continue
+            bin_name = os.path.splitext(name)[0]
+            for header, _seq in iter_fasta(os.path.join(bins_dir, name)):
+                out_fh.write("%s\t%s\n" % (contig_id(header), bin_name))
+                rows += 1
+    return rows
+
+
+def assembly_for_bins(assembly: str, work: str) -> str:
+    """The assembly to hand a consolidator, with headers that match the copied bins.
+
+    The bins in *out* have been through :func:`_fix_contig_naming`, which reduces a header to its
+    contig id and turns any remaining '=' into '_'. A consolidator that reads the assembly itself
+    matches its contig names against the names in the bin tables, so if normalisation changed
+    anything the two no longer agree - and the failure mode is not an error but an empty
+    consolidation, because every contig simply fails to be found.
+
+    Records with no sequence are dropped here too, for a reason that has nothing to do with naming.
+    DAS_Tool reads the assembly with R's ``fread`` and a header with an empty sequence yields a line
+    with one field where it expects two, which stops the read part way and then reports every contig
+    after that point as "not found in assembly" - 36,854 of them, in a message that names none of the
+    real problem. CAMI2's gold-standard assembly ships two such records, so this is not hypothetical:
+    `binning` already filters them out of its own working copy, and a consolidator reading the
+    original was getting what binning had been careful not to pass on.
+
+    A copy is written only when something actually needed changing, which for metaSPAdes and MEGAHIT
+    names with no empty records it does not. Assemblies are gigabytes, so a copy nothing needed would
+    be the most expensive no-op in the module.
+    """
+    renamed = [(contig_id(h).replace("=", "_"), h, seq) for h, seq in iter_fasta(assembly)]
+    empty = [new for new, _old, seq in renamed if not seq]
+    if not empty and all(new == contig_id(old) for new, old, _seq in renamed):
+        return assembly
+    ensure_dir(work)
+    normalized = os.path.join(work, "assembly_normalized.fa")
+    reasons = []
+    if any(new != contig_id(old) for new, old, _seq in renamed):
+        reasons.append("headers need the same normalisation the bins got")
+    if empty:
+        reasons.append(
+            "%d record(s) have no sequence, which DAS_Tool's assembly reader stops on" % len(empty)
+        )
+    comm("writing %s: %s" % (os.path.basename(normalized), "; ".join(reasons)))
+    with open(normalized, "w") as fh:
+        fh.writelines(">%s\n%s\n" % (new, seq) for new, _old, seq in renamed if seq)
+    return normalized
+
+
+def _run_dastool(args, env: Optional[str], out: str, labels: Sequence[str]) -> None:
+    """Consolidate the bin sets in *out* with DAS_Tool, leaving the result as ``binsO``.
+
+    binsO is where this module's own consolidation leaves its answer, so landing here means the
+    whole downstream half - re-scoring with CheckM, dropping bins under -c/-x, the ranking plots,
+    the final layout and GUNC - runs identically whichever consolidator produced it. That is what
+    makes the arms comparable: the only thing that differs is how the one set was arrived at.
+    """
+    work = os.path.join(out, "work_files")
+    ensure_dir(work)
+    tables = []
+    for label in labels:
+        table = os.path.join(work, label + ".dastool.tsv")
+        if not dry_run():
+            rows = write_contig_table(os.path.join(out, label), table)
+            comm("%s contributes %d contigs to DAS_Tool" % (label, rows))
+        tables.append(table)
+
+    assembly = args.assembly if dry_run() else assembly_for_bins(args.assembly, work)
+    prefix = os.path.join(work, "dastool", "DASTool")
+    ensure_dir(os.path.dirname(prefix))
+    run(
+        DAS_TOOL.format(
+            tables=",".join(tables),
+            labels=",".join(labels),
+            assembly=assembly,
+            prefix=prefix,
+            threads=args.threads,
+            score=args.dastool_score,
+        ),
+        env=env,
+        tool="DAS_Tool",
+    )
+    if dry_run():
+        return
+    produced = prefix + "_DASTool_bins"
+    if not os.path.isdir(produced):
+        error(
+            "DAS_Tool did not produce %s.\n"
+            "Its own log is in %s. A DAS_Tool run that finds no single-copy genes ends this way, "
+            "which usually means the contig names in the bins do not match the assembly given "
+            "with -a." % (os.path.basename(produced), os.path.dirname(prefix))
+        )
+    binsO = os.path.join(out, "binsO")
+    ensure_dir(binsO)
+    # Renamed to bin_001.fasta, not copied under DAS_Tool's own names. Every bin set MetaWrap2
+    # produces is numbered this way, the .stats.tsv rows are keyed on these stems, and a
+    # consolidator whose output is named differently would make the two arms distinguishable by
+    # something other than their contents. DAS_Tool's names say which input set each bin came
+    # from, which is worth keeping, so the mapping is written out beside the bins rather than
+    # discarded.
+    kept = 0
+    provenance = []
+    for name in sorted(os.listdir(produced)):
+        if os.path.splitext(name)[1] in FASTA_EXTENSIONS:
+            kept += 1
+            renamed = bin_filename(kept)
+            shutil.copy(os.path.join(produced, name), os.path.join(binsO, renamed))
+            provenance.append((os.path.splitext(renamed)[0], name))
+    with open(os.path.join(work, "dastool_bin_names.tsv"), "w") as fh:
+        fh.write("bin\tdastool_name\n")
+        fh.writelines("%s\t%s\n" % row for row in provenance)
+    comm("DAS_Tool kept %d bins (score threshold %s)" % (kept, args.dastool_score))
+    if kept == 0:
+        error(
+            "DAS_Tool kept no bins at --dastool-score %s. Its per-bin scores are in "
+            "%s_DASTool_summary.tsv; lower the threshold if the best score there is acceptable."
+            % (args.dastool_score, prefix)
+        )
 
 
 def _refine(out: str, env: Optional[str], inputs: Sequence[str], dest: str) -> None:
@@ -356,7 +590,9 @@ def _refine(out: str, env: Optional[str], inputs: Sequence[str], dest: str) -> N
         return
     if not os.path.isdir(produced):
         error("Bin_refiner did not finish correctly for %s. Exiting..." % dest)
-    os.replace(produced, os.path.join(out, dest))
+    # Destination-safe: this is reached on a --resume redoing the refine step after a crash, and what
+    # is already there is that crashed run's partial version of the set about to be written.
+    fs_replace_dir(produced, os.path.join(out, dest))
     comm("there are %d refined bins in %s" % (_count_bins(os.path.join(out, dest)), dest))
     shutil.rmtree(os.path.join(out, refined))
 
@@ -394,15 +630,27 @@ def _good_bins(stats_path: str, comp: float, cont: float) -> List[str]:
 
 
 def _run_checkm_set(
-    bin_set_dir: str, args, env: Optional[str], checkm2_env: Optional[str] = None
+    bin_set_dir: str,
+    args,
+    env: Optional[str],
+    checkm2_env: Optional[str] = None,
+    cache: Optional[_checkm.BinScoreCache] = None,
 ) -> str:
-    """Run CheckM on one bin set and report the number of 'good' bins. Returns the .stats path."""
+    """Run CheckM on one bin set and report the number of 'good' bins. Returns the .stats path.
+
+    Through `run_checkm_cached`, because this is called once per hybrid bin set and the sets overlap: on
+    a three-binner refinement, 32% of the bins across the seven sets are the same bin scored again. The
+    reported numbers are identical either way - the same contigs have the same completeness.
+    """
     comm(
         "Running %s on %s bins"
         % ("CheckM2" if args.checkm2 else "CheckM", os.path.basename(bin_set_dir))
     )
-    stats = _checkm.run_checkm(
+    stats = _checkm.run_checkm_cached(
         bin_set_dir,
+        cache=cache,
+        prefilter=not args.score_everything,
+        say=comm,
         threads=args.threads,
         mem_gb=args.memory,
         env=env,
@@ -435,11 +683,37 @@ def main(argv: List[str]) -> int:
     args = _parse_args(argv)
     settings = load_settings(args.config)
     resolve_threads(args, settings)
+    resolve_memory_gb(args, settings)
     absolutize_paths(args)
     env = env_for("bin_refinement", settings)
-    # CheckM2 lives in its own opt-in env; everything else in this module still uses the
-    # default bin_refinement env.
-    checkm2_env = OPTIONAL_ENVS["checkm2"] if (args.checkm2 and settings.use_conda_envs) else None
+    # CheckM2 is the one tool here that cannot share: it has no common solution with CheckM1, so it
+    # keeps an env of its own and this is the only env lookup in the module that can fail separately.
+    checkm2_env = optional_env_for("checkm2", settings, "--checkm2") if args.checkm2 else None
+    # GUNC and DAS Tool are in this module's own env. They used to have one each, which made a step
+    # that runs by default - GUNC, unless --skip-gunc - depend on a second install command.
+    gunc_env = env
+    # An alternative consolidator replaces the middle of the pipeline rather than adding to it, so
+    # the precondition it still has is checked before any bin is copied: the assembly it cannot work
+    # without. Finding out after prodigal has run on every bin would be the whole cost of the arm for
+    # nothing. Its env is no longer a separate precondition - DAS Tool ships with CheckM1.
+    external = args.consolidator != "metawrap"
+    external_env = env if external else None
+    if external and not args.assembly:
+        error(
+            "--consolidator %s reads the assembly contigs itself, so it needs -a/--assembly.\n"
+            "Pass the same assembly the bins were produced from. MetaWrap2's own consolidation "
+            "(--consolidator metawrap, the default) works from the bins alone and does not."
+            % args.consolidator
+        )
+    if external and not args.consolidate:
+        # Named as a contradiction rather than resolved by precedence. Either order of precedence
+        # gives the user something they did not ask for, and both flags were typed deliberately.
+        error(
+            "--consolidator %s and --skip-consolidation ask for opposite things: one names which "
+            "consolidator to use, the other says not to consolidate at all.\n"
+            "Drop --skip-consolidation to run %s, or drop --consolidator to pick the best single "
+            "bin set without mixing bins." % (args.consolidator, args.consolidator)
+        )
     bin_sets = collect_bin_sets(args)
     validate_inputs(
         "bin_refinement",
@@ -450,12 +724,24 @@ def main(argv: List[str]) -> int:
                 "bin set %s" % bin_set_label(i),
             )
             for i, path in enumerate(bin_sets)
-        ],
+        ]
+        + ([(check_fasta, args.assembly, "assembly (-a)")] if external else []),
     )
     rec = start_run("bin_refinement", args, env, settings, inputs=list(bin_sets))
 
     ckpt = make_checkpoint(args.output)
     try:
+        # Checked here rather than at the point of use: GUNC runs last, and finding out that its
+        # database is absent after CheckM has spent hours on every bin-set combination is the worst
+        # possible moment to find out.
+        gunc_db = settings.db("GUNC_DB") if args.run_gunc else ""
+        if args.run_gunc and not (gunc_db and os.path.exists(gunc_db)):
+            # A dry run is asked for precisely when the tools and databases are not in place yet, so
+            # it reports the problem and carries on printing the plan. A real run stops.
+            (warning if dry_run() else error)(
+                "GUNC runs by default and its database is not configured (GUNC_DB=%s). %s"
+                % (gunc_db or "<not set>", _gunc.DB_HINT)
+            )
 
         comp, cont = args.completeness, args.contamination
         folders = [(bin_set_label(i), src) for i, src in enumerate(bin_sets)]
@@ -466,13 +752,65 @@ def main(argv: List[str]) -> int:
         announcement("BEGIN PIPELINE!")
         out = args.output
         comm("setting up output folder and copying over bins...")
-        if os.path.isdir(out):
+        # Only under --force. --resume arrives here with the same already-existing output folder and
+        # means the opposite: it is about to skip the steps whose checkpoints are set, so clearing
+        # their output leaves it with nothing to skip to. Unconditional, this deleted out/bins* on
+        # every resume - and since the bin sets only move into work_files at the finalize step, that
+        # was every resume between "refine" and the end.
+        if os.path.isdir(out) and force():
             warning("Warning: %s already exists. Attempting to clean." % out)
             # Remove every bins* working directory, whatever the combination names are for
             # this number of inputs, plus the consolidated (M) and dereplicated (O) sets.
+            #
+            # Under work_files as well as in the output root, because that is where a finished run
+            # leaves them: cleaning only the root left the previous run's sets sitting in work_files,
+            # and a rerun with fewer inputs then kept a binsC nobody in this run produced. The
+            # staleness is the reason to do it - every set this run does produce is overwritten at
+            # the end anyway.
+            # Sidecars as well as directories: a binsC.stats.tsv left behind by a 3-set run is as
+            # misleading as the folder was, and it is the file the stats tables and the plots are
+            # built from.
+            for parent in (out, os.path.join(out, "work_files")):
+                for name in listdir(parent):
+                    path = os.path.join(parent, name)
+                    if not name.startswith("bins"):
+                        continue
+                    if os.path.isdir(path):
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        os.remove(path)
+            # The previous run's final set goes too, with its sidecars. Not by name: the directory is
+            # named for the thresholds it was cut at, so a rerun at different -c/-x would leave a
+            # second final set beside the new one with nothing to say which is this run's. Keeping it
+            # was also the next thing to fail - the layout step copytrees onto this path, and
+            # copytree will not write into a directory that exists.
             for name in listdir(out):
-                if name.startswith("bins") and os.path.isdir(os.path.join(out, name)):
+                if is_refined_bins_dirname(name) and os.path.isdir(os.path.join(out, name)):
                     shutil.rmtree(os.path.join(out, name), ignore_errors=True)
+                    for suffix in (STATS_SUFFIX, CONTIGS_SUFFIX):
+                        sidecar = os.path.join(out, name + suffix)
+                        if os.path.isfile(sidecar):
+                            os.remove(sidecar)
+            # And the copies of the input sets that the last run left under their input folder names.
+            # Those are only ever written when the destination does not already exist - so once a
+            # folder has been refined, a rerun whose inputs have changed keeps presenting the old
+            # ones. That is how a refined/ directory came to advertise a 188-bin MaxBin2 set next to
+            # the results of refining the corrected 129-bin one: the superseded set, under the name a
+            # reader would take for this run's input, with a .stats.tsv to match.
+            for _label, src in folders:
+                base = os.path.basename(strip_trailing_slash(src))
+                copy = os.path.join(out, base)
+                # Not if it *is* the input: nothing stops someone pointing -A at a folder inside the
+                # output directory, and deleting a user's bins would be a far worse bug than the one
+                # being fixed.
+                if os.path.realpath(copy) == os.path.realpath(src):
+                    continue
+                if os.path.isdir(copy):
+                    shutil.rmtree(copy, ignore_errors=True)
+                for suffix in (STATS_SUFFIX, CONTIGS_SUFFIX):
+                    sidecar = copy + suffix
+                    if os.path.isfile(sidecar):
+                        os.remove(sidecar)
         ensure_dir(out)
 
         n_binnings = 0
@@ -486,6 +824,12 @@ def main(argv: List[str]) -> int:
             n_binnings += 1
         comm("There are %d bin sets!" % n_binnings)
 
+        # One CheckM score cache for the whole refinement. The hybrid sets this builds overlap heavily -
+        # measured at 32% identical bins across the seven sets of a three-binner run - and a bin's score
+        # depends only on its contigs, so scoring one twice is pure waste. Kept under work_files so a
+        # --resume does not re-pay either.
+        score_cache = _checkm.BinScoreCache(os.path.join(out, "work_files", "checkm_scores.json"))
+
         comm("Fix contig naming by removing special characters...")
         rewritten = 0
         for dest, _src in folders:
@@ -494,7 +838,12 @@ def main(argv: List[str]) -> int:
                     rewritten += 1
         comm("normalised contig headers in %d bin file(s); the rest were already clean" % rewritten)
 
-        if args.refine and n_binnings >= 2:
+        if external:
+            comm(
+                "Skipping bin refinement: %s consolidates the input bin sets directly, so there "
+                "are no combinations to build." % args.consolidator
+            )
+        elif args.refine and n_binnings >= 2:
             if ckpt.todo("refine"):
                 announcement("BEGIN BIN REFINEMENT")
                 plan = refinement_plan(
@@ -529,19 +878,31 @@ def main(argv: List[str]) -> int:
             _normalize_bin_extensions(os.path.join(out, name))
 
         comm("making sure every refined bin set contains bins...")
-        for name in ([] if dry_run() else _bin_set_dirs(out)):
+        for name in [] if dry_run() else _bin_set_dirs(out):
             if _count_bins(os.path.join(out, name)) == 0:
                 comm("Removing bin set %s because it yielded 0 refined bins ..." % name)
                 shutil.rmtree(os.path.join(out, name))
 
         # ── CheckM on all bin sets ──────────────────────────────────────────────────────────
-        if args.run_checkm:
+        if external:
+            # Deliberately not run. CheckM on every input set exists to tell this module's own
+            # consolidation which version of each bin to keep; an external consolidator makes that
+            # decision from its own scoring. Running it anyway would add the single largest cost in
+            # the module to the arm that was supposed to be the cheap one, and compare nothing.
+            comm(
+                "Skipping CheckM on the input bin sets: %s scores the bins itself. The "
+                "consolidated set is still scored with CheckM below, so the arms stay comparable."
+                % args.consolidator
+            )
+        elif args.run_checkm:
             if ckpt.todo("checkm"):
                 announcement("RUNNING CHECKM ON ALL SETS OF BINS")
                 # CheckM on each of up to 7 bin sets; each one is many minutes.
                 sets = _bin_set_dirs(out) or ([d for d, _ in folders] if dry_run() else [])
                 for name in bar(sets, desc="CheckM on bin sets", unit=" set", total=len(sets)):
-                    _run_checkm_set(os.path.join(out, name), args, env, checkm2_env)
+                    _run_checkm_set(
+                        os.path.join(out, name), args, env, checkm2_env, cache=score_cache
+                    )
                 ckpt.done("checkm")
             else:
                 comm("skipping CheckM on bin sets (already done; --resume)")
@@ -550,7 +911,15 @@ def main(argv: List[str]) -> int:
 
         # ── consolidate ─────────────────────────────────────────────────────────────────────
         best_bin_set: Optional[str] = None
-        if args.consolidate and args.run_checkm:
+        if external:
+            if ckpt.todo("consolidate"):
+                announcement("CONSOLIDATING ALL BIN SETS WITH " + args.consolidator.upper())
+                _run_dastool(args, external_env, out, [label for label, _src in folders])
+                ckpt.done("consolidate")
+            else:
+                comm("skipping %s consolidation (already done; --resume)" % args.consolidator)
+            best_bin_set = "binsO"
+        elif args.consolidate and args.run_checkm:
             announcement("CONSOLIDATING ALL BIN SETS BY CHOOSING THE BEST VERSION OF EACH BIN")
             if n_binnings == 1:
                 comm(
@@ -561,6 +930,10 @@ def main(argv: List[str]) -> int:
                 if ckpt.todo("consolidate") and not dry_run():
                     comm("There are %d original bin folders, plus the refined bins." % n_binnings)
                     binsM = os.path.join(out, "binsM")
+                    # Both of these are destination-safe for the same reason: a --resume whose
+                    # consolidate checkpoint is unset got here because a previous attempt crashed
+                    # partway through consolidating, and left a binsM (or, below, a binsO) behind.
+                    shutil.rmtree(binsM, ignore_errors=True)
                     shutil.copytree(os.path.join(out, "binsA"), binsM)
                     shutil.copy(os.path.join(out, "binsA" + STATS_SUFFIX), binsM + STATS_SUFFIX)
                     for name in _bin_set_dirs(out):
@@ -586,6 +959,11 @@ def main(argv: List[str]) -> int:
                         os.replace(tmp + STATS_SUFFIX, binsM + STATS_SUFFIX)
 
                     binsO = os.path.join(out, "binsO")
+                    # A crashed attempt at this step leaves a partial binsO behind, and dereplicate
+                    # writes into the folder rather than replacing it - so its leftover bins would
+                    # survive into the final set. The move in the "keep" branch would have refused
+                    # the directory outright. Cleared once, for all three dereplication modes.
+                    shutil.rmtree(binsO, ignore_errors=True)
                     if args.dereplicate == "keep":
                         comm("Skipping dereplication of contigs between bins...")
                         os.replace(binsM, binsO)
@@ -635,7 +1013,14 @@ def main(argv: List[str]) -> int:
 
         # ── finalize: re-QC the consolidated set and lay out the final outputs ───────────────
         if ckpt.todo("finalize") and not dry_run():
-            if args.run_checkm and best_bin_set == "binsO" and args.dereplicate != "keep":
+            # --keep-ambiguous is what skips the re-score for this module's own consolidation,
+            # because that is the one mode where binsO is binsM unchanged and already scored. An
+            # external consolidator's output has never been through CheckM at all, and its bins are
+            # non-overlapping by construction, so the flag has nothing to say about it.
+            rescore = args.run_checkm and best_bin_set == "binsO"
+            if rescore and not external and args.dereplicate == "keep":
+                rescore = False
+            if rescore:
                 binsO = os.path.join(out, "binsO")
                 if _checkm.count_bins(binsO) == 0:
                     error(
@@ -650,8 +1035,11 @@ def main(argv: List[str]) -> int:
                         % (comp, cont, out)
                     )
                 comm("Re-running CheckM on binsO bins")
-                stats = _checkm.run_checkm(
+                stats = _checkm.run_checkm_cached(
                     binsO,
+                    cache=score_cache,
+                    prefilter=not args.score_everything,
+                    say=comm,
                     threads=args.threads,
                     mem_gb=args.memory,
                     env=env,
@@ -721,9 +1109,14 @@ def main(argv: List[str]) -> int:
                 # were left behind in the output root instead of being tidied away.
                 for f in list(os.listdir(out)):
                     if f.startswith("bins"):
-                        os.replace(os.path.join(out, f), os.path.join(work, f))
+                        # Destination-safe: the destination already exists whenever this output
+                        # folder has been refined before, so this tidy-up used to raise
+                        # FileExistsError at the very end of an otherwise complete run, with every
+                        # final bin already written, and leave the remaining sets half-moved for the
+                        # next --resume to trip over.
+                        fs_replace_dir(os.path.join(out, f), os.path.join(work, f))
 
-            final = os.path.join(out, "metawrap_%d_%d_bins" % (int(comp), int(cont)))
+            final = os.path.join(out, refined_bins_dirname(comp, cont))
             if best_bin_set is None:
                 # Every branch above sets this; assert it for the type checker and so that a
                 # future branch that forgets fails loudly rather than writing to "None".
@@ -734,9 +1127,21 @@ def main(argv: List[str]) -> int:
                 else os.path.join(out, best_bin_set)
             )
             if os.path.isdir(best_dir):
-                shutil.copytree(best_dir, final)
-                if os.path.isfile(best_dir + STATS_SUFFIX):
-                    shutil.copy(best_dir + STATS_SUFFIX, final + STATS_SUFFIX)
+                # With two or more bin sets, consolidation has already dropped everything below the
+                # thresholds. With exactly one there was nothing to consolidate, so the thresholds had
+                # never been applied to anything and this folder - named for them - was getting every
+                # input bin, 0%-complete ones included.
+                single_set_stats = best_dir + STATS_SUFFIX
+                if n_binnings == 1 and args.run_checkm and os.path.isfile(single_set_stats):
+                    kept = _refinement.select_passing(best_dir, single_set_stats, final, comp, cont)
+                    comm(
+                        "%d of the %d bins pass %d%% completeness and %d%% contamination"
+                        % (kept, len(fasta_files(best_dir)), int(comp), int(cont))
+                    )
+                else:
+                    shutil.copytree(best_dir, final)
+                    if os.path.isfile(single_set_stats):
+                        shutil.copy(single_set_stats, final + STATS_SUFFIX)
 
             # restore the original input bin sets under their input folder names
             for dest, src in folders:
@@ -756,14 +1161,7 @@ def main(argv: List[str]) -> int:
                 for name in os.listdir(out):
                     d = os.path.join(out, name)
                     if name.endswith("_bins") and os.path.isdir(d):
-                        with open(d + CONTIGS_SUFFIX, "w") as out_fh:
-                            for f in sorted(os.listdir(d)):
-                                if f.endswith(BIN_EXTENSION):
-                                    bin_name = os.path.splitext(f)[0]
-                                    out_fh.writelines(
-                                        "%s\t%s\n" % (contig_id(header), bin_name)
-                                        for header, _seq in iter_fasta(os.path.join(d, f))
-                                    )
+                        write_contig_table(d, d + CONTIGS_SUFFIX)
             ckpt.done("finalize")
         elif dry_run():
             if args.run_checkm:
@@ -776,12 +1174,58 @@ def main(argv: List[str]) -> int:
                     tool="plot_binning_results",
                     cwd=out,
                 )
-            comm(
-                "(dry run) would lay out the final bins in metawrap_%d_%d_bins"
-                % (int(comp), int(cont))
-            )
+            comm("(dry run) would lay out the final bins in %s" % refined_bins_dirname(comp, cont))
         else:
             comm("skipping final output layout (already done; --resume)")
+
+        # ── GUNC: the chimerism question CheckM's marker genes cannot answer ─────────────────
+        # Its own checkpoint step rather than part of "finalize", so a resume of a run that
+        # finalized before --skip-gunc was dropped still gets the annotation without redoing the
+        # layout. It annotates and never deletes: a chimeric bin is reported, and what to do about
+        # it is the reader's call.
+        final_bins = os.path.join(out, refined_bins_dirname(comp, cont))
+        if args.run_gunc and ckpt.todo("gunc"):
+            announcement("ASSESSING THE FINAL BINS FOR CHIMERISM WITH GUNC")
+            if dry_run():
+                # A placeholder rather than the empty string, so the printed command reads as
+                # "this is where your database goes" instead of as a malformed --db_file.
+                _gunc.run_gunc(
+                    final_bins,
+                    threads=args.threads,
+                    db=gunc_db or "<GUNC_DB>",
+                    env=gunc_env,
+                    out_dir=os.path.join(out, "work_files", "gunc"),
+                )
+            elif _checkm.count_bins(final_bins) == 0:
+                comm("no final bins to assess; skipping GUNC")
+                ckpt.done("gunc")
+            else:
+                report = _gunc.run_gunc(
+                    final_bins,
+                    threads=args.threads,
+                    db=gunc_db,
+                    env=gunc_env,
+                    out_dir=os.path.join(out, "work_files", "gunc"),
+                )
+                verdicts = _gunc.parse_report(str(report))
+                chimeric = sorted(name for name, v in verdicts.items() if not v.passed)
+                n = _gunc.annotate_stats(final_bins + STATS_SUFFIX, verdicts)
+                comm(
+                    "GUNC scored %d bins; %d annotated in %s"
+                    % (len(verdicts), n, os.path.basename(final_bins) + STATS_SUFFIX)
+                )
+                if chimeric:
+                    warning(
+                        "GUNC calls %d of %d final bins chimeric (clade separation score above "
+                        "%s): %s\nThey are kept, with gunc_pass=no in the stats table - a bin two "
+                        "genomes wide can look complete and clean to CheckM."
+                        % (len(chimeric), len(verdicts), _gunc.CSS_THRESHOLD, ", ".join(chimeric))
+                    )
+                else:
+                    comm("GUNC found no chimeric bins among the final %d" % len(verdicts))
+                ckpt.done("gunc")
+        elif args.run_gunc:
+            comm("skipping GUNC (already done; --resume)")
 
         announcement("BIN_REFINEMENT PIPELINE FINISHED SUCCESSFULLY!")
     finally:

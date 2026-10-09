@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metawrap2"
-version = "2.0.1"
+version = "2.1.0"
 description = "MetaWrap2 - a flexible, Python-native pipeline for genome-resolved metagenomic data analysis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -67,6 +67,9 @@ Issues = "https://github.com/ursky/MetaWrap2/issues"
 
 [project.scripts]
 metawrap2 = "metawrap2.cli:main"
+# Same entry point under a shorter name. Every command in this tool is typed as
+# `metawrap2 <module> <flags>`, and the prefix is the part nobody needs to read.
+mw2 = "metawrap2.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -154,3 +157,7 @@ ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # Run with use_conda_envs = true: for the few tests about env resolution itself. See conftest.
+    "conda_envs: the test needs conda env wrapping switched on",
+]

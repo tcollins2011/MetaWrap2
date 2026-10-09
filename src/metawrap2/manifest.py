@@ -192,7 +192,13 @@ class Manifest:
 
     # -- recording ------------------------------------------------------------------------
 
-    def start(self, name: str, command: Sequence[str], inputs: Iterable[str]) -> float:
+    def start(
+        self,
+        name: str,
+        command: Sequence[str],
+        inputs: Iterable[str],
+        grant: Optional[Dict[str, Any]] = None,
+    ) -> float:
         """Record that *name* is starting. Returns the start time to pass back to finish()."""
         started = time.time()
         self.data["steps"][name] = {
@@ -202,6 +208,13 @@ class Manifest:
             "inputs": [describe(p) for p in inputs],
             "outputs": [],
         }
+        if grant:
+            # What the step was *allowed*, next to what it went on to use. Peak memory on its own
+            # says a step needed 40 GB; only the grant says whether 40 GB was all it was offered
+            # or a fifth of it, which is the difference between a budget to raise and one to cut.
+            # Recorded at start so an interrupted step - the interesting case for an OOM - keeps
+            # it. See metawrap2.limits and `metawrap2 calibrate`.
+            self.data["steps"][name]["grant"] = dict(grant)
         self.save()
         return started
 

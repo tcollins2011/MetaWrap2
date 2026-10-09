@@ -10,6 +10,8 @@ This is a curated subset: one strong test per distinct onboarding contract.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from metawrap2.commands import config_cmd, quickstart
@@ -115,3 +117,72 @@ def test_a_retired_module_name_explains_itself(name, capsys):
 
 
 # --- the disk-space check warns rather than refuses -----------------------------------------
+
+
+# --- the starter config is the single source of truth --------------------------------------
+
+
+def test_the_example_config_matches_the_starter_config():
+    """`metawrap2.toml.example` is generated from DEFAULT_CONFIG.
+
+    They were once two hand-maintained copies and the example fell behind, which is worse than
+    having no example at all: a user pastes a section that no longer exists.
+    """
+    import pathlib
+
+    example = pathlib.Path(__file__).resolve().parent.parent / "metawrap2.toml.example"
+    assert example.read_text() == config_cmd.DEFAULT_CONFIG
+
+
+def test_the_starter_config_is_valid_and_leaves_the_budget_at_its_defaults():
+    """Everything in [limits] is commented out, so the file must parse and change nothing."""
+    tomllib = pytest.importorskip("tomllib" if sys.version_info >= (3, 11) else "tomli")
+
+    from metawrap2.config import check_config
+    from metawrap2.limits import LimitsConfig, config_from_table
+
+    data = tomllib.loads(config_cmd.DEFAULT_CONFIG)
+    problems, _notes = check_config(data, "metawrap2.toml.example")
+    assert problems == []
+    assert config_from_table(data.get("limits", {})) == LimitsConfig()
+
+
+def test_the_starter_config_does_not_pin_threads():
+    """A hardcoded `threads = 8` would cap every module on a large machine at 8."""
+    tomllib = pytest.importorskip("tomllib" if sys.version_info >= (3, 11) else "tomli")
+
+    assert "threads" not in tomllib.loads(config_cmd.DEFAULT_CONFIG)["settings"]
+
+
+# --- the shipped binning tier and what installing it takes ---------------------------------
+
+
+def test_the_shipped_tier_and_the_drivers_default_cannot_disagree():
+    """One definition of "the default binners", read by both the module and the pipeline driver.
+
+    The driver used to hold its own literal ("--metabat2", "--maxbin2"), which is how a sheet
+    naming --preset anything but fast ended up pointed at a bin directory that was never created.
+    """
+    from metawrap2.commands.run import DEFAULT_BINNERS
+    from metawrap2.modules.binning import DEFAULT_PRESET, PRESETS
+
+    assert DEFAULT_PRESET in PRESETS
+    assert tuple(b.lstrip("-") for b in DEFAULT_BINNERS) == PRESETS[DEFAULT_PRESET]
+
+
+def test_quickstart_installs_whatever_env_the_shipped_tier_needs():
+    """The shipped tier reaches into an opt-in env, so an install that skipped it was incomplete.
+
+    quickstart finished reporting everything healthy and the first `metawrap2 run` then stopped at
+    binning asking for metawrap2-learned, which is the opposite of what quickstart is for.
+    """
+    from metawrap2.commands.quickstart import _default_tier_envs
+    from metawrap2.config import OPTIONAL_ENVS
+    from metawrap2.modules.binning import DEFAULT_PRESET, PRESETS
+
+    needed = {
+        OPTIONAL_ENVS[b].removeprefix("metawrap2-")
+        for b in PRESETS[DEFAULT_PRESET]
+        if b in OPTIONAL_ENVS
+    }
+    assert set(_default_tier_envs()) == needed

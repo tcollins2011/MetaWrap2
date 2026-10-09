@@ -1,0 +1,14 @@
+# Read- and bin-level taxonomy: kraken2 with its Krona plot, and the taxator-tk classifier.
+#
+# GTDB-Tk is not here and cannot be: it has no common solution with taxator-tk. It is also the one
+# tool in this group with a 100+ GB reference database, so a user who wants it is already opting in.
+# See gtdbtk.yaml.
+name: metawrap2-taxonomy
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - kraken2 >=2.1.2
+  - krona >=2.8
+  - taxator-tk >=1.3.3e
+  - blast >=2.13

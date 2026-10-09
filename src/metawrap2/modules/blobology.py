@@ -1,7 +1,7 @@
 """MetaWrap2 blobology module: GC-vs-coverage blobplots of contigs (and bins).
 
 Contigs are taxonomically classified with MEGABLAST against NCBI nt, reads are mapped back
-with bowtie2 to estimate coverage, and the two are combined into a blobplot table that is
+with minimap2 to estimate coverage, and the two are combined into a blobplot table that is
 rendered into GC-vs-abundance plots coloured by taxonomy (and, optionally, by bin).
 
 This is a MetaWrap2 port of a pipeline derived from BLOBOLOGY (Sujai Kumar,
@@ -20,8 +20,10 @@ import os
 from typing import List, Optional
 
 from .. import blastdb as _blastdb
+from ..aligners import ALIGNERS, DEFAULT_ALIGNER, INDEX_SUFFIXES, index_path
+from ..cliformat import make_parser
 from ..command import tool_path_in_env
-from ..config import load_settings
+from ..config import MODULE_ENVS, load_settings
 from ..io.seqio import iter_fasta
 from ..progress import bar
 from ..pyrun import PY
@@ -46,7 +48,7 @@ from ._common import (
     warning,
 )
 
-CONDA_ENV = "metawrap2-blobology"
+CONDA_ENV = MODULE_ENVS["blobology"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 FASTAQUAL_SELECT = (
@@ -56,9 +58,13 @@ BLASTN = (
     "blastn -task megablast -query {query} -db {blastdb} -evalue 1e-5"
     " -num_threads {threads} -max_target_seqs 1 -outfmt '6 qseqid staxids'"
 )
-BOWTIE2_BUILD = "bowtie2-build -q --threads {threads} {assembly} {index}"
-BOWTIE2 = "bowtie2 -x {index} --very-fast-local -k 1 -t -p {threads} --mm -1 {r1} -2 {r2}"
-SAMTOOLS_VIEW = "samtools view -O BAM -b -@ {threads} {sam}"
+#: The aligner streams into the BAM conversion, so no SAM is ever written. pipefail matters here:
+#: the conversion exits 0 on a truncated stream and leaves a short but perfectly valid BAM, so
+#: without it an aligner that died halfway would show up as a blobplot built on partial coverage.
+#:
+#: No sort, deliberately. gc_cov_annotate reads this with a plain ``samtools view`` and sums aligned
+#: span per contig, so record order is irrelevant and sorting it would be work spent on nothing.
+ALIGN_BAM = "set -o pipefail; {align} | samtools view -O BAM -b -@ {threads} - > {bam}"
 # Runs in the host interpreter (it imports metawrap2) but shells out to samtools, which only
 # exists inside this module's conda env - hence --samtools with an absolute path.
 GC_COV_ANNOTATE = (
@@ -81,7 +87,7 @@ TAXLEVELS = ("taxlevel_order", "taxlevel_phylum", "taxlevel_superkingdom")
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = make_parser(
         prog="metawrap2 blobology",
         usage="metawrap2 blobology [options] -a assembly.fasta -o output_dir "
         "readsA_1.fastq readsA_2.fastq [readsB_1.fastq readsB_2.fastq ...]",
@@ -102,15 +108,22 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=None,
         help="folder of bins; contig names must match the assembly (default: none)",
     )
+    p.add_argument(
+        "--aligner",
+        choices=sorted(ALIGNERS),
+        default=DEFAULT_ALIGNER,
+        help="aligner used to measure contig abundance (default %s; see metawrap2.aligners)"
+        % DEFAULT_ALIGNER,
+    )
     p.add_argument("--config", help="path to metawrap2.toml")
     p.add_argument("reads", nargs="+", help="paired read files (*_1.fastq / *_2.fastq, .gz ok)")
     return p.parse_args(argv)
 
 
 def _bams(out: str) -> str:
-    bams = sorted(glob.glob(os.path.join(out, "*.bowtie2.bam")))
+    bams = sorted(glob.glob(os.path.join(out, "*.bam")))
     if not bams and dry_run():
-        return os.path.join(out, "<sample>.bowtie2.bam")
+        return os.path.join(out, "<sample>.bam")
     return " ".join(bams)
 
 
@@ -239,53 +252,46 @@ def main(argv: List[str]) -> int:
             comm("skipping taxonomy assignment with megablast (already done; --resume)")
 
         if ckpt.todo("map_reads"):
-            announcement("MAP READS TO ASSEMBLY WITH BOWTIE2")
-            if dry_run() or not os.path.isfile(assembly_copy + ".1.bt2"):
-                comm("Indexing %s" % assembly_copy)
-                run(
-                    BOWTIE2_BUILD.format(
-                        threads=args.threads, assembly=assembly_copy, index=assembly_copy
-                    ),
-                    env=env,
-                    tool="bowtie2-build",
-                )
-            else:
-                comm("Looks like the assembly was already indexed. Skipping...")
+            announcement("MAP READS TO ASSEMBLY WITH %s" % args.aligner.upper())
+            aligner = ALIGNERS[args.aligner]
+            index = index_path(assembly_copy, args.aligner)
+            comm("Indexing %s" % assembly_copy)
+            run(
+                aligner["index_cmd"].format(assembly=assembly_copy, index=index),
+                env=env,
+                tool="%s index" % args.aligner,
+            )
 
             for sname, r1, r2 in bar(
                 pairs, desc="mapping samples", unit=" sample", total=len(pairs)
             ):
-                bam = os.path.join(out, sname + ".bowtie2.bam")
+                bam = os.path.join(out, sname + ".bam")
                 if not dry_run() and os.path.isfile(bam) and os.path.getsize(bam):
                     comm("Looks like the alignment file for %s already exists. Skipping..." % sname)
                     continue
-                sam = os.path.join(out, sname + ".bowtie2.sam")
                 comm(
-                    "Now processing sample %s ... Aligning %s and %s to %s with bowtie2"
-                    % (sname, r1, r2, assembly_copy)
+                    "Now processing sample %s ... Aligning %s and %s to %s with %s"
+                    % (sname, r1, r2, assembly_copy, args.aligner)
                 )
+                align = aligner["paired"].format(threads=args.threads, index=index, r1=r1, r2=r2)
                 run(
-                    BOWTIE2.format(index=assembly_copy, threads=args.threads, r1=r1, r2=r2),
+                    [
+                        "bash",
+                        "-c",
+                        ALIGN_BAM.format(align=align, threads=args.threads, bam=bam),
+                    ],
                     env=env,
-                    tool="bowtie2",
-                    log_path=sam,
-                )
-                comm("converting %s alignment to bam format" % sam)
-                run(
-                    SAMTOOLS_VIEW.format(threads=args.threads, sam=sam),
-                    env=env,
-                    tool="samtools view",
-                    log_path=bam,
+                    tool="%s | samtools view" % args.aligner,
                 )
             ckpt.done("map_reads")
         else:
-            comm("skipping read mapping with bowtie2 (already done; --resume)")
+            comm("skipping read mapping (already done; --resume)")
 
         blobplot = os.path.join(out, sample + ".blobplot")
         binned_blobplot = os.path.join(out, sample + ".binned.blobplot")
         have_bins = False
         if ckpt.todo("blobfile"):
-            announcement("MAKE BLOB FILE FROM BLAST AND BOWTIE2 OUTPUT")
+            announcement("MAKE BLOB FILE FROM BLAST AND ALIGNMENT OUTPUT")
             if dry_run() or not (os.path.isfile(blobplot) and os.path.getsize(blobplot)):
                 run(
                     GC_COV_ANNOTATE.format(
@@ -359,9 +365,12 @@ def main(argv: List[str]) -> int:
             comm("skipping blobplot image generation (already done; --resume)")
 
         comm("cleaning up...")
-        for pattern in (() if dry_run() else ("*.bowtie2.sam", "*.bowtie2.bam")):
-            for f in glob.glob(os.path.join(out, pattern)):
-                os.remove(f)
+        if not dry_run():
+            for f in glob.glob(os.path.join(out, "*.bam")) + [
+                assembly_copy + suffix for suffix in INDEX_SUFFIXES
+            ]:
+                if os.path.isfile(f):
+                    os.remove(f)
 
         announcement("BLOBPLOT PIPELINE FINISHED SUCCESSFULLY!!!")
     finally:

@@ -1,3 +1,1658 @@
+MetaWrap2 v=2.1.0
+	Phase 0 and the first of Workstream B: the machinery for choosing defaults by measurement,
+		the first default it moved, and chimerism detection the marker-gene checks cannot do.
+	Changed - the shipped binning tier is metaBAT2 + SemiBin2, not metaBAT2 + MaxBin2
+		It is the first configuration measured here that beats metaWRAP 1 on both axes at
+			once: end to end on per-sample assemblies, 53 clean high-quality MAGs against
+			metaWRAP 1's 48, for 43.8 cpu-hours against 52.5. The previous default returned
+			41 for 13.8 and was chosen on a quality-per-cost ratio, which is the mistake the
+			tiers exist to fix - ranking on that ratio produced a default that recovers fewer
+			genomes than the pipeline it replaces.
+		The cost is that a plain run now wants metawrap2-learned, ~1.5 GB of pytorch, so
+			quickstart builds it and install-env --binning-only includes it. Anyone who does
+			not want it asks for --preset fast and gets exactly the old behaviour.
+		One definition, not two: run.DEFAULT_BINNERS is derived from binning.PRESETS, and the
+			incumbent marker in benchmarks/configurations.toml moved with it, which a test
+			asserts - the code and the results table naming different arms is how a ranker
+			ends up comparing challengers against a row nobody runs.
+	Fixed - every read_qc figure in the results table was one mate's count
+		The scorer wrote one row per mate file. A measurement is keyed on (dataset,
+			comparison, variant, sample, metric) and deliberately not on the source file, so
+			the two rows collapsed and whichever mate was walked last won. reads_kept,
+			bases_kept and q30_bases_kept for the trimmer comparison were therefore half the
+			real counts. Both arms were halved identically, so the margin that chose fastp
+			holds; the absolute numbers do not.
+		Summed at the collection site instead, which is what the dedup key's own docstring
+			says has to happen: "a metric that two files contribute to additively is suffixed
+			per bin set long before it reaches here" - and read_qc's mates were the one case
+			that was not. The test wrote only mate 1 per sample, so it exercised summing
+			across samples and never across mates; it now writes both.
+	Fixed - a refinement benchmark arm was refined from three of its bin sets, alphabetically
+		The runner zipped the *_bins directories it found onto ("-A", "-B", "-C"), and zip
+			truncates without complaint. An arm built on four or more binners silently dropped
+			the rest - with comebin/concoct/maxbin2/metabat2/semibin2/vamb that drops metaBAT2 -
+			so the arm's published numbers came from a different input set than its name.
+		Now passed with --bins, which bin_refinement accepts repeatedly, with a leftover
+			metawrap_<c>_<x>_bins from an earlier refinement excluded (consolidating a set
+			with the sets it came from is not a comparison anyone declared) and more than six
+			sets refused rather than quietly subsetted: six is 63 CheckM runs.
+	Fixed - a crashed variant's partial output was scored and published as a result
+		The runner records a non-zero exit in <comparison>.run.json and discards that
+			variant's cost rows. Scoring read that file for data_dir and assembly but not for
+			returncode, so a variant that died after its first binner wrote a directory had
+			those bins scored by CheckM and AMBER and ranked - appearing in the table with a
+			quality value and cost "unmeasured", which is also what a finished arm whose
+			rusage was lost looks like.
+		Failed variants are now skipped and named, with --score-failed to score them anyway.
+	Fixed - abundance was scored over the intersection of the table and the truth
+		A bin the quantifier left out of its table was dropped from both sides rather than
+			charged a zero, so omitting a hard bin made the arm's correlation better. It also
+			made two arms incomparable: the CoverM path pre-seeds a row per bin while the
+			salmon path writes only the rows salmon emitted, so one could be scored over 40
+			bins and the other over 200 with nothing in the table saying so.
+		Missing bins now score zero - which is what read_abundance_table already does with
+			salmon's own `nan` cells - and are reported as abundance_missing_bins.
+	Fixed - the depth table's samtools pipeline could deadlock with no output and no timeout
+		`samtools view | samtools depth` ran with both stderr pipes unread until the depth
+			stream had been fully consumed. These are per-read tools over hundreds of millions
+			of reads: one warning per record fills the 64 KiB pipe buffer, samtools blocks on
+			the write, stops producing rows, and the read of its stdout never returns. Reading
+			the pipes afterwards is too late - the deadlock happens while they are being read.
+		Both are now drained by their own thread, started before anything reads stdout, and a
+			failure of the second Popen no longer leaves the first writing into a pipe nobody
+			will read. The regression test uses real subprocesses, since the defect is in the
+			pipes rather than in the logic: it hangs indefinitely against the old code.
+	Fixed - the disk monitor could abort the step after the one it was watching
+		It sampled, then interrupted the main thread without re-checking whether the run had
+			been stopped in the meantime - and sampling is two statvfs calls and an os.stat,
+			which on a stalled mount is seconds. Under `run` or `cohort` the KeyboardInterrupt
+			landed in the next step, which was recorded as interrupted, while the step actually
+			being watched was reported as a disk stop it never hit.
+		stop() and the decision to interrupt now take the same lock, so one strictly precedes
+			the other.
+	Fixed - `doctor` silently stopped reporting the opt-in environments
+		It found each opt-in env's owning module with env.split("-")[1], which worked only
+			while they were all named metawrap2-<module>-<tool>. Consolidating the three
+			learned binners into metawrap2-learned left that with no second dash, so the owner
+			came out empty, every opt-in env was filtered out, and the section printed nothing
+			- without an error. Replaced by a stated owner table, which a test ties to
+			OPTIONAL_ENVS so an env added without an owner fails rather than disappears.
+	Fixed - stale install instructions in the binning module's own help
+		--semibin2/--vamb/--comebin each told the user to run `install-env binning-semibin2`
+			and so on, which resolve to nothing since those three envs became metawrap2-learned.
+			They now name `install-env learned`.
+	Changed - the test suite pins use_conda_envs itself rather than inheriting it
+		Most tests fake the tool call and want no env wrapping; a handful are about how an env
+			is resolved and mark themselves @pytest.mark.conda_envs. Left to the ambient config
+			the two groups could not both pass, and which did depended on whether CI wrote a
+			config file - so the suite passed in CI and failed on a developer's machine. Pinned
+			per test in conftest, and the CI and pre-push steps no longer write a config at all.
+	Changed - documentation consolidated into docs/, and the benchmark report published with it
+		installation/ (three files still describing one conda env per module, naming envs that
+			no longer exist), Module_descriptions.md and Usage_tutorial.md were a second copy of
+			docs/installation.md, docs/modules.md and docs/usage.md that had drifted. Removed;
+			docs/ is what mkdocs builds and the only prose documentation.
+		WORK_SUMMARY.md is now docs/benchmarks.md and in the nav, since it is the evidence
+			behind every default that moved. Its open decision about the shipped tier is
+			settled above, and the review findings in this release are recorded in its own
+			defects section - including which committed figures need a re-score.
+	Known issue - the identity floor's denominator is the query length, not the aligned length
+		`qlen` in a samtools filter expression counts soft-clipped and inserted bases, where
+			jgi's percentIdentity divides by the aligned length alone. For a 150 bp read with
+			90 bp soft-clipped, --min-identity 90 permits NM <= 15 over 60 aligned bases, about
+			75% identity - and minimap2 -ax sr, the default aligner, soft-clips routinely. So
+			the effective floor is looser than the number asked for.
+		Not changed here: it agrees with jgi to Pearson 0.9992 on the means over all 210,632
+			CAMI2 contigs, so the aggregate effect is small, and tightening it moves every
+			depth table and so every binning result. Recorded on _identity_expression and in
+			the benchmark report's limitations as a change to re-measure deliberately.
+	Removed - "binning --subsample" and "coverage --subsample", which were mine and were not useful
+		Thinning reads before the coverage alignment looks like free speed, because alignment
+			is the whole cost of measuring coverage. Measured on CAMI2 GI with metaBAT2: half
+			the reads keeps 33 of 37 high-quality MAGs for 53% of the step's cpu, a quarter
+			keeps 25, a tenth keeps 12. The trade is better than proportional - and the
+			denominator is wrong. Binning is under 2% of a default run, so halving it saves
+			about 1% of the pipeline and gives up 11% of the genomes.
+		Read capping where it does pay is reassemble_bins --max-coverage, which is the request
+			this was scope creep against: there the input is per bin and an abundant organism
+			really does hand SPAdes hundreds of times the coverage it can use.
+		The measurement is kept as a comment in modules/_common.py beside the aligner helper,
+			so the idea is not re-invented, pointing out that reads thinned before *assembly*
+			would be thinning the 86% rather than the 2%. The read_subsample benchmark
+			comparison and its tests go with the flag.
+	Removed - the depth-variance ablation is no longer presented as a result
+		It answered an internal question - whether an alignment-free coverage estimator is
+			disqualified by metaBAT2 wanting a variance column - and the answer is a property
+			of metaBAT2, not a MetaWrap2 capability. Four depth tables with identical means and
+			contigs, differing only in that column: at three samples the spread is 1.5% of F1
+			and the nominally best arm is the one where every contig wears another contig's
+			variance; at one sample it is worth about 10%.
+		Kept in full as a comment on depth.py's variance bullet, because it is the thing to
+			know before building a cheaper contig-abundance estimator: on a cohort such an
+			estimator does not have to produce a real variance, it has to get the means right.
+	Fixed - a study sheet using any --preset but "fast" paid for binning and then failed at refinement
+		run resolved which bin sets to hand bin_refinement by scanning for "--<binner>" flags
+			and knew nothing about --preset, so every preset fell through to the default pair
+			and refinement was pointed at a maxbin2_bins that binning had never created. It
+			failed with "is not a directory" after the expensive step.
+		selected_binners now resolves --preset from binning.PRESETS, with the same precedence
+			that module applies: an explicitly named binner wins, and the preset is consulted
+			only when none was. One table, not two.
+	New - the --preset tiers are measured end to end, against metaWRAP 1 on one axis
+		The tier figures so far came from binning CAMI2's gold assembly, which isolates the
+			binner and is the right way to compare binners - and is not what a user gets. These
+			arms assemble per sample like the metaWRAP 1 comparison, reusing that comparison's
+			assemblies rather than recomputing them, since assembly is 86% of a run and is
+			identical across tiers. Each tier's total is the shared read_qc + assembly plus its
+			own measured binning and refinement.
+		  tier                 HQ   clean   cpu-h
+		  very-fast            39     36     92.1
+		  fast (shipped)       45     41     97.1
+		  metaWRAP 1.3.0       52     48    132.0
+		  default              56     53    127.1
+		  slow                 61     57    164.1
+		The shipped tier loses to metaWRAP 1. "default" returns 53 clean MAGs for 127
+			cpu-hours - more genomes than metaWRAP 1 for less compute, the first configuration
+			here that beats the baseline on both axes - and "slow" returns 57, a 19% gain for
+			24% more cpu.
+		Worth noting how far the two designs disagree: on the gold assembly the best tier beats
+			the shipped one by 3x, and end to end by 1.4x. What a binner can do and what it does
+			for a user are not the same number, and quoting the first for the second would have
+			overstated the tiers by more than twice.
+	New - "binning --preset {very-fast,fast,default,slow}", binner tiers chosen by compute budget
+		"Which binners should be supported" and "which should run" are different
+			questions, and a single default answered only the first. Measured on CAMI2 as clean
+			high-quality MAGs - bins that are both >=70/<=10 and non-chimeric by GUNC, counted
+			per bin rather than estimated as a product:
+		  very-fast  metaBAT2              37 HQ   35 clean   94.6%    4.8 cpu-h
+		  fast       metaBAT2 + MaxBin2    71 HQ   59 clean   83.1%    7.1
+		  default    metaBAT2 + SemiBin2  131 HQ  114 clean   87.0%   86.8 (17 on a GPU)
+		  slow       COMEBin              178 HQ  176 clean   98.9%   39.6 (on a GPU)
+		Each tier costs more than the one below and recovers more clean MAGs. They are not
+			nested; see the correction below for why that property was withdrawn rather than
+			designed away. Naming binners explicitly still wins over a preset.
+		Corrected: slow was metaBAT2 + SemiBin2 + COMEBin, on a comparison against a figure
+			that was wrong. COMEBin's clean-MAG count had been estimated as 178 HQ bins times
+			an 88.8% GUNC pass rate - but GUNC had run over all 376 bins COMEBin emitted, 198
+			of which never passed 70/10 and were never MAG candidates, so that percentage was
+			partly about bins nobody was counting. The ensemble's 96.7% was undiluted, its GUNC
+			having run on an already-consolidated 183-bin set, so the two were never comparable.
+		Counted per bin (bench_work/clean_hq.py), 176 of COMEBin's 178 high-quality bins pass
+			GUNC - 98.9%, the cleanest set measured here. The ensemble's real margin is one bin,
+			177 against 176, for 33% more cpu. That is a tie, and a tie goes to the cheaper arm.
+		The same pattern appears a tier down: SemiBin2 alone on a GPU recovers 116 clean MAGs
+			against metaBAT2+SemiBin2's 114, for a fifth of the cpu. Consolidating a strong
+			learned binner with weaker classical ones is not reliably worth its cost on this
+			data. default keeps the pair anyway, because metaBAT2 reads the same depth table
+			SemiBin2 does and costs ~1.3 cpu-hours beside it, which is a fair price for not
+			betting a whole run on one model. --metabat2 --semibin2 --comebin still works.
+		The shipped default is unchanged for now: making "default" the fallback would
+			make ~1.5 GB of pytorch a requirement of a plain run, which is a decision about
+			the install and not about binning.
+	Changed - bin_refinement does not score the same bin twice, or score a bin it can rule out
+		Refinement scores every combination of its input bin sets, and CheckM is nearly all
+			of what that costs. Two measured redundancies in it, both removable without
+			changing a single reported number:
+		  - 32% of the 1,230 bins across the seven combinations of a three-binner run are
+			    the same bin again. A bin is now keyed by a hash of its sorted contig ids, so
+			    a bin whose contents have been scored before reuses that score. Some bins
+			    appear in all seven sets. The cache is written to work_files, so --resume
+			    keeps it.
+		  - 0.7% of raw binner bins hold 11.8% of all the sequence, and they are the ones
+			    whose size already rules them out. metaBAT2's unbinnable remainder reaches
+			    159 Mb; no prokaryotic genome is. Bins outside 200 kb to 20 Mb are recorded
+			    as 0% complete and 100% contaminated without being scored. CheckM's cost
+			    follows sequence rather than bin count, which is why 0.7% of bins is worth
+			    this much.
+		The bounds are calibrated against the 18,490 bins in this project's benchmarks that
+			have real CheckM2 scores - bench_work/prefilter_calib.py - not guessed. Of the
+			10,738 that pass 70/10 the smallest is 0.99 Mb and the largest 6.66 Mb, so both
+			bounds are clear of the real distribution, and 20 Mb is a biological ceiling
+			rather than a margin fitted to this data: the largest known prokaryotic genomes
+			are ~16 Mb. Applying them skips 251 bins and loses zero passing bins.
+			"--score-everything" turns the filter off; the cache has no reason to be turned
+			off, since a bin with the same contigs has the same completeness.
+		The pre-filter saves nothing in bin_refinement, which is where it was added first,
+			and that only became visible on splitting the calibration by call site:
+			copy_bins already holds every input bin to 50 kb - 20 Mb, so of 10,168 bins
+			scored inside refinement none is over the ceiling and 56 - 0.02% of the sequence
+			- fall under the floor. The 11.8% is all in raw binner output. So it is wired
+			into benchmark.assess.run_bin_quality too, which scores bin sets as the binner
+			emitted them and is where those bins actually are. Left in both places because
+			it costs nothing and neither call site should depend on the other's filtering.
+		An N50 floor was implemented, measured, and dropped. A bin of thousands of tiny
+			contigs looks obviously unusable, and the data disagrees: the worst N50 among
+			passing bins is 2,025 bp, so a 2 kb floor clears the real distribution by 25 bp
+			and buys 1.4 percentage points more sequence than the size bounds alone, while a
+			2.5 kb floor discards 36 bins that pass 70/10. A floor low enough to be safe
+			skips nothing the size bounds had not. Fragmentation is a property of the
+			assembly, not evidence that a bin is several organisms.
+		A skipped bin is recorded as failing rather than omitted, so nothing downstream has
+			to guess what a missing row meant, and 0/100 can never win a comparison.
+	Fixed - "benchmark score" run from the wrong directory wrote a second results file and said nothing
+		The default results path was relative - benchmarks/results/<dataset>.tsv - so scoring
+			from anywhere but the repository root wrote a whole results file under wherever
+			that happened to be, reported success, and left the committed one untouched. The
+			numbers in it were real and had to be merged back by hand. A committed results TSV
+			exists so that a moved default is a diff rather than a recollection, and this made
+			that invisible.
+		It is now anchored to the registry, and therefore to the checkout, the same way
+			datasets.toml and configurations.toml already were.
+	Fixed - a re-score that changed which bin set is an arm's answer was added to the old number
+		scoring's dedup key included the source filename, so the stale row and the new one
+			keyed differently and were summed rather than one replacing the other. After the
+			fix below made refined sets visible, COMEBin's 178 high-quality MAGs read as 356.
+		Same dataset, comparison, variant, sample and metric is one measurement whatever file
+			it was read out of. A figure that two bin sets contribute to additively is suffixed
+			per set long before it reaches the ranker, which is what the suffix is for.
+	Fixed - every multi-binner arm went unranked, because its consolidated set was one level down
+		A binning comparison's variants are refined as a second step, which writes into a
+			subdirectory of the variant. assess.bin_dirs only scanned the variant root, so six
+			arms of the binner comparison - including every ensemble worth having - reported
+			"left several raw bin sets and no consolidated one" and were recorded per bin set
+			but never ranked. The refusal to rank overlapping raw sets is right; the premise
+			was wrong, because the consolidated set was sitting in refined/.
+		A consolidated set one level down is now found. Only refined names are taken from a
+			subdirectory: refinement restores its input sets beside its output under their
+			original names, so accepting any *_bins from one level down would pull in a second
+			copy of the raw sets and double-count every genome in them.
+		This is why the binner table had to be read out of .stats.tsv files by hand to be
+			read at all, and why "metabat2_semibin2: 105 clean MAGs" had to be quoted from
+			somewhere other than `benchmark score`.
+	Fixed - with one input bin set, metawrap_70_10_bins held every bin rather than the ones that pass
+		Consolidation applies the -c/-x thresholds as a side effect of merging bin sets, so
+			with two or more inputs the final folder contains only bins that passed. With
+			exactly one there is nothing to merge, and nothing had ever applied the
+			thresholds: the folder was filled with every input bin under a name that states
+			one. Refining a single COMEBin run put 376 bins in metawrap_70_10_bins, of which
+			178 pass 70/10 - and a 0%-complete bin in a folder named for a quality floor is a
+			number someone will report.
+		refinement.select_passing is that filter on its own, sharing one predicate
+			(refinement.passes) with consolidation so the two paths cannot drift apart on a
+			bin that lands exactly on a threshold.
+	New - a fourth arm for the quantifier comparison: "depth", and it is measured
+		The depth quantifier shipped with a cost argument and no accuracy number. Its arm is
+			handed the depth table the binning run wrote - benchmark.runner.depth_table_for
+			finds it - rather than deriving a fresh one, which would be measuring the aligner
+			again under another name.
+		  quantifier   Spearman  Pearson   L1 sim   cpu-hours
+		  sylph          0.868    0.811    0.722      0.126
+		  salmon         0.827    0.959    0.835      1.078
+		  CoverM         0.803    0.952    0.791      2.368
+		  depth          0.780    0.953    0.799      0.013
+		It splits the two metrics: second of four on magnitude, ahead of CoverM on both Pearson
+			and L1, and last on ordering - which is the metric to lean on. A coherent split
+			rather than noise, since Pearson is dominated by the abundant bins while Spearman
+			weights every bin alike, so a method slightly noisy on low-coverage bins reads well
+			on one and badly on the other.
+		Worth having for magnitudes when the table is already on disk - it costs 0.013 cpu-hours
+			against sylph's 0.126 and CoverM's 2.368 - and not a candidate for the default.
+	New - "quant_bins --quantifier depth", bin abundance from the table binning already built
+		The other three quantifiers align the reads a second time to answer a question
+			the binning run already answered, and answer it on a different scale. This
+			aggregates the per-contig depth table into a length-weighted mean per bin -
+			total bases over total length - with the per-contig median beside it.
+		No reads, no index, no alignment: one pass over a TSV against the 0.2 to 2.4
+			cpu-hours the others spend, and on the binner's own scale rather than twice it.
+	Changed - the alignment-identity floor for a depth table is 90, not jgi's 97
+		Inherited from jgi_summarize_bam_contig_depths, never measured here, and known from
+			the fidelity work to be a 2x lever - which made it the largest unexamined
+			parameter in the pipeline. bench_work/identity_sweep/ is the experiment: one set
+			of minimap2 alignments, six depth tables from it at different floors, metaBAT2 on
+			each, AMBER against CAMI2's truth on the gold assembly. The arms share the
+			alignments, so the floor is the only difference.
+		  floor   mean depth   bins   AMBER F1   purity   HQ   clean HQ
+		  none        15.71      90     0.6607   0.8374     48      45
+		  90 (now)    15.70      88     0.6624   0.8375     48      47
+		  95          13.46      86     0.6574   0.8264     43      40
+		  97 (was)     8.35      74     0.6371   0.8175     37      35
+		  99           1.48      21     0.2452   0.7904      -       -
+		  100            -        7     0.0525   0.9998      -       -
+		Against the true genomes - the gold assembly is the reference genomes - the 97% floor
+			keeps 53% of the depth no filter keeps. It loses 14 bins of 88 and gains nothing,
+			and it loses purity as well as completeness. That last part answers the obvious
+			objection: a looser floor was supposed to let a relative's reads inflate a
+			contig's depth and merge two strains into one bin, buying completeness at
+			purity's expense. At a 90% floor purity is higher. The filter is not separating
+			strains here, it is removing signal the binner was using.
+		The 99 and 100 rows are the mechanism, not candidates. At 150 bp a 1% error rate puts
+			a typical read near 99% identity, so a 99% floor cuts most reads on error alone;
+			purity 0.9998 at 100 means 7 bins covering 3.2% of the assembly are each nearly
+			pure, which is the metric rewarding a binner for binning almost nothing.
+		GUNC had to agree before this could move a default, because AMBER purity is
+			bp-weighted: a bin that is 95% one genome and 5% another costs almost nothing, and
+			that property already picked the wrong default once in this project. It agrees, and
+			more strongly than AMBER did: on the project's own metric - bins that are both
+			>=70/<=10 and non-chimeric, counted per bin - a 90% floor recovers 47 clean
+			high-quality MAGs against 97's 35, a 34% gain, and has the highest clean fraction
+			of any arm at 97.9%. Over the raw bin sets without a completeness filter the same
+			pattern holds: 82 non-chimeric bins against 65, chimera rate 6.8% against 12.2%.
+			Two independent chimera detectors say the same thing.
+		90 rather than no filter at all, because a floor still has a job - a read 20%
+			divergent from a contig is evidence about some other organism - and because 0 and
+			90 are within 0.002 AMBER F1 of each other, so the insurance is free.
+		"binning --min-identity" and "coverage --min-identity" expose it, and
+			depth.JGI_PERCENT_IDENTITY stays named: --min-identity 97 reproduces a jgi table,
+			which is what comparing against metaWRAP 1 or against metaBAT2's own published
+			validation needs.
+		Measured on one dataset, one binner, and the gold assembly. A looser floor should
+			matter less on a self-assembled contig set, because a fragmented consensus already
+			absorbs some of the strain variation the true genomes do not - so this is the
+			change here most worth re-testing elsewhere, and the number is a constant and a
+			flag rather than a literal.
+	Changed - the very-fast tier's cost was a bwa-era figure, and is now measured: 4.80 cpu-hours
+		metaBAT2 alone was last measured when bwa was the default aligner, and the 22.9
+			cpu-hours in the preset table was almost entirely that alignment. Re-run under
+			minimap2 it is 4.80 - a factor of 4.8, which is bwa's measured overhead.
+	New - "benchmarks/coverage_fidelity.py" checks the estimators per contig, not by MAG count
+		Every coverage judgement here had been indirect: run a binner, count the MAGs.
+			This compares each estimator to bwa contig by contig on one assembly, and
+			reports three things that fail independently - agreement, units, and how often
+			a method calls a contig absent that bwa finds coverage for.
+		Findings, in full in bench_work/cov_fidelity/FINDINGS.md:
+		  - No method reports an unnormalised k-mer total. For all of them the
+			    correlation against depth x length is far below that against depth, and a
+			    method that had skipped dividing by length would show the reverse. fairy's
+			    columns are a genuine per-base depth.
+		  - CoverM reads 2.001x bwa because jgi filters reads below 97% alignment
+			    identity and CoverM does not. Same BAM, filter off: 60.49 mean depth
+			    against 31.24 filtered, and CoverM reports 60.44. On this gut metagenome
+			    that filter discards half the mapped bases. CoverM is therefore not a
+			    drop-in for a jgi depth table, and the 97% threshold is an unevaluated
+			    lever with a 2x effect.
+		  - fairy's in-sample depths are respectable (Pearson 0.946) and its cohort
+			    table is not: 20.6% of contigs have two or more non-zero samples against
+			    the aligned route's 58.5%. That alone explains B5 arm d losing 10 of 37
+			    MAGs, and it follows from fairy's own -m 95 ANI floor.
+	Fixed - "clean HQ MAGs" was estimated as a product, and the estimate was wrong where it mattered
+		The headline metric is the number of bins that are *both* >=70/<=10 *and* non-chimeric
+			by GUNC. It had been computed as "HQ count x GUNC pass fraction", which is the same
+			number only when GUNC ran over exactly the bins that pass 70/10.
+		Often it had not. An arm whose GUNC ran over a raw binner bin set has its pass fraction
+			diluted by bins that were never MAG candidates: COMEBin emits 376 bins of which 178
+			pass 70/10, so its 88.8% was partly a statement about the other 198. An arm whose
+			GUNC ran over a consolidated 70/10-filtered set has the undiluted figure. One column
+			held both kinds, and both are plausible percentages, so nothing looked wrong.
+		bench_work/clean_hq.py joins the CheckM and GUNC reports by bin name and counts the
+			intersection, which needs no assumption about what either was run over. The
+			corrections are large where the dilution was: COMEBin 158 -> 176, MaxBin2 17 -> 33,
+			CONCOCT 19 -> 28, SemiBin2 on a GPU 109 -> 116. Arms whose GUNC already ran on a
+			filtered set are unchanged.
+		It changed a default. See the --preset entry: the three-binner ensemble's margin over
+			COMEBin alone was 19 clean MAGs on the estimate and is one bin on the count.
+	Fixed - make_figures summed an arm's re-measurements instead of taking the latest
+		The same defect as in the scorer's dedup, in the other consumer of the results TSV: an
+			arm re-run under a different aligner had both costs summed, so metaBAT2's cpu-hours
+			read 27.7 - its bwa-era 22.9 plus its 4.8 re-measurement - for a run that cost 4.8.
+		load() now keys each metric by sample and keeps the last row per sample, so totals sum
+			across samples (ten samples really do cost ten samples' cpu-hours) and never across
+			re-measurements of one sample.
+	Changed - nothing is ranked on MAGs per cpu-hour any more, including the scorer itself
+		The ratio is dominated by whichever arm is cheapest rather than by which
+			recovers the most genomes, and following it produced a default that recovers
+			fewer MAGs than metaWRAP 1 does - 45 against 52 end to end.
+		Rankings are now on clean high-quality MAG count, with cost reported in a
+			column beside it. Where cost has to drive a choice it is a tier the user picks
+			(--preset) rather than a ratio that picks for them.
+		"benchmark score" ranks on the quality metric and prints cost beside it.
+			scoring.time_to_performance is now value_against_cost, its Ratio is a Scored, and
+			the type has no "ratio" property at all - when there was one, it was what
+			everything got ranked by. Cost breaks a tie between arms that scored identically
+			and does nothing else. An arm whose cost was never recorded now ranks on its
+			quality instead of being pushed to the bottom of the table by a bookkeeping gap.
+		The same framing came out of the module docstrings, the benchmark configurations
+			and docs/, which between them had stated the old rule in fourteen places - a
+			default is only as reviewable as the rule stated next to it.
+	New - "mw2", the same CLI under a shorter name
+		Every command here is typed as "metawrap2 <module> <flags>", and the prefix is the
+			part nobody needs to read. "mw2" is the same entry point, not a wrapper.
+	Changed - one conda env per workflow, not one per module: 22 environments became 9
+		Modules that run in sequence and share tools now share an environment. read_qc,
+			assembly, reassemble_bins and blobology are one env; binning, coverage,
+			dereplicate and quant_bins are another. Five workflow envs, plus four that stay
+			separate for a stated reason.
+		Every grouping was solved against conda-forge + bioconda before being written
+			down. Two splits are forced by the solver rather than chosen: CheckM2 has no
+			common solution with CheckM1 + GUNC + DAS Tool, and GTDB-Tk none with
+			taxator-tk. The third, the learned binners, is a size decision - pytorch is
+			~1.5 GB and nobody who only wants metaBAT2 should wait for it.
+		GUNC, DAS Tool, CoverM, fairy and Bakta are no longer opt-in installs. Keeping
+			them out bought nothing: GUNC runs by default unless --skip-gunc, so a default
+			step needed a second install command, and the other four are single binaries or
+			solve with what they sit beside.
+		SemiBin2, VAMB and COMEBin share one env where they had three. They are all
+			pytorch applications and they solve together, so that was three copies of one
+			~1.5 GB dependency graph.
+		"install-env --all" builds each env once rather than once per module that uses
+			it, and "install-env bins" / "doctor bins" now resolve an env name as well as a
+			module name - without that, doctor reported a freshly built shared env as
+			"0/0 tools OK", a pass that had probed nothing, and install-env --lock said an
+			env that existed did not.
+	Changed - the contig depth table is computed here, not by jgi_summarize_bam_contig_depths
+		metawrap2.depth builds the contig x sample table every binner depends on, from
+			per-base depths out of "samtools depth". Same algorithm: the same 97% identity
+			filter, the same 75 bp trimmed from each contig end, the same intra-contig
+			depth variance.
+		Verified against the tool it replaces on the same three BAMs over all 210,632
+			contigs of the CAMI2 GI assembly: Pearson 0.9992 on every per-sample mean,
+			0.9954-0.9963 on the variances, median relative difference about 5%.
+		The reason is not that the tool is wrong but that this number is the most
+			load-bearing one in the pipeline and was the one thing the pipeline could not
+			look inside. When MaxBin2 was found to be binning on invented depths, the only
+			way to see it was to run a C++ binary twice and notice the answer changed.
+		Two bugs surfaced while checking it against the original, both now fixed here:
+			"samtools depth -a" says nothing at all about a reference with no reads, so
+			counting emitted positions made a contig's divisor depend on which samples
+			happened to cover it - a 4 Mbp contig reported a depth of 1.6 million. The
+			divisor is the contig's trimmed length, which is what jgi uses too.
+	Fixed - a contig of nothing but N broke VAMB and was silently binned by everything else
+		CAMI2's gold-standard gastrointestinal assembly carries 20 records with no A, C,
+			G, T or U in them at all, 28.9 Mbp in total and the largest 6.6 Mbp - reference
+			genomes masked out, not assembly artefacts.
+		Such a record has a zero tetranucleotide vector and no read can align to it, so
+			there is no assignment of it that could be right. VAMB refuses to start, which
+			is how this was found; metaBAT2, MaxBin2 and CONCOCT take it and silently carry
+			a contig they cannot place.
+		binning and coverage now leave them out, which makes the binners agree on their
+			input and costs nothing.
+	New - "binning --device", one switch for whether the learned binners use a GPU
+		Replaces --semibin2-engine and --comebin-device, and reaches VAMB, which had no
+			way to ask at all. "cpu", "cuda", "cuda:N" or "auto"; auto asks that binner's
+			own env whether torch can see a device and falls back to the CPU.
+		The default is still cpu, and that is a reproducibility decision rather than a
+			statement about the hardware: a GPU run and a CPU run of the same seeded network
+			need not agree, so the same study re-analysed elsewhere would produce different
+			MAGs for no reason its author could see.
+		What that default costs is now measured rather than assumed, by the semibin2_gpu,
+			vamb_gpu and comebin_gpu benchmark arms. VAMB is 13.8x cheaper on the GPU (4.9
+			cpu-hours against 66.9) and SemiBin2 4.9x (17.3 against 85.5), on three CAMI2
+			samples with the same seeds and the same env - only the device differs.
+		COMEBin is the extreme case: on CPU it reached epoch 20 of 200 after
+			305 cpu-hours, a projected ~1,485 for one arm against 7.1 for metaBAT2 and
+			MaxBin2 together. On the CPU it is not slow, it does not finish.
+	New - "reassemble_bins --max-coverage", so one abundant genome stops setting the pace
+		Read recruitment is per bin, so an abundant organism hands SPAdes hundreds of
+			times the coverage it can use - and SPAdes time grows with reads, not with
+			genome size. Each bin's recruited reads are thinned to 50x of that bin's own
+			assembled length before reassembly; --max-coverage 0 keeps every read.
+		Thinned in pairs with a fixed seed, so a re-run recruits and keeps the same
+			reads and SPAdes is never handed a library with one mate missing.
+	Changed - every command's help states its own defaults and the values it will accept
+		One help formatter for all two dozen entry points. A default is read off the
+			parser rather than written into the help string a second time, where it drifted;
+			a numeric option declares its range once and both checks and prints it.
+		So "-c/--completeness" now reads "[0-100] [default: 70]" and rejects -5 at the
+			parser instead of somewhere downstream. A help string that explains its own
+			default is left alone: "default minimap2; see ALIGNERS for why" says more than
+			"[default: minimap2]" and must not be followed by a second copy of it.
+	Changed - CONCOCT is no longer run with its parallelism multiplied by its thread count
+		"concoct -t 96" forks 96 workers and does array maths in each, and each worker's
+			OpenBLAS then started 96 threads of its own. The numerical libraries are now
+			capped to one thread per worker so CONCOCT's own -t is the only parallelism.
+		Measured: 23.8 cpu-hours against 29.9 on one CAMI2 sample, a 1.3x saving, for a
+			bin set identical down to the count. Applied to CONCOCT alone - the learned
+			binners are internally threaded, so capping them would make them slower.
+		What this does not fix, stated so nobody reads it as closed: the same CONCOCT
+			version with byte-identical arguments and input costs 5.6 cpu-hours under a
+			Python 2.7 + MKL environment. The cap closes a fifth of that gap. The rest is
+			somewhere in the compiled numerical stack and is still open. It only affects
+			the --concoct path; the default binner set costs 1.8 cpu-hours.
+	Fixed - the temp-directory budget for CheckM1 was 14 characters too generous
+		multiprocessing creates a "pymp-XXXXXXXX" subdirectory before putting
+			"listener-XXXXXXXX" inside it, and only the second was counted - so a
+			77-character temp directory was judged short enough and still died with the bare
+			EOFError this guard exists to prevent. It took both arms of the consolidator
+			comparison with it.
+		The budget is now 75 characters, found by binding real sockets at every length
+			from 60 to 90 rather than derived, and pinned by a test that fails at 76.
+	Changed - "metawrap2 coverage --coverage fairy" is now measured, and it lost
+		Benchmark B5 over three CAMI2 samples, every other token held identical: fairy
+			builds the cohort depth table for 0.04 cpu-hours against minimap2's 2.26, 57x
+			cheaper, and the dereplicated catalogue that comes out holds 27 high-quality
+			MAGs against 37, with 76% of its bins passing GUNC against 87%.
+		Its multi-sample claim was the one thing it had left - the single-sample loss was
+			already on record at AMBER F1 0.212 against 0.452 - so this closes the route as
+			a default candidate rather than leaving it merely unmeasured. It stays opt-in.
+		What it gets wrong is its mean depths (Pearson 0.237 against bwa), not the
+			variance column: the ablation below shows metaBAT2 gets nothing from that at
+			this sample count. An alignment-free estimator with accurate means would still
+			be worth having; fairy is not it.
+	New - benchmark B5 settles what cross-sample coverage is worth
+		Binning each sample against a cohort-wide depth table recovers 37 high-quality
+			MAGs against 32 for a sample's own reads alone - 16% more - for 1.9 cpu-hours
+			more out of 90, which is 2%. That is the case for the coverage module.
+		The mechanism is visible per step: binning drops from 1.81 cpu-hours to 0.63
+			because it reads a table rather than aligning, and the coverage step's 2.26 is
+			what buys the other samples' depths. The saving should widen with more samples -
+			N alignments against N-squared - and three samples is the smallest cohort worth
+			the name, so this is a floor rather than a best case.
+		Run on three samples rather than the ten originally planned: ten needed ~300 GB
+			against a 70% disk ceiling, and three matches every other measurement here.
+	New - benchmark B5 measured: cross-sample coverage against single-sample and co-assembly
+		Four arms over three CAMI2 samples, each differing in one thing, each assembling
+			its own reads, every count after dereplication.
+		Cross-sample coverage beats single-sample, which is what the coverage module
+			exists for: 37 high-quality MAGs against 32, 23 near-complete against 19, 46
+			genomes against 40, for 1.9 cpu-hours more out of 90. The depth table costs 2.26
+			and hands 1.2 back, because binning reads a table instead of aligning.
+		Against co-assembly it is a wash at this scale, which the plan did not assume:
+			co-assembly was cheaper (85.1 cpu-hours against 90.9) and had more bins at 70/10
+			(40 against 37), while multi-sample had more near-complete ones (23 against 18)
+			and cleaner bins (87.0% passing GUNC against 81.4%). Weighted for chimerism the
+			two are level. The cost argument for cohorts is one about scaling, and three
+			samples does not demonstrate it.
+		fairy, finally settled: supplying the same cohort table from k-mer sketches is
+			53x cheaper for that step (0.04 cpu-hours against 2.26) and costs 10 of the 37
+			MAGs and half the near-complete ones, with dirtier bins. Its multi-sample claim
+			was the one thing it had left and it was measured in exactly the setting it was
+			supposed to win in. It stays opt-in, now for a measured reason.
+	Fixed - a co-assembly that skipped read QC had no reads to assemble
+		The ALL_READS files a co-assembly reads were built only after a read_qc step, so
+			a study sheet with coassemble = true and no read_qc in its steps planned an
+			assembly whose inputs nothing created - and failed on "does not exist", naming
+			the files but not the cause. Every arm of a benchmark that holds read QC
+			constant is exactly that shape, which is how it was found.
+		The concatenation now happens before the assembly step instead. With read QC the
+			files are already current by then and it is a no-op; without it, the raw reads
+			are concatenated. clean_reads_for already knew which reads to use - it was
+			simply never asked in this case.
+	Fixed - an assembly with a zero-length record broke DAS_Tool and blamed the contigs
+		DAS_Tool reads the assembly with R's fread, and a header with an empty sequence
+			yields one field where it expects two. That stops the read part way and DAS_Tool
+			then reports every contig past that point as "not found in assembly" - 36,854 of
+			them in the run that found this, in a message naming none of the real problem.
+		bin_refinement now drops such records from the copy it hands a consolidator, the
+			way binning already did for its own working copy. CAMI2's gold-standard
+			assembly ships two of them.
+		One input problem is left and is not ours: bins from a *pooled* gold assembly can
+			include a 159 Mb "bin" - metaBAT2's unbinnable remainder, not a genome - and
+			DAS_Tool's gene prediction fails on it. Per-sample bins, which is what a user
+			produces, are fine: 0.62 cpu-hours and 10 bins at 70/10 against the metawrap
+			consolidator's 4.52 and 13.
+	Fixed - a bin_refinement comparison could not run a variant that needs the assembly
+		DAS Tool reads the assembly contigs itself and refuses to start without them, so
+			the consolidator comparison could never run its DAS Tool arm. The harness now
+			passes -a to every variant of a bin_refinement comparison when the dataset has
+			an assembly - to every variant rather than only the ones that ask, because an
+			unused -a changes nothing and arms handed different inputs are not a comparison.
+	Fixed - CONCOCT burned several times the CPU it needed to
+		It forks ``-t`` workers and does array maths in each, so without being told
+			otherwise every worker's OpenBLAS started its own thread per core. Capping the
+			numerical libraries to one thread for that call leaves CONCOCT's own -t as the
+			only parallelism.
+		Measured on one CAMI2 sample: 29.9 cpu-hours and 1476 s wall before, 23.8 and
+			1248 s after, with identical bin counts. A 1.3x saving - real, and much smaller
+			than the 5x gap that prompted the search, so most of that gap is still open. The
+			remaining suspect is the build: CONCOCT 1.1.0 for Python 3.12 against
+			scikit-learn 1.9, where the same version under Python 2.7 costs 5.6 cpu-hours.
+	Fixed - a bin_refinement benchmark comparison never passed an assembly, so DAS Tool could not run
+		The command builder was already right - ``if inputs.assembly`` - but nothing ever
+			filled the field in for a bin_refinement comparison, so the consolidator arm that
+			needs the contigs exited in one second while the arm that does not need them
+			passed.
+	Fixed - DAS Tool refused CAMI2's gold standard, blaming 36,854 contigs that were all present
+		"Contigs of contig2bin files not found in assembly: 36854", where a direct check
+			finds every one of them in the assembly. DAS_Tool reads it with R's fread, and a
+			record with a header and no sequence yields a line with one field where two are
+			expected - which stops the read and reports everything after it as missing.
+		bin_refinement now drops those records from the copy it hands a consolidator, as
+			binning already did for its own working copy. CAMI2's gold standard ships two.
+	Fixed - CheckM1 stopped finding its reference data whenever its environment was rebuilt
+		CheckM1 remembers the path in a file inside its own conda env, written by
+			``checkm data setRoot``. Consolidating the environments replaced the env it had
+			been pointed at, and bin_refinement began dying in CheckM's tree stage with an
+			EOFError from a worker - on a machine where nothing about the database had
+			changed and metawrap2.toml still named it correctly.
+		Every CheckM1 call now carries CHECKM_DATA_PATH from the configured CHECKM_DB,
+			which CheckM reads in preference to its stored path. install-db still runs
+			setRoot, so `checkm` by hand works too, and it resolves the env from MODULE_ENVS
+			rather than spelling out a name that a rename can orphan.
+	Fixed - doctor and install-env did not recognise an environment name several modules share
+		`doctor bins` resolved to no known tools and reported a freshly built env as
+			"0/0 tools OK" - a pass that had probed nothing, from the one command whose job
+			is to verify a build, and the check install-env runs after building. It now
+			probes the union of the tools of every module sharing that env, because a shared
+			env is only healthy if all of them can run.
+		`install-env bins --lock` likewise insisted an env that existed did not: the name
+			is neither a module nor an opt-in env, so it resolved to the bare word rather
+			than to metawrap2-bins.
+	Fixed - the benchmark scorer crashed on GUNC after the environments were consolidated
+		`assess.gunc_settings` looked GUNC up by the opt-in key it used to have, which
+			folding GUNC into bin_refinement's env turned into a KeyError. It fired only on a
+			variant whose bins had not already been assessed, so a benchmark chain crashed
+			part way through, after the expensive part had succeeded.
+		A test now sweeps the source for literal lookups into any of the four env tables
+			and fails on one that could not resolve, rather than waiting for the code path
+			to be exercised.
+	Fixed - doctor reported a correctly installed GUNC database as missing
+		GUNC takes --db_file, so install-db points GUNC_DB at the .dmnd itself, and
+			every check of a configured database asked whether it was a directory. The one
+			database whose correct value cannot be a directory was the one reported broken.
+	New - "metawrap2 benchmark", so a default is a measurement rather than an opinion
+		"metawrap2 benchmark list|fetch|run|score" measures tools and settings against
+			known-truth data and ranks them on accuracy per CPU-hour - not accuracy alone,
+			because a variant that scores higher for four times the compute is a better flag
+			than a default. Wall time is recorded but is never the denominator: it rewards a
+			tool for being given more cores
+		datasets and comparisons are data, in benchmarks/datasets.toml and
+			benchmarks/configurations.toml, so adding either is an edit rather than a patch.
+			The loader refuses a remote file with no checksum or no measured size, and a
+			comparison with fewer than two variants or no declared incumbent
+		nothing downloads on import, on list, or on run. A fetch requires the dataset to be
+			named and its size confirmed with --yes, and refuses outright if it would cross the
+			[limits] disk ceiling
+		results append to benchmarks/results/<dataset>.tsv in long format, which is committed,
+			so a changed default arrives in review next to the numbers for it
+		benchmarks/fixtures/tiny/ is a ~370 kB three-genome fixture, committed, so the harness
+			itself is testable in under a second without a 95 GB download
+		"score" assesses a binning comparison's bins itself, with AMBER and CheckM, so those
+			comparisons have an accuracy column at all - a binning run leaves directories of
+			FASTA files and had been recording cost against nothing
+		assessment happens at score time, outside the measured run, because the cost being
+			ranked has to be the cost of the thing being chosen: "metawrap2 binning" does not
+			run CheckM, and CheckM's cost grows with the number of bins, so charging it to the
+			run would penalise a variant for being productive
+		AMBER (Meyer et al., Gigascience 2018) scores bins against the dataset's known
+			contig-to-genome truth and is marker-gene independent, which is why it is not
+			redundant with CheckM: several binners use single-copy markers internally, and
+			scoring those with a marker-based tool asks them to grade their own homework.
+			"metawrap2 install-env benchmark-amber" creates its env, and nothing a user runs
+			depends on it
+		a variant that ran three binners is not scored by adding its three bin sets together.
+			They overlap, so the same genome would be counted up to three times and an F1 above
+			1 sorts first and looks plausible. The ranked numbers come from the consolidated
+			set (metawrap_<c>_<x>_bins) or from a lone set; otherwise they are recorded per set as
+			metric__<bin set> and "score" says which variants it declined to rank, and why
+		"--reassess" re-runs the assessors over bins that already have results, and
+			"--assembly" names the contigs AMBER should take its sequence lengths from (the
+			run record already knows, for a run made by "benchmark run")
+		"run" and "score" now accept the same spellings for the work directory: -o, --output
+			and --work all mean it, in either command
+	New - "metawrap2 binning --semibin2"
+		SemiBin2 2.5.0 joins metaBAT2, MaxBin2 and CONCOCT as a selectable binner. It learns
+			contig embeddings by self-supervised contrastive training rather than modelling
+			composition and coverage directly, and it is the only binner here that reads the
+			BAMs rather than a depth table - it computes its own abundance features alongside
+			the embedding, so "single_easy_bin" is handed --input-bam. Not a default and not
+			yet recommended: the binner_set comparison has arms for it (semibin2 and
+			metabat2_semibin2) and nothing changes until they have run
+		its own env, "metawrap2 install-env binning-semibin2", because it brings pytorch -
+			roughly 2-3 GB that the three default binners have no use for, and that a user
+			who never asks for SemiBin2 should never download
+		--random-seed is fixed and --semibin2-engine defaults to cpu, where SemiBin2 would
+			default to "auto" and train on a GPU whenever torch can see one. Found by running
+			it on a machine with several GPUs and reading "Running with GPU" in its log. Two
+			reasons it is pinned: MetaWrap2 chooses defaults on accuracy per cpu-hour, and a
+			binner whose training silently moves to an accelerator is neither measured on the
+			same axis as metaBAT2 nor chosen on hardware most users have; and "auto" makes the
+			bins depend on the host, so the same study re-analysed elsewhere yields different
+			MAGs for no visible reason. "--semibin2-engine gpu" trades that back for speed
+		SemiBin2 refuses to run on contigs shorter than 4000 bp - it cannot form must-link
+			pairs - so it cannot be exercised on the tiny fixture, and it drops bins under
+			200 kb by a floor of its own that -l does not reach
+	New - "metawrap2 binning --vamb"
+		VAMB 5.0.4 joins as the second learned binner, training a variational autoencoder over
+			composition and abundance jointly where SemiBin2 pretrains contrastively on
+			composition. It reads the BAM directory (--bamdir) rather than individual BAMs or a
+			depth table. Not a default, for the same reason SemiBin2 is not: the binner_set arms
+			vamb and metabat2_vamb decide it
+		its own env, "metawrap2 install-env binning-vamb", separate from binning-semibin2
+			rather than shared with it - both bring pytorch, but they pin different versions, so
+			solving them together lets one tool's upgrade break the other
+		three of VAMB's defaults are overridden, each of which fails silently if left alone:
+			--minfasta has no default at all, and without it VAMB writes a cluster TSV and zero
+			FASTA files, which looks from outside like a binner that found nothing (set to
+			200 kb, matching SemiBin2's floor); -o is emptied to turn off binsplitting, whose
+			default separator "C" splits a bin apart on a letter that appears mid-identifier in
+			ordinary contig names; and -m is floored at VAMB's hard minimum of 250 rather than
+			its recommended 2000, which would quietly discard contigs -l asked to bin
+		VAMB refuses to run into an --outdir that already exists, so the module clears its
+			working output first - safe only because the checkpoint has already decided the
+			stage is being redone, so nothing in there is a result. --seed is passed despite
+			VAMB documenting that it does not guarantee determinism: it removes the variation
+			it can remove
+		verified against VAMB 5.0.4 on the tiny fixture: it trains and clusters there (257
+			contigs into 160 bins) but writes none of them, every one being under the 200 kb
+			floor - so like SemiBin2 it cannot be smoke-tested end to end on tiny, for a
+			different reason. Bins land in "<outdir>/bins/<n>.fna", confirmed by running it
+			with the floor lowered
+	New - "metawrap2 binning --comebin"
+		COMEBin 1.1.0 joins as the third learned binner, and the only one that selects among its
+			own candidate bin sets: it trains contrastively over six augmented views, produces
+			several Leiden clusterings, and picks between them by scoring each against
+			single-copy marker genes - internally doing something close to what bin_refinement
+			does across binners. Entry point is the shell script run_comebin.sh, and like VAMB it
+			takes a BAM directory and globs *.bam out of it. Arms comebin and metabat2_comebin
+		its own env, "metawrap2 install-env binning-comebin", distinct from the other two
+			learned binners' for the same torch-pinning reason, and also carrying FragGeneScan,
+			HMMER and pplacer for the marker-gene selection step
+		-d defaults to cpu where COMEBin's own default is plain "cuda" - a stronger version of
+			SemiBin2's problem, since "auto" at least falls back to the CPU and "cuda" just asks
+			torch for a GPU and fails without one. "--comebin-device cuda" opts in
+		-s is passed because run_comebin.sh forwards --seed only when the flag is given, so
+			COMEBin out of the box is an unseeded network and an unseeded Leiden clustering
+		-l is honoured by filtering the input rather than by a flag: run_comebin.sh never
+			forwards --contig_len, so COMEBin bins at its built-in 1000 bp whatever was asked
+			for. When --min-len is higher the assembly handed to COMEBin is pre-filtered to it,
+			so its bins rest on the same contigs every other binner saw; at or below 1000 the
+			shared copy is used and nothing is written
+		COMEBin needs no clearing between attempts, unlike VAMB: run_comebin.sh checks its own
+			intermediate manifests and skips finished stages, so the expensive augmentation pass
+			survives a --resume and the output directory is left alone
+		verified against COMEBin 1.1.0 on the tiny fixture: it completes augmentation and
+			contrastive training on the CPU with the seed honoured (~4 min on 8 threads for 257
+			contigs) and then fails in clustering with "HMMsearch completed but found zero marker
+			hits", the fixture's synthetic genomes carrying no single-copy markers to seed on. So
+			all three learned binners are unexercisable on tiny, each for a different reason
+	New - "metawrap2 bin_refinement --consolidator dastool", a second way to reach one bin set
+		MetaWrap2's own consolidation hybridises every combination of the input bin sets with
+			Binning_refiner and asks CheckM which version of each bin to keep, so CheckM runs on
+			2^n-1 sets. DAS_Tool scores the input bins once on single-copy genes and aggregates in
+			one pass. That is a different accuracy/cost point, not a different implementation of
+			the same idea, so which one is the default is a measurement: the new "consolidator"
+			comparison in benchmarks/configurations.toml ranks them on NC MAGs per CPU-hour.
+			"metawrap" stays the default because it is the incumbent, not because it has won
+		both routes leave one set in binsO, and the whole downstream half - re-scoring with CheckM,
+			the -c/-x cut, the ranking plots, the final layout, GUNC - is the same code either
+			way. That is what makes the two comparable: the only thing that differs is how the one
+			set was arrived at, not what counts as a final bin
+		needs -a/--assembly, because DAS_Tool reads the contigs itself. Checked up front, along with
+			the env, before a single bin is copied: finding out after prodigal has read every bin
+			is the whole cost of the arm for nothing. --skip-consolidation alongside it is
+			reported as the contradiction it is rather than resolved by precedence
+		the assembly is re-normalised first, and only if it needs it. Bins have been through
+			_fix_contig_naming, which rewrites "=" in a contig id, and a consolidator matching
+			those names against an unnormalised assembly finds none of them - which is not an
+			error anywhere, just an empty consolidation. metaSPAdes and MEGAHIT names normalise to
+			themselves, so the common case copies nothing, which matters when assemblies are
+			gigabytes
+		CheckM is deliberately not run on the input sets for this route. It exists to tell
+			MetaWrap2's own consolidation which version of each bin to keep; DAS_Tool decides from
+			its own scoring. Running it anyway would add the module's largest cost to the arm that
+			was supposed to be the cheap one, and would make the cost comparison meaningless
+		its bins are renumbered to bin_001.fasta like every other MetaWrap2 bin set - .stats.tsv
+			rows are keyed on those stems - and DAS_Tool's own names, which say which input set
+			each bin came from, are kept in work_files/dastool_bin_names.tsv rather than discarded
+		--search_engine diamond, not DAS_Tool's default: the default is usearch, which is not free
+			software and is not in the env, so the default command fails partway into a run
+		verified end-to-end against DAS_Tool 1.1.7 on real CAMI2 bins: 8 input bins across two sets
+			consolidated to 7, then cut to 6 by CheckM2 at -c 50 -x 10
+		MAGScoT was the other candidate and is not packaged: "mamba repoquery search -c bioconda
+			-c conda-forge *magscot*" finds nothing, so it is GitHub/Docker only - the same
+			packaging exception as MetaDecoder (PyPI) and binny (a Snakemake workflow), and not
+			the small env the plan assumed
+	Fixed - the benchmark could not find the consolidated bin set, so no ensemble could be ranked
+		"benchmark score" looked for a directory called "metawrap2_bins", which bin_refinement has
+			never written: it names its answer for the thresholds it cut at, metawrap_70_10_bins.
+			So a refined ensemble arm looked like several raw overlapping bin sets with nothing
+			consolidated, and the harness correctly refused to rank it - over an answer that was
+			sitting in the same directory. Exactly the comparison the CONCOCT question needs
+		one rule now, in metawrap2.constants: refined_bins_dirname() writes the name and
+			is_refined_bins_dirname() recognises it, matched on shape rather than against a list,
+			because -c 50 -x 5 is as valid as the defaults
+		several consolidated sets in one directory - a run resumed at different thresholds - is
+			refused rather than resolved by sort order, for the same reason three raw sets are
+		the tests pinned the fictional name, which is how this survived. They pin the real one now,
+			and pin "metawrap2_bins" as explicitly *not* matching
+	New - "metawrap2 assembly --aligner", so the hybrid path's remapping is not hardcoded to bwa
+		assembly was the third module that maps reads back to an assembly and the only one still
+			spelling its own aligner command out. It now takes --aligner from the same registry
+			binning and blobology use (metawrap2.aligners), so the three cannot drift apart on
+			which aligners they offer
+		the default is bwa, deliberately *not* the registry's minimap2, and a test asserts the
+			difference so it cannot be quietly aligned. Measured on the 273k-scaffold metaSPAdes
+			assembly from the assembler arm and the 3-sample co-assembly reads behind it: bwa
+			5.45 CPU-hours and 2,867,680 reads recruited as unassembled, minimap2 0.62 CPU-hours
+			- 8.8x less - and 4,113,486, which is 44% more
+		8.8x cheaper and not a drop-in, because the disagreement is one-sided: minimap2 calls
+			1,249,798 reads unmapped that bwa placed on a scaffold, against 3,992 the other way
+			(Jaccard 0.695). Its sr preset is less sensitive on a fragmented real assembly, so
+			those reads reach MEGAHIT labelled unassembled and are assembled a second time, and
+			combining the two assemblies cannot tell a duplicate from a novel contig. A cost
+			saving cannot buy a change in what the assembly contains. This is the opposite
+			conclusion to binning's from the same two tools, because the property read out of the
+			alignment is different - which is the argument for measuring per question, not per tool
+		the scaffold index is deleted once the FASTQ exists. Nothing else in the module reads an
+			alignment and the stage is checkpointed, so a --resume rebuilds it anyway; it is not
+			small next to what it was built from - minimap2's .mmi for a 176 MB scaffold set is
+			larger than the fasta
+		bwa-mem2 and minimap2 are now declared in the assembly env rather than assumed. minimap2
+			was already present as a dependency of quast, so --aligner minimap2 would have worked
+			without being declared and broken the day quast dropped it
+		bwa mem now runs with -v 1, the registry's template, where this module had passed no
+			verbosity flag. It changes what bwa writes to stderr and nothing about the alignment
+	Fixed - four modules were treating the unbinned leftovers as a candidate genome
+		a bin set may carry "unbinned.fasta" and is meant to: binning writes the contigs no
+			CONCOCT cluster claimed there on purpose, so a user can see what was left over. Only
+			the AMBER scorer knew that. bin_refinement copied it in as a bin, which puts it
+			through CheckM, into every pairwise Binning_refiner combination and into the
+			dereplication that decides which bin owns each contig; annotate_bins would have run
+			prokka on it; classify_bins would have asked taxator to place it; reassemble_bins
+			would have recruited reads to it and reassembled it through SPAdes
+		found while asking where the recall goes in refinement. On the CAMI2 GI run nothing went
+			wrong, because CONCOCT's leftovers came to 69.8 MB and refinement drops any bin over
+			20 MB - the right outcome reached for a reason that has nothing to do with what the
+			file is, and only while the catch-all stays large. A tighter CONCOCT run leaves a
+			smaller one, and a smaller one is refined as if it were a genome
+		the exclusion now lives in io.seqio.fasta_files, which was already the shared answer to
+			"what does a bin folder contain", with constants.is_unbinned_name as the predicate -
+			matched on bin_label so it still holds once an extension is normalised (unbinned.fa
+			-> unbinned.fasta) or a bin set is gzipped, each of which is a point at which a check
+			against the filename would quietly start letting the file through
+		fifteen tests, including one that pins that refinement's size filter still drops
+			oversized bins - the fix could have been made by tightening that filter instead,
+			which would have passed any test that only counted the bins at the end
+		it also moved a measurement. "The size filter dropped 11 of CONCOCT's 100 bins holding
+			46% of the set's sequence", recorded while tracking down where refinement's recall
+			goes, was that filter counted with the catch-all among the bins; its 69.8 MB is
+			most of the difference. With the catch-all excluded it is 10 of 99 bins and 41%,
+			7 of them over the ceiling and the largest 131.8 MB
+	Fixed - refining twice into the same output folder failed at the very end, having done the work
+		--force cleaned the bins* working sets out of the output root but not out of work_files,
+			which is where a finished run leaves them. The tidy-up at the end then moved the new
+			run's sets in on top with os.replace, which overwrites a file and refuses a directory
+			that already has anything in it, so the run raised FileExistsError after writing
+			every final bin and plotting the figures - nothing in the log after "MOVING OVER
+			TEMPORARY FILES", and the remaining sets left half-moved for the next --resume
+		worse than it reads, because the move runs before the final bins are laid out: the
+			metawrap_70_10_bins sitting in the folder afterwards is the previous run's, so a
+			harness that counted it recorded a complete result for a run that never produced one
+		one line further on, copytree onto metawrap_<c>_<x>_bins would have failed for the same
+			reason. --force now also removes the previous final set and its .stats.tsv /
+			.contigs.tsv, matched on shape (constants.is_refined_bins_dirname) rather than by
+			name, because the directory is named for the thresholds it was cut at and a rerun at
+			different -c/-x would otherwise leave two final sets with nothing to say which is
+			this run's
+		the bins* clean takes sidecars too. A binsC.stats.tsv from a 3-set run surviving into a
+			2-set rerun is as misleading as the folder was, and it is what the stats tables and
+			the plots are built from
+		a rerun also kept presenting the previous run's input sets as its own. Refinement copies
+			each input set back into the output folder under that folder's name, which is where
+			anything downstream looks for "what went in", and it wrote the copy only when the
+			destination did not already exist - so the copy was never refreshed. A refined/
+			directory was found advertising a 188-bin MaxBin2 set, with a matching .stats.tsv,
+			beside the results of refining the corrected 129-bin one; scoring the inputs from the
+			output folder would have scored the superseded set and blamed refinement for the
+			difference. --force now removes those copies too, skipping any whose path resolves to
+			the input itself, since nothing stops -A pointing inside the output directory
+		found by re-refining a benchmark arm in place after its binner was corrected, which is the
+			ordinary reason to do this. Four tests, each of which was failing before one of the
+			four fixes above: a plain rerun, a rerun leaving no bin set in the output root, a
+			rerun whose input set changed, and a 3-set run re-run with 2 sets
+	Fixed - --resume on bin_refinement deleted what it was resuming from, and still reported success
+		the clean above ran whenever the output folder existed, which is as true of --resume as it
+			is of --force, and --resume means the opposite: it is about to skip the steps whose
+			checkpoints are set, so clearing their output leaves nothing to skip to. A resume of a
+			completed run deleted the final bin set and then announced "BIN_REFINEMENT PIPELINE
+			FINISHED SUCCESSFULLY" over an output folder that no longer had any bins in it
+		the clean is now gated on a new _common.force(), the counterpart to the existing dry_run().
+			Since the bin sets only move into work_files at the finalize step, the old behaviour
+			destroyed something on every resume from "refine" onwards
+	Fixed - the same two defects in reassemble_bins, which is the most expensive module to lose a run of
+		the shuffle into work_files used the same bare os.replace onto directory destinations that
+			a previous run had already filled, so a second reassembly into the same folder raised
+			OSError: Directory not empty after every SPAdes assembly was finished
+		it had no clean at all, only a warning - and reassembled_bins is added to rather than
+			replaced. So a second run's candidate pool contained the first run's promoted winners,
+			including its .orig.fa copies of input bins that may since have changed, and "the best
+			version of each bin" was chosen across two runs. Nothing in the output said so
+		--force now clears the previous reassembly (intermediates, work_files, the chosen-bins list
+			and the reassembled_bins sidecars), leaving original_bins, the log and the provenance
+			record alone - there would otherwise be nothing to show the first run had happened
+		the two blocks are now _shuffle_intermediates and _clean_previous_run so they can be tested
+			without running SPAdes, which is why neither was covered before. Five tests
+	Fixed - a --resume that restarts a crashed step no longer trips over what the crash left behind
+		gating the clean on --force exposed the other half of the same problem: a resumed run that
+			has to redo a step arrives with that step's half-written output in place. Binning_refiner
+			moving its result onto bins<AB>, the copytree that seeds binsM, and the dereplication
+			writing binsO would each have refused or silently merged with it - and dereplicate writes
+			into its output folder rather than replacing it, so a crashed attempt's bins would have
+			survived into the final set
+		the guard is now one helper, _common.fs_replace_dir: os.replace with the destination cleared
+			first if it is a directory, skipped under --dry-run like the other fs_* helpers. It
+			handles files too, which is what the tidy-up loops moving bin sets and their .stats.tsv
+			sidecars in one pass need
+	Fixed - metaBAT2 was given no seed, and its default means "pick a random one"
+		metabat2's "--seed arg (=0)" documents 0 as a random seed, so the default binner - the
+			baseline every other binner is ranked against - produced a different answer on every
+			run, and a user re-running their own study got different MAGs with nothing to say why.
+			SemiBin2, VAMB and COMEBin were all seeded when they went in because they train nets;
+			metaBAT2 was missed because it does not look like a tool that needs one. It now gets
+			the same fixed 1337
+		found by three benchmark arms running metaBAT2 on a byte-identical depth table with a
+			byte-identical command line, two producing 79 bins and the third 78. Nothing else about
+			the runs differed, which left the seed as the only candidate
+		those three arms are therefore three draws of one binner on one input, which is the only
+			chance to measure what it cost and is gone now the seed is pinned: two of the three are
+			identical to the contig (Rand index 1.00000), the third differs in 294 contigs, and the
+			widest metric spread is 0.0042 on precision. The binner-set difference it was confounding
+			is 0.0686 on F1, sixteen times that - so no recorded comparison changes
+		CONCOCT's seed is now passed explicitly too, at its own default of 1 rather than at
+			metaBAT2's value, so this cannot be the reason a CONCOCT result moves. Same argument as
+			pinning CoverM's mapper: the knob exists ("0 gives a random seed") and a tool changing
+			its default underneath a user changes their MAGs. MaxBin2 has no seed to pass, and
+			salmon's only matters with bootstraps, which this pipeline does not ask for
+	Fixed - AMBER scored one bin set twice and reported it as two arms
+		the converted query file was named after the bin directory, and bin_refinement names its
+			final directory for the thresholds it was cut at - so scoring two arms whose sets were
+			both cut at "-c 70 -x 10" wrote metawrap_70_10_bins.binning twice, the second over the
+			first, and handed AMBER the same file under both labels. It returned two identical rows
+			to four decimal places for bin sets of 74 and 60 bins, with nothing in its output to say
+			the queries were the same file
+		named after the label instead, which is unique by construction because it is what tells the
+			rows apart. Duplicate labels, and a label count that does not match the number of bin
+			sets, are now errors rather than a quietly wrong table - AMBER matches labels to sets by
+			position, so a mismatch relabels every row after the gap
+	New - "metawrap2 cohort", so binning each sample separately is a pipeline and not a loop
+		one assembly per sample, one coverage pass across all of them, binning and consolidation per
+			sample, then one dereplication into a genome catalogue that the quantifier and the
+			annotators see instead of any single sample's bins. The same sample sheet, manifest,
+			checkpoints, run lock, resource budget, history and --resume as "run": it is the same
+			planner with the assembly mode decided, not a second driver to keep correct
+		this fixes a real break rather than adding a mode. "coassemble = false" already produced
+			per-sample assemblies - and then pointed binning and quant_bins at
+			ASSEMBLY/final_assembly.fasta, which that mode never writes, and reassembly at
+			CLEAN_READS/ALL_READS_*, which is only concatenated when co-assembling. The path existed
+			and could not run; a test now walks every step of an all-steps cohort plan and fails on
+			any reference to a co-assembly-only path
+		the default steps follow the mode: a cohort adds coverage and dereplicate, because they only
+			mean anything once each sample has its own assembly, and leaves out reassemble_bins,
+			because it is the most expensive step in the pipeline and here it would run once per
+			sample. Naming steps explicitly still wins over both defaults
+		quant_bins runs once against the catalogue with no -a. Near-identical MAGs recovered from
+			several samples would otherwise divide one organism's reads between them, and there is no
+			single assembly to quantify against in this mode
+		each per-sample stage is one parallel group, so -j N moves N samples through a stage rather
+			than one sample end to end - the thread and memory budget is divided by the driver, which
+			is the only thing that knows how many steps are running
+		mixing the modes is reported rather than obeyed: coverage and dereplicate are dropped from a
+			co-assembly with a message saying why (one assembly, one bin set), and a sheet asking to
+			co-assemble under "metawrap2 cohort" is overridden with a warning naming "run" as the way
+			to honour it
+		which of the two recovers more clean genomes per CPU-hour is still unmeasured - that is
+			benchmark B5, which needed this driver to exist before it could be run
+	New - "metawrap2 coverage --coverage fairy", a depth table with no alignment at all
+		fairy sketches each sample's reads once and estimates every contig's depth in every sample
+			from k-mer containment, writing the same columns
+			jgi_summarize_bam_contig_depths writes - contigName, contigLen, totalAvgDepth, then a
+			depth and a variance per sample. Verified against the installed tool before any of this
+			was written, because a route that emits a nearly-right table is worse than one that
+			cannot run: the split, the slices and every binner downstream are unchanged, and the
+			flag is the only difference between the two routes
+		it is minutes where aligning is hours, and the cost is resolution. fairy's -m 95 default
+			resolves nothing below roughly 95% ANI, so reads from a strain that diverges from the
+			contig it assembled into are credited to that contig or to nothing, and a sketch has no
+			positions within a contig - so metaBAT2's intra-contig depth variance is filled from
+			containment rather than measured per base
+		"align" stays the default on measurement, not on caution. Fed to metaBAT2 on one CAMI2 GI
+			sample, single-sample fairy scored AMBER F1 0.212 against minimap2's 0.452 - half the
+			bins - for 0.012 cpu-hours against 1.368, and raising its ANI threshold made agreement
+			with the aligners worse rather than better. Ranked on F1 per cpu-hour alone it wins by
+			50x, which is the clearest case in this repo for a fidelity floor under that ratio
+		what that run could not test is fairy's own claim, which is a multi-sample one - 98.5% of
+			MAGs recovered across samples - and needs the cross-sample table the coverage module
+			exists to build. That is benchmark B5's coverage arm; the default does not move first
+		the sketches are kept rather than swept, unlike the BAMs. They are small and they do not
+			depend on the catalogue, so a later run against a different catalogue reuses them, and
+			a --resume picks them up by name
+		an interleaved input is sketched as single-end. A sketch records which k-mers a sample
+			contains, not which mate they came from, so deinterleaving would cost a pass over the
+			reads to arrive at the same sketch
+		its own environment (metawrap2-coverage-fairy, one static binary) rather than a line in
+			binning's, so a user on the default route never waits for it to solve:
+			"metawrap2 install-env coverage-fairy"
+	New - "metawrap2 coverage", so a cohort's cross-sample depth costs N alignments and not N^2
+		multi-sample binning wants every contig's depth in every sample, and the obvious way to get
+			that maps all N samples against each of the N per-sample assemblies. Twenty samples is four
+			hundred alignments for twenty depth tables. This concatenates the assemblies into one contig
+			catalogue, maps each sample once against it, builds one table, and splits that table back
+			into one slice per assembly for "binning --depth" - twenty alignments for the same twenty
+			tables, each of which now carries every sample's coverage
+		the split is the part with a way to go quietly wrong, so the naming is checked rather than
+			trusted. Contig names collide across assemblies because every assembler numbers from one, so
+			each contig is prefixed with its assembly's label and the prefix is what the split
+			demultiplexes on. A contig name or a label containing the separator, and two assemblies
+			sharing a label, are errors at the catalogue - where they can be reported - rather than a
+			slice of plausible depths attributed to the wrong sample. --separator takes any character the
+			names do not use; the default ~ is one SPAdes, MEGAHIT and Flye never emit
+		the slices carry the original contig names, not the prefixed ones, because each is handed to a
+			binning run over the original assembly. Prefixed names against an unprefixed assembly is
+			exactly what "binning --depth" refuses, so leaving them in would turn a correct run into a
+			hard stop one command later. A label matching no contig in the catalogue is an error too,
+			not an empty table to hand a binner
+		-a LABEL=path exists because the obvious cohort layout defeats labelling by filename: twenty
+			samples of sample_N/final_assembly.fasta would all be labelled final_assembly
+		the BAMs and the catalogue are swept once the tables are written (--keep-bams,
+			--keep-catalogue), which matters more here than in binning: the catalogue is every assembly
+			together and minimap2's index of it is larger again
+		it shares binning's conda env rather than having one of its own, since it runs the same
+			aligner, samtools and jgi_summarize_bam_contig_depths. install-env now resolves a module's
+			yaml from the env it maps to instead of from the module name, and builds a shared env once
+			per run - resolving by module name would have made "install-env --all" report no env file
+			for coverage and return 1, which is the command the installation docs lead with
+		whether this beats per-sample binning on accuracy per CPU-hour is unmeasured: benchmark B5
+			(co-assembly vs single-sample vs multi-sample) is what decides that, and it needs the cohort
+			driver this module is a stage of
+	Added - "metawrap2 binning --depth", so cohort coverage can be N mappings and not N per assembly
+		binning from a contig x sample depth table that already exists, aligning nothing and
+			needing no reads. metaBAT2 and MaxBin2 only: CONCOCT builds its own coverage table and
+			SemiBin2, VAMB and COMEBin read the BAM directory, so selecting one of those with
+			--depth is refused by name rather than silently aligning anyway
+		this is the piece multi-split coverage needs. Mapping every sample against each sample's
+			own assembly is N^2 alignments; mapping each sample once against the concatenated
+			catalogue and handing each sample's binning its slice of that table is N
+		the table is checked against the assembly before anything runs, because the dangerous input
+			is not a malformed table but a well-formed one built against different contigs - which is
+			exactly what a wrongly sliced cohort table is. No overlap at all is an error; a partial
+			overlap is reported from both sides, since contigs missing from the table are left
+			unbinned while rows naming contigs the assembly does not have are the normal result of
+			slicing a cohort catalogue. A file whose first three columns are not
+			contigName/contigLen/totalAvgDepth, or that has no per-sample column, is refused too:
+			metaBAT2 accepts both and bins on whatever the columns happen to mean
+		the positional reads are now optional, so a run with neither reads nor --depth is caught in
+			the module with that choice spelled out rather than by argparse
+	New - "metawrap2 dereplicate", so a cohort's MAG count counts organisms and not bins
+		binning each sample separately recovers an abundant organism once per sample, and nothing
+			downstream knows the copies are copies: a count over the pooled folders counts bins, and
+			a quantifier handed near-identical genomes splits one organism's reads between them, so
+			every copy looks rarer than the organism is. The module takes any number of bin folders
+			with a repeated -b and returns one representative per cluster in dereplicated_genomes/,
+			symlinked unless --copy
+		identity comes from skani (triangle -E), which sketches rather than aligns and so scales to
+			the pairs a cohort produces; the clustering and the choice of representative are Python,
+			where they are unit-tested rather than inferred from a tool's behaviour. Its own env,
+			"metawrap2 install-env dereplicate", rather than a share of the quant_bins-coverm env,
+			which contains skani today only because CoverM depends on it
+		--ani defaults to 95, the threshold large MAG catalogues use for a species. Recorded as a
+			convention that makes the count comparable with a published one, not as a measurement of
+			ours; --ani 99 keeps strains apart. A pair must also share --min-aligned-fraction of a
+			genome, 10 by default and deliberately permissive, because 99% identity over 5% of two
+			genomes is a shared prophage rather than one organism. The larger of skani's two aligned
+			fractions decides, since a half-complete bin aligns almost fully to its complete
+			neighbour while the neighbour aligns only half back, and taking the smaller would refuse
+			to collapse exactly the duplicates this exists to collapse
+		the representative is the best-scoring member, read from the <bins>.stats.tsv bin_refinement
+			already leaves beside each folder, not the largest: a scored genome beats an unscored one
+			however large, because size says a bin is big and not that it is one organism, and a 6 Mb
+			chimera must not stand in for the clean 3 Mb copy. Scores are matched per folder, so two
+			samples' bin_001 cannot take each other's row. With no table anywhere the module says so,
+			names the consequence and falls back to size
+		clustering is single linkage, so it chains: a-b and b-c at 96% merge all three even when a
+			and c are not. Accepted because it never splits a genuine duplicate, which is the failure
+			dereplication exists to prevent, and because clusters.tsv records each member's
+			ani_to_representative - a member pulled in by chaining has none, which is what an
+			over-merged cluster looks like from outside. The property is pinned in a test so a switch
+			to complete linkage has to change it deliberately
+		which ANI, which aligned fraction, which skani preset and which linkage are the right
+			defaults are unmeasured here: there is no dereplicator comparison yet, so these are
+			inherited conventions and are labelled as such in the source
+	Fixed - a study sheet selecting a learned binner had its bins dropped before refinement
+		the driver's list of binners was a literal ("metabat2", "maxbin2", "concoct") written before
+			SemiBin2, VAMB and COMEBin existed, so binning ran them and refinement never saw them.
+			It now reads the binning module's own BINNERS, which is the only list of them
+		the quiet case was "--metabat2 --semibin2", which refined metaBAT2 alone. The loud one was
+			"--semibin2" by itself: with nothing recognised the driver fell through to the default
+			pair and pointed refinement at two directories no binner had created
+		refinement is now handed its bin sets as repeated --bins rather than -A/-B/-C, because the
+			letters stop at F and zipping three of them against six selected binners dropped the
+			rest without saying so. --bins is the form bin_refinement documents for a caller that
+			generates its own arguments, which is what the driver is
+	Changed - "metawrap2 run" bins with metaBAT2 and MaxBin2 by default, not three binners
+		CONCOCT comes out of the default set on measured cost. On cami2_gi it was 192 of the 213
+			cpu-hours a three-binner run spent binning, and the pair without it produced 1.03 clean
+			MAGs per cpu-hour against 0.35 - where clean means passing GUNC, so the 14 extra clean
+			MAGs the third binner finds are counted in its favour and it still loses by 3x
+		it is a default, not a capability: --concoct still selects it, bin_refinement still takes
+			three bin sets, and the three-binner arm is still in benchmarks/configurations.toml with
+			its numbers. What changed is only what runs when the sheet does not say
+		recorded with the caveat rather than as a clean win, because the arm that wins on cost is
+			also the dirtiest of the three consolidated sets measured (18.9% chimeric against 14.9%
+			and 6.7%), and MaxBin2 alone is the dirtiest input in the table at 38.8%. That is a
+			throughput decision taken knowingly, which is why gunc_pass_fraction is now a declared
+			metric of the comparison and why the second slot is treated as unsettled
+		the pair is asserted in tests against both the code constant and the variant the benchmark
+			marks as the incumbent, so the two records of one decision cannot drift apart - which
+			has happened before, on refinement_completeness, where the marked incumbent was a row
+			no module default matched
+	Added - "benchmark score" can run GUNC, so a binner comparison can be ranked on chimerism
+		asking for gunc_pass_fraction - by a comparison declaring it or by --metric - now runs GUNC
+			per bin set into <bin set>.gunc, beside CheckM's <bin set>.checkm, at score time and
+			outside the measured run for the same reason the other assessors are
+		which closes the gap that decided the CONCOCT question by hand: the binning module does not
+			run GUNC, bin_refinement runs it once on the set it returns, so a comparison of binners
+			had no chimerism column at all and three arms' rates had to be measured with a script
+			outside the harness. The numbers that overturned a conclusion were not reproducible by
+			anyone running the benchmark
+		it is the one assessor whose cost is worth stating before anyone turns it on: 3.2 to 5.7
+			CPU-hours per bin set at 48 threads on the arms measured here, dominated by diamond. A
+			set whose report is already present is skipped unless --reassess, and a missing GUNC
+			database is reported per variant rather than discovered an hour into a diamond run
+		CheckM and GUNC are now skipped per assessor rather than per bin set, which the old
+			one-file-stands-for-all check would have got wrong the moment a second per-set assessor
+			existed: every set that had been through CheckM would have been skipped before GUNC ran
+		the binner_set comparison declares the metric, so the chimera rates are part of the
+			comparison rather than a footnote to it. The cost is in the config beside it, because a
+			comparison that quietly costs a hundred cpu-hours to score is not a cheap half
+	Fixed - AMBER was skipped on any variant whose bins had already been through CheckM
+		the "already assessed" test was one CheckM table per bin set, standing in for every
+			assessor, and AMBER writes one table per variant rather than one per set - so scoring a
+			comparison for AMBER alone, on bins that had been through CheckM earlier, found nothing
+			outstanding and ran nothing. AMBER is now asked about on its own output
+	Fixed - the ranker added fractions together, so the variant measured on the most samples won
+		time_to_performance summed every metric across a dataset's samples, which is right for
+			bins recovered and CPU-hours spent and wrong for anything already normalised. Ten
+			samples at 0.9 purity came to 9.0, and the inflation was not the real problem: two
+			variants that scored identically were then separated by how many samples each had
+			been measured on, with the ten-sample one ranking first at 9.0 against 1.8
+		metrics whose declared unit is a fraction or an index are now averaged over the samples
+			that recorded them, and the cost side is still summed, because ten samples do cost
+			ten samples' CPU-hours. The mean is unweighted - a five-bin sample counts as much as
+			a two-hundred-bin one - so the table says when it took one, and Ratio carries the
+			sample count that went into the figure
+		GUNC's pass fraction is recorded per bin set like the CheckM and AMBER metrics, rather
+			than under one name for every report found. GUNC names the database in its filename
+			and never the bins, so the directory is the evidence: the final set's report goes to
+			work_files/gunc and anything else is suffixed with its path. No run produced two
+			reports, so nothing recorded so far changes
+	Added - bin_refinement reports what its size filter took
+		the per-bin "Skipping ..." lines never added up to a figure, so a filter that removes
+			41% of a bin set's sequence says nothing a user would read. Locating that drop cost
+			a separate AMBER run per refinement stage
+		the two ends are reported apart because they are different diagnoses: over the 20 MB
+			ceiling is a catch-all bin that could never have become a MAG under any threshold,
+			so losing it costs only the recall figure; under the 50 kb floor is a fragment,
+			which another binner in the set might have grown into something
+	Fixed - MaxBin2 was binning on depths that jgi_summarize_bam_contig_depths invented
+		"--noIntraDepthVariance" reads as a formatting flag - MaxBin2 wants one depth per contig
+			per sample and has no use for the variance columns - but in jgi 2.18 that code path
+			does not drop columns, it reports numbers that are not depths. It is gone, and
+			MaxBin2's per-sample abundance files are now split out of the same table metaBAT2
+			reads, taking the mean columns and skipping the variances next to them
+		measured by running the same two BAMs through the same tool with and without the flag.
+			On a 60-contig probe it zeroed 59 of the 60 contigs and gave the 60th a depth of
+			7867 where the real per-sample depths were 0.267 and 0.453 - and 7867 did not
+			reproduce, coming back 7874 on an identical rerun, so the value is uninitialized
+			memory. Handed a single BAM it returns 0 for everything
+		on the real 210,632-contig CAMI2 GI assembly with three samples it reported no coverage
+			for 57% of the contigs that have coverage in two of the three samples (37,453 of
+			65,375 and 32,557 of 56,369), gave ~25,000 contigs with no reads a coverage anyway,
+			and overstated others by up to 1.5e9x. In an EM over abundance a contig at depth
+			10^9 is not noise, it is the signal
+		nothing failed, which is why this needed finding on purpose: a table of wrong depths is
+			a well-formed abundance file, and MaxBin2 bins on composition too, so it kept
+			returning plausible bins. Every multi-sample MaxBin2 result produced before this is
+			affected, including the metabat2_maxbin2 and metabat2_maxbin2_concoct arms of the
+			binner_set comparison, which have to be re-run before they can settle anything
+		the fix also removes a jgi pass. jgi reads every BAM start to finish and is the
+			expensive part of the coverage stage; it ran once per binner for two tables that
+			were always meant to hold the same numbers. The table is now built once, in its own
+			checkpointed stage, so a --resume that adds MaxBin2 to a finished metaBAT2 run does
+			not rebuild it, and neither binner owns a file the other depends on
+		nine tests, including one that asserts a sample whose BAM is named "var.bam" is not
+			mistaken for a variance column, and one that runs metaBAT2 alone and then resumes
+			with MaxBin2 added, which has to realign and rebuild the table rather than bin on
+			one built from a different read set
+		what it was costing, measured by re-binning the CAMI2 GI assembly on a real table and
+			scoring both sets in one AMBER invocation: precision 0.6485 -> 0.8016, ARI 0.7079 ->
+			0.8747, F1 0.4228 -> 0.4598. The fixed run returns 129 bins over 349.8 Mbp where the
+			buggy one returned 188 over 384.0, and recall still goes up (0.3137 -> 0.3223) - so
+			the 59 bins and 34 Mbp that went were not genomes the fix lost, they were sequence
+			the invented depths were putting in the wrong bin
+	Fixed - reassemble_bins was recruiting reads that are not reads, and scoring unknowns as perfect
+		found while checking whether reassemble_bins could take --aligner too. Neither of its two
+			read filters had a test, which is how three defects in them survived; they have eight
+			now, and each one dies under the fix reverted
+		"did this record align" came off the presence of an NM:i: tag in both filters, which is a
+			claim about bwa rather than about SAM. It now comes off the FLAG's unmapped bit. The
+			proxy was load-bearing and not obviously wrong: an unmapped mate is not necessarily
+			parked at RNAME "*", because the spec lets it be placed at its mate's reference and
+			bwa does exactly that, so the reference name alone cannot tell the two apart
+		neither filter excluded secondary or supplementary alignments, and the long-read one is
+			where that was reaching SPAdes: "minimap2 -ax map-ont" emits secondary alignments by
+			default, writes their SEQ as "*", and sets NM on them, so the NM test let each one
+			through and it became a one-base read in the FASTQ a bin was reassembled from. A long
+			read crossing a repeat produces several
+		in the short-read filter the same omission lost whole pairs rather than adding junk ones:
+			a supplementary record carries the first-mate bit, so it displaced the real forward
+			mate and was then yielded against the next reverse mate - two different reads, paired,
+			and recruited on where neither of them aligned
+		a missing NM scored as 0, which is a *perfect* alignment, so a record whose edit distance
+			nobody wrote down was sorted into the strict set on the strength of it. An unknown is
+			now permissive-only, and the mismatch sum counts just the mates that aligned, so an
+			unmapped mate no longer contributes a flawless 0 to a half-aligned pair
+	Fixed - the refinement_completeness comparison marked a threshold nothing ships as its incumbent
+		"default = true" sat on c50_x10 while bin_refinement's DEFAULT_MIN_COMPLETION is 70,
+			so "benchmark list" reported "-c 50 -x 10 <- current default" and a results
+			table would have put the incumbent marker on a row no user's run produces.
+			That marker exists precisely so a proposed default is read next to the one it
+			would replace, which it cannot do while naming the wrong one
+		c70_x10 now carries it, and c50_x10 is written up as what it is: MIMAG's
+			medium-quality floor rather than the 70 metaWRAP used, and the looser of the two
+	Fixed - a missing opt-in conda env is reported before the work instead of after it
+		env_for had always checked that a module's own env exists, so a missing one was
+			reported in the first second of a run. Opt-in envs were read straight out of
+			OPTIONAL_ENVS with no such check, so the first sign of trouble was mamba
+			complaining about a missing prefix at whatever point in the pipeline the tool
+			was reached - which for a learned binner is after every read has been aligned,
+			and for GUNC is after CheckM1 and consolidation have both finished
+		optional_env_for does the same check for every opt-in env - the three learned
+			binners, CheckM2, GUNC, Bakta, GTDB-Tk and the alternative quantifiers - and
+			names the install-env command for the env it wants rather than the prefix path
+			mamba would have printed. With use_conda_envs = false it short-circuits, since
+			the tool is then expected on PATH and there is no env to miss
+		the message names what asked for the env, and the caller passes that rather than it
+			being derived from the env's key, because the obvious derivation of "--" + key
+			is wrong for half of them: GUNC runs by default and is turned *off* with
+			--skip-gunc, and CoverM is selected as --quantifier coverm. A derived message
+			would have told users to pass --gunc and --coverm, neither of which exists. A
+			test walks every call site's phrase and checks each flag in it against the
+			parser that would have to accept it
+		binning resolves all of its learned binners' envs in main(), before the alignment
+			stage, rather than at the point each binner runs. That placement is the whole
+			point of the fix: checking at the point of use would still fail fast relative
+			to nothing, but it would do so an hour into the run
+	Fixed - a missing env manager is reported before the work instead of at the first tool
+		running anything inside a conda env needs two things to hold: the env has to exist,
+			and the manager that enters it has to be findable. Only the first was checked
+			up front. The second was checked where the argv is built, which is not the
+			start of a run but the first step that happens to need an env
+		bin_refinement runs Binning_refiner in the host interpreter, so with mamba off PATH
+			a 3-binner refinement built all four combinations - seven minutes of real work
+			on a CAMI2 arm - and then printed "mamba is not on PATH" at CheckM. Found that
+			way, while measuring what refinement costs each binner_set arm
+		env_for and optional_env_for both check it now, so the message arrives in the first
+			second for a module's own env and before the work for an opt-in one. The
+			message itself was already right; the only thing wrong with it was when the
+			user got to read it. Under --dry-run it is skipped, since nothing is executed
+	Fixed - the hybrid assembly selects unassembled reads by the unmapped flag, not by a bwa tag
+		the reads metaSPAdes left behind were the records with no "NM:i:" tag, which is a claim
+			about one aligner rather than about SAM: bwa writes an edit distance on every
+			aligned record, so its absence stood in for "did not align". minimap2 is
+			MetaWrap2's measured default aligner everywhere else, and an aligner that omits
+			the tag would have made every mapped read look unmapped - failing by handing
+			MEGAHIT the entire read set rather than by stopping
+		it reads FLAG 0x4 now, and the output is byte-identical on real bwa data: 33,332,411
+			records from a CAMI2 sample, zero records classified differently in either
+			direction. So this changes no existing result; it stops the selection depending
+			on which aligner produced the stream
+		the unfiltered mode also drops secondary and supplementary records (FLAG 0x100/0x800),
+			which are further alignments of a read already emitted rather than further
+			reads, and a header line with eleven or more tab-separated fields - an @CO
+			comment - is no longer emitted as a read, which it was
+		reading the flag costs 650 against 1041 MB per CPU-second, because the tag test could
+			reject a record on a substring search without splitting it. Spent knowingly:
+			the aligner upstream produces SAM at 26 MB/s (bwa) to 146 MB/s (minimap2) on
+			this hardware, so the converter keeps over 4x headroom and is not what the pipe
+			waits on. "samtools fastq -f 4" says the same thing and was measured too - 711
+			MB per CPU-second, and it would put samtools in an env with no other use for it
+	Changed - the unix-socket path limit is handled for every tool that takes a temp directory
+		the shortening that CheckM1 needed moved from metawrap2.checkm to
+			metawrap2.utils.short_tmpdir, because SemiBin2 has the same constraint for the
+			same reason: --tmpdir there exports TMPDIR, and anything that then binds a
+			multiprocessing listener socket inside it has 107 characters to work with
+	Fixed - CheckM1 no longer dies with a bare "EOFError" when the output path is deep
+		"checkm lineage_wf --tmpdir X" makes CheckM set tempfile.tempdir to X for the whole
+			process, and the first thing it does is mp.Manager().dict(), whose listener
+			socket is therefore bound inside X. Linux allows a unix-socket path 107
+			characters; MetaWrap2 passes "<bin set>.tmp", so a 90-character output path left
+			no room, bind() failed in the Manager's child, and the parent raised EOFError
+			with nothing in it about paths. It cost a whole benchmark comparison its
+			bins_near_complete and bins_high_quality metrics, on every variant
+		the temp directory still lives beside the bins - CheckM's tree stage writes GBs and
+			they belong on the filesystem the caller chose, not on whatever /tmp is - but
+			when that path is too long CheckM is handed a short symlink to it instead.
+			bind() resolves the symlink, so the socket name is short and the bytes still
+			land where they were going. The link is named from a hash of the real path, so
+			a --resume reuses it rather than leaking one per attempt
+	Changed - "metawrap2 benchmark score --checkm2"
+		"score --checkm2" scores bin quality with CheckM2 rather than CheckM1. The assessor
+			had supported CheckM2 all along and nothing on the command line could ask for
+			it, which is worth having for its own sake: CheckM1's pplacer stage wants
+			roughly 40 GB per thread, and CheckM2 predicts completeness from a neural net
+			and needs a fraction of that. AMBER metrics are unaffected either way - they
+			score against a gold standard, not against marker genes
+	Changed - bowtie2 retired; blobology maps with minimap2 and shares binning's aligner registry
+		bowtie2 was blobology's only aligner and the last module using it. blobology maps
+			reads back for the same reason binning does - per-contig abundance, here for the
+			plot's y-axis - so the aligner benchmark already answered it: bowtie2 cost what
+			bwa cost (7.44 cpu-hours, 2.58 of that building the index alone) and agreed with
+			bwa less closely than minimap2 did (Pearson 0.825). No input makes it the right
+			answer, so it is dropped rather than demoted
+		the registry moved to metawrap2.aligners, shared by binning and blobology. Two
+			modules asking the same question had two answers that could drift; now there is
+			one, and blobology gained --aligner (minimap2 default, bwa and bwa-mem2 offered)
+			for free. Its env carries all three, so --aligner needs no second install
+		blobology does not sort its BAM, deliberately: gc_cov_annotate reads it with a plain
+			samtools view and sums aligned span per contig, so record order is irrelevant
+		its per-sample BAM is no longer named <sample>.bowtie2.bam. An output filename should
+			not carry the name of a tool the user can now change with a flag
+		bowtie2 stays in read_qc, where bmtagger genuinely needs it for host removal
+	Changed - no module writes a SAM to disk any more, and binning discards its BAMs
+		binning already piped its aligner into samtools sort; assembly and blobology did not.
+			blobology was the worse of the two - it wrote a full uncompressed SAM per sample,
+			converted it to BAM, and never deleted the SAM, so a multi-sample blobplot left
+			every one of them behind permanently. assembly's hybrid path wrote the aligner's
+			whole SAM, filtered it into a second SAM, converted that, then deleted both:
+			roughly 25 GB of text at peak to produce one FASTQ. Both now stream
+		binning deletes the per-sample BAMs, their .bai indexes and the aligner's index of
+			the assembly once every requested binner has taken its depth table, since nothing
+			downstream reads them - 0.6 GB of 1.0 GB on one real sample, and ~5 GB per sample
+			of BAM on a cohort, against the few MB of TSV that is all a binner wanted from it.
+			The aligner index is the easy one to miss: minimap2's .mmi for a 154 MB assembly
+			is 479 MB, larger than the BAM next to it. --keep-bams keeps them
+			deleting them clears the align_reads checkpoint, so a later --resume that adds a
+			binner realigns instead of resuming into a stage whose inputs are gone
+		every new pipe carries set -o pipefail. samtools view and the FASTQ converter both
+			exit 0 on a truncated stream, so without it an aligner that died halfway would
+			read as a clean run - a blobplot drawn from partial coverage, or a hybrid
+			assembly built from a slice of the unassembled reads, with nothing in the log
+	Changed - binning measures coverage with minimap2 by default (was bwa), --aligner to choose
+		none of the three binners reads an alignment. They read coverage - metaBAT2 and MaxBin2
+			through jgi_summarize_bam_contig_depths, CONCOCT through concoct_coverage_table.py -
+			so the BAM is a temporary file on the way to a depth vector and the aligner is an
+			implementation detail of a coverage estimator. That is the question that was measured:
+			not which aligner maps best, but which route to the depth vector is cheapest for depth
+			the binners treat the same way
+		one CAMI2 GI sample mapped back to a 210,632-contig assembly, 32 threads, index and map
+			timed separately because an index is built once per assembly and a map runs once per
+			sample. Agreement is against bwa, over the contigs binning actually reads (>=1000 bp):
+				              Pearson  Spearman  index CPU-h  per-sample  total CPU-h  peak RSS
+				minimap2       0.9461    0.9841      0.009        1.359       1.368      6.7 GB
+				bwa            1.0000    1.0000      0.223        7.551       7.774      9.8 GB
+				bwa-mem2       1.0000    1.0000      0.075        5.123       5.199     23.6 GB
+				bowtie2        0.8247    0.9751      2.581        4.856       7.437      6.8 GB
+		minimap2 is deliberately not the closest to bwa here - it ranks contigs almost identically
+			(Spearman 0.984) but differs on magnitude (Pearson 0.946, L1 0.183). Agreement with
+			bwa is not the objective, though; bwa is the incumbent, not the truth. So the question
+			was pushed through to the bins, which is the only place a depth difference can be
+			shown to matter. Same metabat2, same flags, AMBER against CAMI2's own
+			contig-to-genome truth:
+				              F1 (bp)  recall  precision   ARI (bp)
+				minimap2       0.4519   0.3118   0.8204     0.0609
+				bwa            0.4493   0.3103   0.8133     0.0607
+			minimap2 comes out fractionally ahead on all four. The differences are noise and the
+				honest reading is a tie - a tie for a fifth of the CPU, with no trade-off left to
+				adjudicate, which is rarer than it sounds
+		"--aligner bwa" restores the previous behaviour exactly. "--aligner bwa-mem2" is offered
+			because it is bit-identical to bwa on the depth vector (Pearson 1.0000, L1 0.000, the
+			same 22,929 non-zero contigs) at 1.5x the speed - not the advertised 2-3x - but it
+			wants 23.6 GB of RAM against bwa's 9.8 and a 5.3 GB index against 1.7 GB. That is a
+			trade worth opting into and a poor one to impose
+		bowtie2 is dropped rather than demoted. It was listed as a binning dependency and the
+			module never invoked it; measured, it costs what bwa costs, spends 2.58 CPU-hours of
+			that on index building alone, and agrees with bwa less closely than minimap2 does
+		the caveat that keeps this honest: one sample against CAMI2's pooled gold-standard
+			assembly, which is far less fragmented than a real metaSPAdes assembly, and
+			fragmentation is exactly what separates aligners. Worth re-measuring there
+		two cheaper routes were measured and rejected, both instructive. "strobealign --aemb"
+			skips the BAM and writes per-contig depth directly, 21x cheaper than bwa - but
+			per-contig depth is all it can write, and the intra-contig depth variance metaBAT2
+			uses as a binning signal needs per-base coverage, which is exactly what --aemb
+			declines to compute. "fairy" does not align at all, sketching k-mers instead, and is
+			648x cheaper - and scored highest of everything on raw F1 per CPU-hour, which is what
+			a decision rule of accuracy-per-cost says to pick. It is still the wrong answer: both
+			routes are per-contig only, and CONCOCT cuts contigs into 10 kb fragments and needs
+			per-fragment coverage out of an indexed BAM, so neither can feed it at all. A ratio
+			needs a fidelity floor under it or it will eventually recommend measuring nothing
+		fairy's --minimum-ani default of 95 was checked against the same suspicion that moved
+			sylph's, and the suspicion was wrong: agreement with bwa degrades monotonically as the
+			threshold rises (Pearson 0.237, 0.223, 0.194 at 95/97/99), the opposite of sylph's
+			behaviour, so fairy's own default is the right one. Recorded because a refuted
+			hypothesis is worth as much here as a confirmed one
+	Fixed - a crashed aligner no longer reads as a successful run
+		binning now pipes the aligner straight into "samtools sort" instead of writing the SAM
+			out and deleting it a minute later, which was ~25 GB per sample of uncompressed text
+			and the module's largest transient footprint
+		the pipe needs "set -o pipefail": bash reports only the last command's status, and
+			samtools sort fed a truncated stream still exits 0 and still writes a BAM. Without it
+			an aligner that died of OOM produced "BINNING PIPELINE SUCCESSFULLY FINISHED!!!" and
+			an empty coverage table. There is a test that fails if the flag is removed
+		reassemble_bins had the same defect on its two alignment pipes, where the read-splitter
+			on the right-hand side exits 0 on a truncated stream - so a half-finished alignment
+			would have reassembled every bin from a silently truncated read subset
+	Changed - read_qc trims with fastp by default (was Trim Galore)
+		measured over all 10 CAMI2 GI samples (333M read pairs each way, one 96-thread budget):
+			fastp kept marginally more reads (+0.03%), bases (+0.83%) and Q30 bases (+0.40%) for
+			5.8% fewer CPU-hours and 29% less wall time. It wins on both halves of the ratio, so
+			no trade-off had to be adjudicated - the quality difference is small enough to call a
+			tie and the cost decides
+		"--trimmer trim-galore" restores the previous behaviour and is fully supported. It is
+			the better choice on one axis: it peaks at 0.1 GB of memory where fastp takes 1.3 GB
+		no claim is made about MAG yield. A trimming difference this small is unlikely to
+			survive assembly and binning, and unlikely is not measured
+	Unchanged, now on evidence - assembly still defaults to MEGAHIT
+		measured on three CAMI2 GI samples co-assembled (50M read pairs, one 96-thread budget):
+			metaSPAdes returned a 38% longer N50 (12,874 bp vs 9,325) for 3.2x the CPU-hours
+			(245 vs 77) and 9.7x the peak memory (140 GB vs 15 GB), and assembled 14% fewer
+			bases in total (197 Mbp vs 228 Mbp)
+		so MEGAHIT keeps the default on the ratio (120.6 bp of N50 per CPU-hour against 52.6),
+			and on the plainer argument that 140 GB of resident memory is more than an ordinary
+			workstation has, and a default that runs out of memory is not a default
+		"--metaspades" is unchanged and is the right flag when contiguity is the point; with
+			"--megahit" as well it still runs the hybrid pipeline
+		no claim is made about MAG yield: binning was not run on the two assemblies. Unlike the
+			trimmer's 0.8%, a 38% N50 difference plausibly would survive binning - plausibly is
+			still not measured
+	New - GUNC scores the final bins for chimerism
+		bin_refinement runs GUNC on the refined set and adds gunc_css/gunc_pass to its
+			.stats.tsv. A bin assembled from halves of two genomes has a complete and
+			uncontaminated-looking marker set, so CheckM calls it good; GUNC maps genes against a
+			reference taxonomy and asks whether they agree about where the bin sits
+		bins are annotated, never dropped - the call belongs to whoever reads the table, and a
+			bin GUNC could not assess is left blank rather than recorded as passing
+		runs by default; --skip-gunc opts out, along with its 6.7 GB database
+			("metawrap2 install-db gunc", "metawrap2 install-env bin_refinement-gunc")
+	New - "metawrap2 install-db checkm2" installs CheckM2's database
+		it was the one database the installer knew nothing about: --checkm2 told the user to run
+			"checkm2 database --download" themselves and to point CHECKM2DB at the result. It is
+			now a catalog entry like the others, fetched and recorded with a name rather than by
+			hand
+		the download is left to CheckM2 itself, because the file sits on a versioned Zenodo record
+			that CheckM2 pins - a URL of our own goes stale the next time CheckM2 is upgraded
+		the recorded path is passed to "checkm2 predict" as --database_path, so a run does not
+			depend on what state the conda env was left in. With no path configured, CheckM2 still
+			falls back to its own, which is what a copy installed by hand relies on
+		it is not CheckM1's database, and having one does nothing for the other - the two entries
+			say so, since both are commonly called "the CheckM database"
+	New - "quant_bins --quantifier coverm", a second way to ask what a bin's abundance is
+		CoverM works in genome mode: it maps each sample's reads against the bins themselves, so
+			there is no pseudo-transcriptome to index and no per-contig count to collapse. One
+			invocation covers every sample, since --coupled takes the pairs repeatedly and returns
+			the whole genome x sample table at once
+		the numbers are not interchangeable with salmon's, which is why this is a flag and not a
+			substitution: salmon's cell is a length-weighted median contig coverage, CoverM's is
+			relative abundance as a percentage of the sample, so a CoverM row sums to at most 100
+			and a salmon row has no such ceiling. Both write bin_abundance_table.tsv and the same
+			heatmap, and everything downstream is unchanged - but a table from one must not be
+			compared against a table from the other
+		which quantifier is the default is settled by measurement, not by which arrived first.
+			See the sylph entry below for the three-way comparison and the scoring that made it
+			possible
+		the mapper is pinned to strobealign rather than left to CoverM. It is CoverM's own 0.8
+			default, but it was not always, and a mapper swapping itself out underneath a user
+			changes the numbers and not just the runtime
+		--min-covered-fraction stays at CoverM's 10%, because a handful of reads landing on a
+			conserved gene is not evidence that a genome is present
+		the bins are named to CoverM in a list file instead of with --genome-fasta-directory and
+			-x. A single extension has to be guessed at otherwise, a wrong guess yields an empty
+			genome set rather than an error, and a folder holding both .fasta and .fasta.gz bins
+			cannot be expressed at all
+		CoverM has its own opt-in env, because it brings a mapper and an ANI stack the salmon env
+			has no use for: "metawrap2 install-env quant_bins-coverm", once
+	New - "quant_bins --quantifier sylph", abundance without alignment
+		sylph (Shaw & Yu, Nat Biotechnol 2025) sketches the bins and the reads into k-mer sketches
+			and profiles one against the other, so nothing is aligned and nothing is indexed in the
+			mapping sense. The cost of profiling therefore barely grows with sequencing depth,
+			which is the axis on which a read aligner has to pay for every extra read
+		its numbers are on the same scale as CoverM's and not as salmon's: Sequence_abundance is a
+			percentage of the sample. Taxonomic_abundance, sylph's other column, divides out genome
+			length to give a fraction of organisms - a different and equally valid number, but not
+			one salmon's coverage or a read-to-genome truth can be compared against, so the table
+			is filled from Sequence_abundance
+		a bin sylph does not detect is a zero in the table, and that zero means something narrower
+			than CoverM's: "not detected above --min-ani", where CoverM's means "mapped, but under
+			--min-covered-fraction of the genome was covered". sylph omits an undetected genome
+			from its output entirely, so the table is pivoted against the genome list rather than
+			against the profile, and every bin appears whether it was detected or not
+		the genome list CoverM is given is the same file sylph's --gl takes, and the read pairing
+			is the same pairing, so all three quantifiers see one set of bins and one set of samples
+		sylph ships in the module's own env alongside salmon, because it is the default and a
+			default that needs a second install command is not a default
+	Changed - sylph replaces salmon as the default quantifier, measured not assumed
+		76 bins from the CAMI2 GI gold-standard assembly, quantified across three samples against
+			the read-level truth below, 32 threads each:
+				                Spearman  Pearson    L1   CPU-hours  peak RSS  Spearman/CPU-hour
+				sylph             0.868    0.811   0.555     0.19      1.3 GB        4.67
+				salmon            0.827    0.959   0.331     1.08      7.4 GB        0.77
+				CoverM            0.803    0.952   0.419     2.37     11.6 GB        0.34
+		sylph orders the bins better than either aligner while costing a sixth of what salmon does
+			and a twelfth of CoverM, so it wins on accuracy per CPU-hour by a wide margin and on
+			rank accuracy outright - which is the metric an abundance table is usually read for
+		what it does not win is magnitude. salmon's estimates correlate far better linearly and sit
+			closer as a composition, so "--quantifier salmon" is the right choice when the numbers
+			themselves are the point - a ratio between two bins rather than an ordering. It stays in
+			the same env, so switching costs no install
+		CoverM is now the odd one out: slowest, hungriest, and no more accurate than salmon. It stays
+			available, and stays opt-in
+	Changed - sylph's --minimum-ani is now a flag, --min-ani, and defaults to 99 rather than 95
+		this was the setting that moved the numbers most, and sylph's own default was wrong for this
+			job. At 95, four bins whose genomes are absent from a sample entirely took 55% of the
+			abundance reported for it - relatives close enough to match at what is a species-level
+			threshold applied to a strain-level question
+				ANI    Spearman  Pearson    L1   misattributed mass
+				 95      0.758    0.678   0.832       55%
+				 97      0.823    0.744   0.728       44%
+				 99      0.868    0.811   0.555       25%   <- default
+				 99.5    0.857    0.800   0.536       25%
+				 99.9    0.696    0.840   0.448       30%   (13 of 29 present bins missed entirely)
+		99 is the turning point: past it the threshold discards bins that really are there and rank
+			accuracy collapses even as the surviving estimates sharpen
+		it is a flag rather than a constant because these bins came off a pooled gold-standard
+			assembly and are near-complete; bins off a fragmented real assembly match their own
+			genome less tightly, so a strict floor could cost more there than it did here
+		below 95 the module warns. sylph itself says a lower value "will give inaccurate results" -
+			its containment statistics are calibrated for same-species comparison, so going lower
+			changes what the number means rather than how sensitive it is
+		sylph's --estimate-unknown was measured too and changed nothing at any threshold, so it is
+			not wired up
+	New - "benchmark" scores abundance tables, so the quantifiers can be compared at all
+		metawrap2.benchmark.abundance holds a bins x samples truth built from CAMI2's own
+			reads/reads_mapping.tsv.gz, which says which genome every read in a sample came from.
+			That is an abundance per genome; turning it into an abundance per bin is the step that
+			needed thought
+		a bin is expected to account for its genome's read fraction times its own share of that
+			genome's assembly, because reads from the parts of the genome that did not make it
+			into the bin cannot be attributed to the bin by any quantifier however good. Dropping
+			the second factor scores a 60%-complete bin as an underestimate and marks the
+			quantifier down for the binner's incompleteness
+		the metrics are scale-free, because the three quantifiers report three different units and
+			a metric that was not would rank them by which unit they happen to use: Spearman and
+			Pearson correlation across bins within a sample, averaged over samples, plus an L1
+			distance between the two compositions after both are renormalised to sum to 1.
+			Spearman is the one to lean on - it asks whether the bins were put in the right order,
+			which is what an abundance table is read for
+		samples are averaged, never pooled. Pooling puts a deep sample's bins and a shallow one's
+			on one axis, where the correlation measures the difference between the samples
+		a bin whose genome is absent from a sample expects zero, and that is a real expectation:
+			reporting a genome that is not there is an error worth counting
+	Fixed
+		scoring a binning comparison against CAMI2 could not have worked at all: the contig-to-genome
+			truth was keyed on the mapping's anonymous_contig_id, and CAMI2's own gold-standard
+			assembly does not use those names - it names a contig after the region it was cut from
+			and leaves the pieces of that name in the mapping's contig_id, start_position and
+			end_position columns. On the gastrointestinal challenge not one of 210,618 anonymous ids
+			matched the 210,633-contig assembly, so every comparison would have died with "yielded
+			no contig-to-genome pairs" and the dataset would have looked as though it disagreed with
+			itself. The name the assembly uses is now reconstructed where the anonymous id does not
+			match (210,618 of 210,618), and the anonymous id is still preferred where it does, so a
+			dataset that uses them is unaffected
+		a benchmark on CAMI2 would have measured the wrong file: reads/ holds the 10 GB
+			anonymous_reads.fq and a 3 MB subsample_0.fq debugging extract under the same sample
+			directory, so a suffix scan found both and the second overwrote the first. The
+			dataset's declared reads_glob is now used (it was parsed and ignored), and two files
+			resolving to one sample label is a hard failure rather than a silent overwrite
+		a run launched without conda on PATH - as nohup, cron and batch schedulers do, since
+			they do not read ~/.bashrc - died inside subprocess with "FileNotFoundError: mamba",
+			which reads as the tool being missing rather than the thing meant to find it. It now
+			stops when the command is built, naming both ways out, and "benchmark run" checks once
+			up front instead of recording one identical failure per variant
+		"benchmark run --dry-run" deinterleaved 106 GB of reads before printing the plan it was
+			asked for; preparing the reads now honours the flag
+		an assembler comparison could not run at all: the harness passed the cohort's reads as
+			"-1 a_1.fastq,b_1.fastq", a form "metawrap2 assembly" does not accept, so both variants
+			exited in under a second with "does not exist" and the results table came out empty.
+			The selected samples are now concatenated into one pair first - built once and shared by
+			every variant, which is also how "metawrap2 run" co-assembles a study
+		"metawrap2 install-env <name>" raised a KeyError traceback for exactly the opt-in env
+			names the docs tell people to install (bin_refinement-gunc, bin_refinement-checkm2,
+			benchmark-amber), because an opt-in env is named after its yaml and that is not a key
+			of MODULE_ENVS
+		"install-env --force" never rebuilt anything. Two independent reasons: --force is also a
+			global flag, so the CLI stripped it before the installer's parser saw it and the
+			installer reported "already exists; skipping (use --force to recreate)" to someone who
+			had just typed it; and "mamba env create --force" does not exist in mamba 2.x, where the
+			command is micromamba's and rejects the flag outright. Recreating now removes the env
+			first, and the global spelling reaches the installer
+		a tool running inside a conda env could import packages from the user's own ~/.local
+			instead of the ones its env pins, because user site-packages come first on sys.path.
+			AMBER died on it - its env pins matplotlib below 3.9 for an API it calls, and a
+			matplotlib 3.11 in ~/.local was imported instead. Env-wrapped commands now run with
+			PYTHONNOUSERSITE=1; commands run without an env are left alone, since a tool the user
+			pip-installed there is then the tool they meant to run
+		one zero-length record in the assembly ended a binning run hours in, naming neither the file
+			nor the record: bwa indexes it as "@SQ ... LN:0" and samtools then refuses the entire
+			alignment. CAMI2's gold-standard assembly for the gastrointestinal challenge ships two, so
+			every variant of the binner comparison died at the first sort. Records with no sequence are
+			now left out of the working copy of the assembly, and how many were left out is said
+		a comparison could not be re-run after a failure. Each variant is its own process, so
+			"metawrap2 --force benchmark run" applied to the harness and to nothing it started, and every
+			variant stopped at "already contains a MetaWrap2 run" - leaving hand-deleting five directories
+			as the only way forward. Variants are now spawned through the CLI, the same way
+			"metawrap2 run" spawns a study's steps, so --force and --resume reach them
+		an interrupt arriving in the two statements between spawning a tool and waiting for it left
+			that tool running with every thread it had been granted, orphaned by the run that was
+			exiting - so the next thing started competed with 96 threads of a run nobody could see
+		a run started in the background could not be interrupted at all. A shell sets a background
+			job's SIGINT to SIG_IGN and Python leaves an inherited SIG_IGN in place, so "kill -INT" on a
+			run launched with "&" or nohup - which is how a long run is launched - did nothing, silently.
+			SIGINT is taken over when, and only when, it was inherited ignored
+		every quant_bins abundance table with more than one bin held wrong numbers. The per-sample
+			accumulators were reset through a bin name left over from the inner loop, so exactly one
+			bin - whichever contig came last in the counts file - was ever cleared, and it was cleared
+			partway through the pass that reads it. Every other bin therefore kept accumulating, making
+			sample N's cell the median over samples 1..N, and the one bin that was cleared reported NaN
+			in every sample. On two bins and two samples with the reads built so that each bin belongs
+			entirely to one of them, the table came out as "bin_1 1000000 500000" / "bin_2 nan nan"
+			where the right answer is "bin_1 1000000 0" / "bin_2 0 1000000". The weighted list is now
+			built fresh per sample. A bin of only sub-kilobase contigs still reports NaN - that part
+			was always intended, and is now the only thing NaN means
+		a bin folder that had been through another module could not be quantified: the salmon path
+			walked it with a bare listdir and handed every entry to the FASTA reader, so a checkm/ or
+			gunc/ subdirectory raised IsADirectoryError naming only the path, and a .stats.tsv table
+			was read as an empty bin. Only the FASTA files are read now
+		gzipped bins were rejected before either quantifier started, although both read compression
+			without noticing it - the directory check matched .fa/.fasta/.fna/.fas literally while the
+			sequence readers go through smart_open and CoverM reads a gzipped genome FASTA directly.
+			quant_bins accepts .gz bins; the modules that hand a bin straight to prokka or CheckM1 do
+			not, since there the failure would only move into the middle of the run
+		the two quantifiers could label the same bin two different ways, leaving tables that cannot be
+			joined or compared. The salmon path stripped the last dotted component, which leaves
+			"bin_001.fasta" for bin_001.fasta.gz where CoverM says "bin_001"; a bin file with no
+			extension at all became an empty row key, and two of them collided into one row. Both
+			paths now label rows with one shared function
+		"metawrap2 install-env <name>" reported "OK 0/0 tools OK" for every opt-in env after building
+			it - a verification that probed nothing. doctor resolved the yaml name an opt-in env is
+			named after (quant_bins-coverm) as a module it had never heard of, so it had no env to look
+			in and no tools to look for. It affected amber, checkm2, gunc, gtdbtk, bakta and coverm
+		"mamba is not on PATH" was printed underneath a traceback, so the one error written to
+			explain a PATH problem in two sentences - with both ways out named - read as a crash
+			instead. It is a user's environment, not a bug, and is now reported the way a bad config
+			key already was
+		the sample columns of a salmon abundance table could come out in a different order on two
+			identical runs, because they were written in the order an unsorted listdir returned the
+			count files. Labels always travelled with their values, so no cell was ever wrong - but a
+			table that changes shape between runs is not one anybody can diff
+
 MetaWrap2 v=2.0.1
 	Phase 1 foundation work: a pipeline driver, verified resume, a durable run history, one
 		naming convention for bins, and a one-command install. No scientific behaviour

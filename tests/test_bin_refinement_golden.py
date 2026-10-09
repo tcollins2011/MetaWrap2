@@ -25,7 +25,7 @@ import pytest
 from metawrap2 import checkm as checkm_mod
 from metawrap2.constants import BIN_EXTENSION
 from metawrap2.io.seqio import contig_id, iter_fasta
-from metawrap2.modules import bin_refinement
+from metawrap2.modules import _common, bin_refinement
 
 # --- a deterministic stand-in for CheckM --------------------------------------------------
 
@@ -69,6 +69,9 @@ def _fake_run_checkm(bins_dir, **kwargs):
 def fake_checkm(monkeypatch):
     monkeypatch.setattr(bin_refinement._checkm, "run_checkm", _fake_run_checkm)
     monkeypatch.setattr(checkm_mod, "run_checkm", _fake_run_checkm)
+    # CheckM is faked, so nothing enters a conda env - but env_for checks that the env manager is
+    # findable before the module does any work, and mamba is not on PATH in a non-login shell.
+    monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
 
 
 # --- input bin sets -----------------------------------------------------------------------
@@ -118,7 +121,9 @@ def _write_bin_sets(tmp_path, which):
 def _run(tmp_path, letters, extra=()):
     dirs = _write_bin_sets(tmp_path, letters)
     out = tmp_path / "refined"
-    argv = ["-o", str(out), "-t", "1", "-m", "8", "-c", "50", "-x", "10"]
+    # --skip-gunc: this test pins refinement's own output, and GUNC needs a 6.7 GB reference
+    # database that has nothing to say about whether the layout is stable.
+    argv = ["-o", str(out), "-t", "1", "-m", "8", "-c", "50", "-x", "10", "--skip-gunc"]
     for flag, letter in zip(("-A", "-B", "-C", "-D", "-E", "-F"), letters):
         argv += [flag, dirs[letter]]
     argv += list(extra)

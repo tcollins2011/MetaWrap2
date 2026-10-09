@@ -11,34 +11,65 @@ Sections are organized **by area**. Every item carries a complexity tag:
 - `[major]` — architecture, new data types, ML, or scaling. Multi-release.
 
 A complexity-ordered [roadmap](#suggested-roadmap) is at the end, and a [references](#references)
-list at the very bottom.
+list at the very bottom. Items that have since graduated are listed under
+[Already shipped](#already-shipped) and removed from their sections, so what is left here is what is
+genuinely not built.
 
 > **On citations.** References were compiled from established knowledge of these tools, not a live
 > literature pull, and give author/journal/year rather than DOIs. Verify the exact citation,
 > version, and current best practice before using this document formally — tool versions and
 > benchmarks move fast (e.g. GTDB and CheckM2 databases, HUMAnN reference builds).
 
+## Already shipped
+
+Graduated out of this list; see [docs/benchmarks.md](docs/benchmarks.md) for what each was measured
+to be worth.
+
+| | What it does | How to ask for it |
+|---|---|---|
+| fastp | read trimming, single pass, threads past cutadapt's ceiling | default; `--trimmer trim-galore` for the old one |
+| SemiBin2 | self-supervised learned binner | default (`--preset default`), or `--semibin2` |
+| VAMB | variational-autoencoder binner | `--vamb` |
+| COMEBin | contrastive learned binner, the best catalogue measured | `--comebin`, or `--preset slow` |
+| GPU training for all three | one switch instead of per-tool flags | `--device {cpu,cuda,auto}` |
+| DAS Tool | single-pass consolidation, an alternative to hybridising | `--consolidator dastool` |
+| CheckM2 | neural-net completeness, no pplacer memory wall | `--checkm2` |
+| GUNC | chimerism the marker-gene checks cannot see | on by default; `--skip-gunc` |
+| GTDB-Tk | standardised bin taxonomy | `--gtdbtk` |
+| Bakta | modern annotation | `--bakta` |
+| CoverM | per-genome relative abundance | `--quantifier coverm` |
+| sylph | alignment-free bin abundance from k-mer sketches | default |
+| skani | ANI dereplication across a cohort | `metawrap2 dereplicate` |
+| fairy | alignment-free coverage estimation | `--coverage fairy` |
+| Cross-sample coverage | one depth table, N alignments rather than N² | `metawrap2 coverage` |
+| Per-sample assemble, bin, then dereplicate | the strategy most catalogues are built with | `metawrap2 cohort` |
+| A benchmark harness | comparisons declared as data, results committed | `metawrap2 benchmark` |
+
+A note on dRep, which this list asked for: `metawrap2 dereplicate` implements the same idea - a
+fast pre-filter, then ANI within clusters, then one representative per cluster by quality - with
+skani doing both stages rather than Mash then gANI. dRep itself is not wrapped.
+
 ## Guiding principles
 
-- **Opt-in, never silent.** New tools/methods arrive behind a flag; defaults keep reproducing
-  today's results until a user opts in.
+- **Opt-in until measured.** New tools arrive behind a flag. A default only moves on a
+  measurement committed to `benchmarks/results/`, and the move is stated in the changelog and in
+  the migration notes - never silently.
 - **Flat and legible.** New capability is a new module or a command block in an existing module —
   not a framework to learn.
-- **Reproducible.** Each tool gets a pinned per-module conda env, a database fingerprint, and a
-  line in the run provenance.
+- **Reproducible.** Each tool gets a pinned conda env with a committed lockfile, a database
+  fingerprint, and a line in the run provenance.
 - **Standards-aware.** Prefer outputs and quality tags matching community standards — MIMAG MAG
   quality (Bowers et al., *Nat Biotechnol* 2017), GTDB taxonomy (Parks et al., *Nat Biotechnol*
   2018/2020), MIxS metadata (Yilmaz et al., *Nat Biotechnol* 2011).
-- **Benchmarked, not assumed.** Pair each new method with a small mock-community / CAMI2 benchmark
-  (Sczyrba et al., *Nat Methods* 2017; Meyer et al., *Nat Methods* 2022) and record it.
+- **Benchmarked, not assumed.** Declare each new method as an arm in
+  `benchmarks/configurations.toml` and run it against a known-truth dataset (Sczyrba et al.,
+  *Nat Methods* 2017; Meyer et al., *Nat Methods* 2022). Quality and cost are reported side by
+  side, never divided into each other.
 
 ---
 
 ## Read QC and preprocessing
 
-- `[low]` **fastp** — single-pass adapter auto-detection, quality/polyG trimming, dedup, and a
-  JSON/HTML report; much faster than the Trim-Galore/Cutadapt path. *(Chen et al., Bioinformatics
-  2018; Chen, iMeta 2023.)*
 - `[low]` **Modern host removal** — a bowtie2/minimap2 scrub against T2T-CHM13 (Nurk et al.,
   *Science* 2022), which removes far more human read contamination than hg38; `hostile` wraps this
   with masking of microbial-homologous regions. *(Shen et al./Constantinides et al., Bioinformatics
@@ -66,30 +97,19 @@ Current defaults are metaSPAdes (Nurk et al., *Genome Res* 2017) and MEGAHIT (Li
 
 `bin_refinement` already consolidates any set of bins, so new binners slot in as `binning`
 backends and feed refinement. Current binners: metaBAT2 (Kang et al., *PeerJ* 2019), MaxBin2 (Wu
-et al., *Bioinformatics* 2016), CONCOCT (Alneberg et al., *Nat Methods* 2014).
+et al., *Bioinformatics* 2016), CONCOCT (Alneberg et al., *Nat Methods* 2014), SemiBin2 (Pan et
+al., *Bioinformatics* 2023), VAMB (Nissen et al., *Nat Biotechnol* 2021) and COMEBin (Wang et al.,
+*Nat Commun* 2024).
 
-- `[moderate]` **SemiBin2** — self-supervised deep-learning binner using learned contig embeddings;
-  strong on single samples and cross-sample. *(Pan et al., Nat Commun 2022; Pan et al.,
-  Bioinformatics 2023.)*
-- `[moderate]` **VAMB / AVAMB** — variational-autoencoder binning over abundance + k-mer signals,
-  good for multi-sample co-binning. *(Nissen et al., Nat Biotechnol 2021.)*
-- `[moderate]` **COMEBin** (Wang et al., *Nat Commun* 2024), **GraphMB** (Lamurias et al.,
-  *Bioinformatics* 2022, assembly-graph aware), **MetaDecoder** (Liu et al., *Microbiome* 2022) —
-  recent binners with competitive CAMI/benchmark results.
+- `[moderate]` **GraphMB** (Lamurias et al., *Bioinformatics* 2022, assembly-graph aware),
+  **MetaDecoder** (Liu et al., *Microbiome* 2022), **binny** (Hickl et al., *NAR Genom Bioinform*
+  2022) — recent binners with competitive CAMI/benchmark results, none started.
 - `[moderate]` **Hi-C binning** — bin3C (DeMaere & Darling, *PeerJ* 2019) or MetaTOR (Baudry et
   al., *Front Genet* 2019), using contact frequency to resolve strains and place plasmids/mobile
   elements in the right MAG.
-- `[moderate]` **DAS_Tool** — a dereplication-and-aggregation consolidation method to benchmark
-  against MetaWrap2 refinement. *(Sieber et al., Nat Microbiol 2018.)*
 
 ## Bin QC and quality standards
 
-- `[low]` **CheckM2** — gradient-boosted + neural-network models predicting completeness/
-  contamination; ~seconds–minute per genome, low memory, and more accurate on novel lineages than
-  the marker-set CheckM1. Removes the CheckM1 pplacer RAM wall. Env already stubbed. *(Chklovski et
-  al., Nat Methods 2023; CheckM1: Parks et al., Genome Res 2015.)*
-- `[low]` **GUNC** — detects chimerism/contamination CheckM misses, via a clade-separation score
-  across taxonomic levels. *(Orakov et al., Genome Biol 2021.)*
 - `[low]` **MIMAG quality tags** — classify each MAG high/medium/low quality in `.stats.tsv` from
   completeness, contamination, and rRNA/tRNA presence (Bowers et al., *Nat Biotechnol* 2017).
 - `[low]` **tRNA/rRNA detection** — tRNAscan-SE (Chan et al., *NAR* 2021) and barrnap (Seemann),
@@ -99,12 +119,6 @@ et al., *Bioinformatics* 2016), CONCOCT (Alneberg et al., *Nat Methods* 2014).
 
 - `[low]` **Bracken** — Bayesian re-estimation of Kraken2 abundances at a chosen rank. *(Lu et al.,
   PeerJ CS 2017; Kraken2: Wood et al., Genome Biol 2019.)*
-- `[low]` **GTDB-Tk** — standardized bin taxonomy against the GTDB reference; pin a recent release.
-  Env already stubbed. *(Chaumeil et al., Bioinformatics 2020/2022.)*
-- `[low]` **CoverM** — fast bin/contig abundance (relative abundance, TPM, trimmed mean) from
-  read mappings. *(tool; Woodcroft et al.)*
-- `[low]` **skani / Mash** — fast genome ANI/containment for dereplication, novelty, and
-  contamination screens. *(Shaw & Yu, Nat Methods 2023; Ondov et al., Genome Biol 2016.)*
 - `[moderate]` **Read-level profilers** — assembly-free community profiles: sylph (fast
   ANI/containment; Shaw & Yu, *Nat Biotechnol* 2024), MetaPhlAn 4 (Blanco-Míguez et al., *Nat
   Biotechnol* 2023), mOTUs (Ruscheweyh et al., *Microbiome* 2022), Ganon (Piro et al.,
@@ -183,19 +197,15 @@ Output: SBML models and predicted metabolic interactions.
 How per-sample results are combined largely determines both compute cost and what genomes you
 recover. MetaWrap2 should support both strategies well and make the cohort steps first-class.
 
-**Two aggregation strategies** — complementary, both worth offering:
-- `[moderate]` **Per-sample assemble+bin, then dereplicate** — assemble and bin each sample
-  independently (embarrassingly parallel), then **dRep** across all resulting MAGs to collapse
-  redundancy into a non-redundant, species-level representative set. This is how most large
-  catalogs are built: it parallelizes across samples and sidesteps the memory blow-up and
-  chimeric contigs of a single giant co-assembly, so it is usually the faster route on big cohorts.
-- `[moderate]` **Co-assembly** (already supported by `metawrap2 run`) — pools reads for better
-  recovery of low-abundance genomes, at higher memory/time cost. Keep as an option; pick per study.
+**Both aggregation strategies now exist** — `metawrap2 cohort` assembles and bins per sample and
+then dereplicates, and `metawrap2 run` co-assembles. Which is better is still open: measured on
+three samples they tie on clean high-quality MAGs and per-sample wins at the stricter tier, and the
+argument that favours co-assembly is about scaling, which is untested. The experiment that would
+settle it is twenty samples, where co-assembly's assembler is expected to fail on memory rather
+than merely cost more.
 
-**dRep** `[low–moderate]` — Mash pre-filter (fast, coarse clustering) → secondary ANI (gANI/skani)
-within clusters → choose one representative per cluster by a quality score (completeness,
-contamination, N50). galah is a faster reimplementation with the same idea. *(Olm et al., ISME J
-2017.)*
+- `[low]` **Report which strategy a catalogue came from** in the cohort summary, since the two are
+  not comparable and a catalogue outlives the command that made it.
 
 **Cohort-level steps on the dereplicated MAG set:**
 - `[low]` **MAG × sample abundance matrix** — map every sample's reads back to the non-redundant
@@ -266,17 +276,15 @@ Installable and version-pinned via `install-db`, with checksums and a recorded f
 
 Ordered by complexity and value:
 
-1. **`[low]` wirings that already have stubbed envs** — CheckM2, GTDB-Tk, Bakta — plus fastp,
-   GUNC, MIMAG tags, Bracken, CoverM, and the per-MAG summary table.
-2. **`[moderate]` binning + cohort aggregation** — SemiBin2 and VAMB into refinement; dRep to
-   dereplicate per-sample MAGs into a non-redundant set, then back-map for a MAG × sample
-   abundance matrix (the foundation for cohort analysis).
-3. **`[moderate]` functional and pathway annotation** — per-MAG metabolism (DRAM, KEGG-module
+1. **`[low]` the remaining small wirings** — MIMAG quality tags, tRNA/rRNA detection, Bracken,
+   and the per-MAG summary table. Steps 1 and 2 of this list are otherwise done; see
+   [Already shipped](#already-shipped).
+2. **`[moderate]` functional and pathway annotation** — per-MAG metabolism (DRAM, KEGG-module
    completeness) and community pathway abundance (HUMAnN 3) with tables and plots.
-4. **`[moderate]` long-read / hybrid assembly** and a long-read track.
-5. **`[moderate]` viruses/plasmids and strain-level** — geNomad, CheckV, inStrain; Hi-C binning.
-6. **`[major]` scaling and modern methods** — workflow-engine backend, cloud execution, ML
-   annotation, dashboards, standards, and the benchmarking harness.
+3. **`[moderate]` long-read / hybrid assembly** and a long-read track.
+4. **`[moderate]` viruses/plasmids and strain-level** — geNomad, CheckV, inStrain; Hi-C binning.
+5. **`[major]` scaling and modern methods** — workflow-engine backend, cloud execution, ML
+   annotation, dashboards, and standards.
 
 ---
 

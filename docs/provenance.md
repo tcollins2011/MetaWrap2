@@ -92,8 +92,8 @@ while producing nothing is reported then rather than discovered on the next resu
 
 - Re-run the top line of `run_commands.txt`.
 - Rebuild the environment from its committed lockfile:
-  `conda create -n metawrap2-binning --file src/metawrap2/envs/locks/binning.linux-64.lock`
-  (or `metawrap2 install-env binning --from-lock`).
+  `conda create -n metawrap2-bins --file src/metawrap2/envs/locks/binning.linux-64.lock`
+  (or `metawrap2 install-env bins --from-lock`).
 - Check the database fingerprints in `run_environment.json` against what you have now.
 - `metawrap2 --dry-run <module> ...` prints and records the commands without executing them.
 - `metawrap2 --resume <module> -o <dir> ...` continues a run, re-running anything it cannot verify.

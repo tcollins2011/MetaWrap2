@@ -6,10 +6,18 @@ metagenomic assembly, this computes each bin's abundance in each sample as the
 length-weighted median contig coverage: every contig contributes its coverage once per
 kilobase of length, and the bin/sample value is the median of that weighted list.
 
-Ported faithfully from metaWRAP's ``split_salmon_out_into_bins.py`` (the weighted-median
-algorithm and its edge behavior are preserved verbatim, including that a bin whose contigs
-are all shorter than 1 kb yields an empty weighted list and therefore a NaN cell). ``.gz``
-bins/assemblies are supported via the shared sequence reader.
+The weighted-median algorithm and its per-contig weighting are kept verbatim, including that a bin
+whose contigs are all shorter than 1 kb yields an empty weighted list and therefore a NaN cell.
+``.gz`` bins/assemblies are supported via the shared sequence reader.
+
+What is *not* kept is the accumulator reset, which was wrong: see :func:`build_table`. Coverage
+leaked from one sample into the next for all but one bin, and that one bin reported NaN throughout.
+
+Three other departures, all about the table's shape rather than its numbers: row labels come from
+:func:`metawrap2.constants.bin_label` so that they match the ones the CoverM quantifier writes (a
+gzipped bin used to be labelled ``bin_001.fasta`` here and ``bin_001`` there); the count files are
+read in sorted order so the sample columns land in the same order on every run; and only the FASTA
+files in the bin folder are read, since a bin folder also holds tables and tool subdirectories.
 """
 
 from __future__ import annotations
@@ -18,7 +26,8 @@ import os
 import sys
 from typing import Dict, List, TextIO
 
-from ..io.seqio import contig_id, iter_fasta
+from ..constants import bin_label
+from ..io.seqio import contig_id, fasta_files, iter_fasta
 
 
 def _median(values: List[float]) -> float:
@@ -38,11 +47,15 @@ def load_bins(bin_folder: str) -> Dict[str, str]:
 
     Keyed on :func:`contig_id` to match load_contig_lengths (and the assembly, and salmon's
     transcript names). Keying on the full header made every metaBAT2 bin invisible here.
+
+    Only the FASTA files in the folder are read (see :func:`fasta_files`): a bin folder that has
+    been through bin_refinement also holds tables and tool subdirectories, and a subdirectory here
+    used to raise a bare ``IsADirectoryError``.
     """
     bins = {}
-    for bin_name in sorted(os.listdir(bin_folder)):
-        for header, _seq in iter_fasta(os.path.join(bin_folder, bin_name)):
-            bins[contig_id(header)] = bin_name
+    for path in fasta_files(bin_folder):
+        for header, _seq in iter_fasta(path):
+            bins[contig_id(header)] = os.path.basename(path)
     return bins
 
 
@@ -55,13 +68,35 @@ def load_contig_lengths(assembly: str) -> Dict[str, int]:
 
 
 def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> None:
-    """Write the ``Genomic bins`` abundance table to *out* (tab-separated)."""
+    """Write the ``Genomic bins`` abundance table to *out* (tab-separated).
+
+    Each cell is the length-weighted median contig coverage of that bin **in that sample alone**.
+    The weighted list is built fresh per sample, which is the fix for a bug carried in from the
+    original: the accumulators were reset through a bin name left over from the inner loop, so
+    exactly one bin - whichever contig happened to be last in the counts file - had its list
+    cleared, and cleared partway through the pass that reads it. Every other bin therefore kept
+    accumulating, making sample N's cell the median over samples 1..N, and the one bin that was
+    cleared reported NaN in every sample. On two bins and two disjoint samples the table came out
+    as ``bin_1  1000000  500000`` / ``bin_2  nan  nan`` where the counts said each bin belonged
+    entirely to one sample.
+    """
     bins = load_bins(bin_folder)
     contig_lengths = load_contig_lengths(assembly)
 
-    bin_abundances: Dict[str, dict] = {}
-    for salmon_file in os.listdir(quant_dir):
+    # bin -> sample -> abundance. Insertion-ordered by first appearance, as before.
+    abundances: Dict[str, Dict[str, float]] = {}
+    samples: List[str] = []
+    # Sorted, because the sample columns are written in the order the count files are read: an
+    # unsorted listdir means two runs over the same data can emit the same table with its columns
+    # in a different order. Labels travel with their values either way, so this is reproducibility
+    # rather than correctness - but a table that changes shape between identical runs is not one
+    # anybody can diff.
+    for salmon_file in sorted(os.listdir(quant_dir)):
         sample = ".".join(salmon_file.split(".")[:-2])
+        samples.append(sample)
+        # Per sample, and discarded at the end of it: a bin's coverage in this sample is not a
+        # function of the samples read before it.
+        weighted: Dict[str, List[float]] = {}
         ct = 0
         with open(os.path.join(quant_dir, salmon_file)) as fh:
             for line in fh:
@@ -73,18 +108,12 @@ def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> 
                 ct += 1
                 bin_name = bins[contig]
                 abun = float(line.strip().split("\t")[1])
-                if bin_name not in bin_abundances:
-                    bin_abundances[bin_name] = {
-                        "total_len": 0,
-                        "total_cov": 0,
-                        "cov_list": [],
-                        "samples": {},
-                    }
-                length = contig_lengths[contig]
-                weight = length // 1000
-                bin_abundances[bin_name]["cov_list"].extend([abun] * weight)
-                bin_abundances[bin_name]["total_len"] += length
-                bin_abundances[bin_name]["total_cov"] += abun * length
+                abundances.setdefault(bin_name, {})
+                # Every contig contributes its coverage once per kilobase of its length, so that a
+                # 300 kb contig counts for more of the bin's median than a 2 kb one. Contigs under
+                # 1 kb weigh nothing, and a bin made only of those still yields NaN - that part is
+                # the original's behaviour and is kept.
+                weighted.setdefault(bin_name, []).extend([abun] * (contig_lengths[contig] // 1000))
 
         if ct == 0:
             sys.stderr.write(
@@ -97,24 +126,17 @@ def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> 
             )
             sys.exit(1)
 
-        for abundance in bin_abundances.values():
-            abundance["samples"][sample] = _median(abundance["cov_list"])
-            abundance["total_len"] = 0
-            bin_abundances[bin_name]["total_cov"] = 0
-            bin_abundances[bin_name]["cov_list"] = []
+        for bin_name, cov_list in weighted.items():
+            abundances[bin_name][sample] = _median(cov_list)
 
-    first = True
-    for bin_name in bin_abundances:
-        if first:
-            out.write("Genomic bins")
-            for sample in bin_abundances[bin_name]["samples"]:
-                out.write("\t" + sample)
-            out.write("\n")
-            first = False
-        out.write(".".join(bin_name.split(".")[:-1]))
-        for sample in bin_abundances[bin_name]["samples"]:
-            out.write("\t" + str(bin_abundances[bin_name]["samples"][sample]))
-        out.write("\n")
+    out.write("Genomic bins\t%s\n" % "\t".join(samples))
+    for bin_name, by_sample in abundances.items():
+        # bin_label rather than a strip of the last dotted component: on a gzipped bin the latter
+        # leaves "bin_001.fasta", which is not what the CoverM path calls the same bin.
+        # Columns are written against the sample list, not against this bin's own keys, so a bin
+        # missing from one sample's counts file shifts nothing - it gets a NaN in that column.
+        row = [str(by_sample.get(sample, float("nan"))) for sample in samples]
+        out.write("%s\t%s\n" % (bin_label(bin_name), "\t".join(row)))
 
 
 def main(argv: List[str]) -> int:

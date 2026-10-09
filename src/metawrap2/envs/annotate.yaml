@@ -1,0 +1,11 @@
+# Gene calling and annotation: Prokka (default) and Bakta.
+#
+# One env: they do the same job and solve together, so choosing between them with --bakta needs no
+# second install.
+name: metawrap2-annotate
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - prokka >=1.14
+  - bakta >=1.9

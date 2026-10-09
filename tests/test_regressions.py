@@ -13,7 +13,7 @@ import random
 import pytest
 
 from metawrap2 import checkm
-from metawrap2.modules import binning, kraken2, read_qc
+from metawrap2.modules import _common, binning, kraken2, read_qc
 
 # --- MetaWrap2's own helpers must run in the host interpreter ---------------------------
 # The per-module conda envs contain the module's external tools only - no python, no
@@ -25,6 +25,10 @@ from metawrap2.modules import binning, kraken2, read_qc
 
 def test_finalize_copies_rather_than_moves_raw_input(tmp_path, monkeypatch):
     """--skip-trimming --skip-bmtagger used to os.replace() the user's raw FASTQ away."""
+    # Every stage is skipped, so no tool runs - but env_for checks the env manager is findable
+    # before the module does any work, and mamba is not on PATH in the shell pytest runs in.
+    monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
+
     raw1 = tmp_path / "sample_1.fastq"
     raw2 = tmp_path / "sample_2.fastq"
     raw1.write_text("@r1\nACGT\n+\nIIII\n")
@@ -166,6 +170,28 @@ def test_install_db_updates_existing_key_and_keeps_comments(tmp_path):
     assert "# my notes" in text and "# where kraken lives" in text
 
 
+def test_install_db_untar_refuses_a_member_that_escapes_the_destination(tmp_path):
+    """These are archives off the public internet, and extractall writes where a member says to."""
+    import io
+    import tarfile
+
+    from metawrap2.commands import install_db
+
+    archive = tmp_path / "db.tar"
+    # Built by hand: tarfile.add normalises an escaping name away before it reaches the archive.
+    with tarfile.open(archive, "w") as tf:
+        for name in ("../escaped.dmp", "/absolute.dmp", "names.dmp"):
+            info = tarfile.TarInfo(name)
+            info.size = 2
+            tf.addfile(info, io.BytesIO(b"ok"))
+    into = tmp_path / "db"
+    install_db._untar(str(archive), str(into))
+    assert os.path.isfile(into / "names.dmp")
+    assert not os.path.exists(tmp_path / "escaped.dmp")
+    assert not os.path.exists(into / "absolute.dmp")
+    assert not os.path.exists(archive)  # unpacked archives are still removed
+
+
 # --- dereplication must survive a bin with no stats row ---------------------------------
 
 
@@ -243,10 +269,11 @@ def dry_inputs(tmp_path, monkeypatch):
         % (dbs / "KRAKEN2", dbs / "HOST", dbs / "BLAST", dbs / "TAX")
     )
 
-    # Every module env "exists" so env_for does not abort; nothing is executed anyway.
-    from metawrap2.modules import _common
-
+    # Every module env "exists" and the env manager is findable, so env_for does not abort; nothing
+    # is executed anyway. Both halves are needed because both are preconditions for running in an
+    # env and both are now checked up front - and mamba is not on PATH in the shell pytest runs in.
     monkeypatch.setattr(_common, "conda_env_exists", lambda env: True)
+    monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
 
     return {
         "bins": str(bins),
@@ -330,7 +357,9 @@ def test_metabat2_non_bin_outputs_are_moved_out_of_the_bin_set(tmp_path, monkeyp
         threads = 1
         min_len = 1000
 
-    binning_mod._run_metabat2(Args(), None, str(tmp_path / "work"), str(tmp_path / "asm.fa"))
+    binning_mod._run_metabat2(
+        Args(), None, str(tmp_path / "work"), str(tmp_path / "asm.fa"), "depth.txt"
+    )
 
     remaining = sorted(os.listdir(bins_dir))
     # metaBAT2's own bin.1.fa/bin.2.fa are renumbered to the canonical naming once the
@@ -350,3 +379,70 @@ def test_metabat2_non_bin_outputs_are_moved_out_of_the_bin_set(tmp_path, monkeyp
 
 
 # --- relative -o must work even for tools that run with cwd=<output dir> -----------------
+
+
+# --- CheckM1's --tmpdir has to be short enough to hold a unix socket ---------------------
+# Symptom: every variant of a scored benchmark comparison lost its completeness metrics, with
+# CheckM reporting a bare "EOFError" out of mp.Manager().dict() and nothing about paths. Cause:
+# --tmpdir makes CheckM set tempfile.tempdir process-wide, so the Manager's listener socket is
+# bound inside it, and Linux allows a unix-socket path 107 characters. The failing tmpdir was 90.
+
+
+def test_checkm_tmpdir_is_short_enough_to_bind_a_socket_however_deep_the_output_is(tmp_path):
+    deep = tmp_path
+    for _ in range(12):
+        deep = deep / "a-directory-with-a-realistic-name"
+    bins = deep / "metabat2_bins"
+    bins.mkdir(parents=True)
+    assert (
+        len(str(bins) + ".tmp") > checkm.MAX_TMPDIR_LEN
+    ), "the fixture has to be long to test this"
+
+    tmp = checkm.checkm_tmpdir(str(bins))
+
+    assert len(tmp) <= checkm.MAX_TMPDIR_LEN
+    # Short, but still the directory beside the bins: CheckM's tree stage writes GBs and they
+    # belong on the filesystem the caller picked, not on whatever /tmp happens to be.
+    assert os.path.realpath(tmp) == os.path.realpath(str(bins) + ".tmp")
+    assert os.path.isdir(str(bins) + ".tmp")
+    # The property all of the above exists to buy, asserted directly rather than by proxy.
+    import socket
+
+    sock = socket.socket(socket.AF_UNIX)
+    try:
+        sock.bind(os.path.join(tmp, "listener-abcd1234"))
+    finally:
+        sock.close()
+
+
+def test_checkm_tmpdir_stays_beside_the_bins_when_the_path_is_short():
+    """No indirection when none is needed - a symlink in /tmp is harder to find afterwards.
+
+    Not under ``tmp_path``: pytest's own temp directory is about 70 characters deep before the test
+    adds anything, which is over the budget a unix socket leaves (75 - see MAX_TMPDIR_LEN), so a path
+    built there is correctly *not* short and cannot exercise this branch.
+    """
+    import shutil
+
+    from metawrap2.utils import MAX_TMPDIR_LEN
+
+    root = "/tmp/mw2-short-tmpdir-test"
+    shutil.rmtree(root, ignore_errors=True)
+    bins = os.path.join(root, "b_bins")
+    os.makedirs(bins)
+    try:
+        assert len(bins) + len(".tmp") <= MAX_TMPDIR_LEN
+        tmp = checkm.checkm_tmpdir(bins)
+        assert tmp == bins + ".tmp" and os.path.isdir(tmp) and not os.path.islink(tmp)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_checkm_tmpdir_is_stable_across_a_resume(tmp_path):
+    """--resume re-runs the same command; a fresh symlink each time would leak one per attempt."""
+    deep = tmp_path
+    for _ in range(12):
+        deep = deep / "a-directory-with-a-realistic-name"
+    bins = deep / "metabat2_bins"
+    bins.mkdir(parents=True)
+    assert checkm.checkm_tmpdir(str(bins)) == checkm.checkm_tmpdir(str(bins))

@@ -3,9 +3,27 @@ message: "If you use MetaWrap2, please cite it using the metadata below."
 title: "MetaWrap2"
 abstract: "A flexible, Python-native pipeline for genome-resolved metagenomic data analysis."
 type: software
-version: "2.0.1"
+version: "2.1.0"
 authors:
   - family-names: "Uritskiy"
     given-names: "Gherman"
+  - family-names: "Schatz"
+    given-names: "Michael"
+    affiliation: "Johns Hopkins University"
 repository-code: "https://github.com/ursky/MetaWrap2"
 license: MIT
+preferred-citation:
+  type: article
+  title: "MetaWRAP - a flexible pipeline for genome-resolved metagenomic data analysis"
+  doi: "10.1186/s40168-018-0541-1"
+  journal: "Microbiome"
+  year: 2018
+  volume: 6
+  start: 158
+  authors:
+    - family-names: "Uritskiy"
+      given-names: "Gherman V."
+    - family-names: "DiRuggiero"
+      given-names: "Jocelyne"
+    - family-names: "Taylor"
+      given-names: "James"

@@ -54,11 +54,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .. import limits as _limits
 from .. import usage as _usage
+from ..cliformat import make_parser
 from ..config import load_settings
 from ..io import reads as _reads
 from ..logging import announcement, comm, error, warning
 from ..manifest import COMPLETED, FAILED, INTERRUPTED, MANIFEST_NAME, Manifest
+from ..modules import binning as _binning
+from ..modules import coverage as _coverage
+from ..modules import dereplicate as _dereplicate
 
 if sys.version_info >= (3, 11):
     import tomllib as _toml
@@ -70,14 +75,21 @@ ALL_STEPS: Tuple[str, ...] = (
     "read_qc",
     "assembly",
     "kraken2",
+    "coverage",
     "binning",
     "bin_refinement",
     "reassemble_bins",
+    "dereplicate",
     "quant_bins",
     "classify_bins",
     "annotate_bins",
     "blobology",
 )
+
+#: Steps that only mean anything when each sample is assembled separately. `coverage` builds one
+#: depth table across a cohort's assemblies, and `dereplicate` collapses the per-sample bin sets into
+#: one catalogue - a co-assembly has one assembly and one bin set, so neither has anything to do.
+COHORT_ONLY_STEPS = frozenset({"coverage", "dereplicate"})
 
 #: The steps run by default: the genome-recovery path. The three that need the largest
 #: databases (kraken2, classify_bins, blobology) are opt-in via `steps`, so a default run
@@ -91,9 +103,35 @@ DEFAULT_STEPS: Tuple[str, ...] = (
     "quant_bins",
 )
 
-#: The binners `binning` runs when the sheet does not say. bin_refinement takes at most three
-#: bin sets, and these are the three it was designed around.
-DEFAULT_BINNERS: Tuple[str, ...] = ("--metabat2", "--maxbin2", "--concoct")
+#: The steps a cohort runs when the sheet does not say: the same path, plus the two stages that only
+#: exist once each sample has its own assembly. `reassemble_bins` is left out rather than forgotten -
+#: it is the most expensive step in the pipeline and it runs per sample here, so a twenty-sample
+#: cohort would pay for it twenty times; add it to `steps` deliberately.
+COHORT_STEPS: Tuple[str, ...] = (
+    "read_qc",
+    "assembly",
+    "coverage",
+    "binning",
+    "bin_refinement",
+    "dereplicate",
+    "quant_bins",
+)
+
+#: The binners `binning` runs when the sheet does not say. Two, not three: CONCOCT came out on
+#: 2026-10-02 on cost. On cami2_gi it was 192 of the 213 cpu-hours a three-binner run spent binning,
+#: and the 10 extra clean MAGs it bought - 74 against 64, where clean means passing GUNC - are reached
+#: for a fraction of that by the learned binners (105 for metaBAT2+SemiBin2). It is CONCOCT's price
+#: against those, not its accuracy, that retired it. It remains available as --concoct, and
+#: bin_refinement still takes three
+#: bin sets; what changed is what runs when nobody says. See benchmarks/configurations.toml for the
+#: arms, and note the honest caveat recorded there: this pair is also the dirtiest of the three
+#: consolidated sets measured (18.9% chimeric), so it is a throughput choice made knowingly.
+#: The binning flags a sheet gets when it names none, derived from the binning module's own
+#: default tier rather than restated - a literal pair here is how `--preset` and the driver's idea
+#: of "the default" drifted apart once before.
+DEFAULT_BINNERS: Tuple[str, ...] = tuple(
+    "--" + binner for binner in _binning.PRESETS[_binning.DEFAULT_PRESET]
+)
 
 #: Modules that accept -m/--memory in GB. The driver divides its budget between concurrent
 #: steps and passes each one its share.
@@ -133,10 +171,45 @@ class Study:
     coassemble: bool = True
     steps: Tuple[str, ...] = DEFAULT_STEPS
     module_options: Dict[str, List[str]] = field(default_factory=dict)
+    #: True when the sheet set `coassemble` either way, as opposed to taking the default.
+    coassemble_chosen: bool = False
+    #: True when the steps were named rather than defaulted. The default depends on the assembly
+    #: mode, and the mode can still change after the sheet is read (`--no-coassembly`), so the
+    #: driver has to be able to tell "the user asked for exactly these" from "nobody said".
+    steps_chosen: bool = False
 
     def extra(self, module: str) -> List[str]:
         """Extra command-line options the sheet specified for *module*."""
         return list(self.module_options.get(module, []))
+
+    def default_steps(self) -> Tuple[str, ...]:
+        """The steps to run when the sheet did not say, which differs by assembly mode."""
+        return DEFAULT_STEPS if self.coassemble else COHORT_STEPS
+
+
+def resolve_steps(study: Study) -> None:
+    """Settle *study*'s step list now that its assembly mode is known.
+
+    Called again after the command line has had its say, because `--no-coassembly` changes which
+    default applies; it is idempotent for a study whose steps were named explicitly.
+    """
+    if not study.steps_chosen:
+        study.steps = study.default_steps()
+    if study.coassemble:
+        dropped = [s for s in study.steps if s in COHORT_ONLY_STEPS]
+        if dropped:
+            # Running them would be worse than skipping them: `coverage` would build a catalogue
+            # of one assembly and `dereplicate` would compare a bin set against itself, both at
+            # full cost. Say so rather than doing it.
+            warning(
+                "Co-assembling, so %s %s nothing to do (one assembly, one bin set); skipping. "
+                "Set coassemble = false to run a cohort per sample."
+                % (
+                    ", ".join(dropped),
+                    "has" if len(dropped) == 1 else "have",
+                )
+            )
+            study.steps = tuple(s for s in study.steps if s not in COHORT_ONLY_STEPS)
 
 
 def _as_option_list(value: object, module: str) -> List[str]:
@@ -198,7 +271,10 @@ def load_sheet(path: str) -> Study:
         samples.append(Sample(name=name, r1=r1, r2=r2, layout=layout))
 
     settings = data.get("settings") or {}
-    steps = tuple(settings.get("steps") or DEFAULT_STEPS)
+    chosen = bool(settings.get("steps"))
+    coassemble = bool(settings.get("coassemble", True))
+    coassemble_chosen = "coassemble" in settings
+    steps = tuple(settings.get("steps") or (DEFAULT_STEPS if coassemble else COHORT_STEPS))
     unknown = [s for s in steps if s not in ALL_STEPS]
     if unknown:
         raise ValueError(
@@ -209,12 +285,16 @@ def load_sheet(path: str) -> Study:
     modules = data.get("modules") or {}
     module_options = {m: _as_option_list(v, m) for m, v in modules.items()}
 
-    return Study(
+    study = Study(
         samples=samples,
-        coassemble=bool(settings.get("coassemble", True)),
+        coassemble=coassemble,
+        coassemble_chosen=coassemble_chosen,
         steps=steps,
         module_options=module_options,
+        steps_chosen=chosen,
     )
+    resolve_steps(study)
+    return study
 
 
 def study_from_directory(directory: str) -> Study:
@@ -234,9 +314,11 @@ coassemble = true
 # because they need the very large Kraken2 and BLAST databases.
 steps = ["read_qc", "assembly", "binning", "bin_refinement", "reassemble_bins", "quant_bins"]
 
-# Extra options passed through to a module, exactly as you would type them.
+# Extra options passed through to a module, exactly as you would type them. The binners here are
+# the defaults, spelled out so they are easy to change; adding --concoct roughly quadruples what
+# binning costs and is worth it when the catalogue matters more than the clock.
 [modules]
-binning = "--metabat2 --maxbin2 --concoct"
+binning = "--metabat2 --maxbin2"
 bin_refinement = "-c 50 -x 10"
 
 [[samples]]
@@ -300,12 +382,29 @@ class Layout:
     def sample_assembly_dir(self, sample: str) -> str:
         return self._p("ASSEMBLY", sample)
 
+    def sample_assembly(self, sample: str) -> str:
+        return os.path.join(self.sample_assembly_dir(sample), "final_assembly.fasta")
+
+    @property
+    def coverage_dir(self) -> str:
+        return self._p("COVERAGE")
+
+    def coverage_depth(self, sample: str) -> str:
+        """The depth-table slice `coverage` writes for one sample, named as that module names it."""
+        return os.path.join(self.coverage_dir, _coverage.DEPTH_DIR, "%s.txt" % sample)
+
     @property
     def binning_dir(self) -> str:
         return self._p("INITIAL_BINNING")
 
     def binner_bins(self, binner: str) -> str:
         return os.path.join(self.binning_dir, "%s_bins" % binner)
+
+    def sample_binning_dir(self, sample: str) -> str:
+        return self._p("INITIAL_BINNING", sample)
+
+    def sample_binner_bins(self, sample: str, binner: str) -> str:
+        return os.path.join(self.sample_binning_dir(sample), "%s_bins" % binner)
 
     @property
     def refinement_dir(self) -> str:
@@ -316,6 +415,15 @@ class Layout:
             self.refinement_dir, "metawrap_%d_%d_bins" % (completeness, contamination)
         )
 
+    def sample_refinement_dir(self, sample: str) -> str:
+        return self._p("BIN_REFINEMENT", sample)
+
+    def sample_refined_bins(self, sample: str, completeness: int, contamination: int) -> str:
+        return os.path.join(
+            self.sample_refinement_dir(sample),
+            "metawrap_%d_%d_bins" % (completeness, contamination),
+        )
+
     @property
     def reassembly_dir(self) -> str:
         return self._p("BIN_REASSEMBLY")
@@ -324,9 +432,29 @@ class Layout:
     def reassembled_bins(self) -> str:
         return os.path.join(self.reassembly_dir, "reassembled_bins")
 
+    def sample_reassembly_dir(self, sample: str) -> str:
+        return self._p("BIN_REASSEMBLY", sample)
+
+    def sample_reassembled_bins(self, sample: str) -> str:
+        return os.path.join(self.sample_reassembly_dir(sample), "reassembled_bins")
+
+    @property
+    def catalogue_dir(self) -> str:
+        return self._p("MAG_CATALOGUE")
+
+    @property
+    def catalogue_genomes(self) -> str:
+        return os.path.join(self.catalogue_dir, _dereplicate.CATALOGUE_DIR)
+
     @property
     def kraken_dir(self) -> str:
         return self._p("KRAKEN")
+
+    def sample_kraken_dir(self, sample: str) -> str:
+        return self._p("KRAKEN", sample)
+
+    def sample_blobology_dir(self, sample: str) -> str:
+        return self._p("BLOBOLOGY", sample)
 
     @property
     def quant_dir(self) -> str:
@@ -484,6 +612,51 @@ def plan_steps(study: Study, layout: Layout) -> List[Step]:
                     )
                 )
 
+    binning_opts = study.extra("binning") or list(DEFAULT_BINNERS)
+    comp, cont = _quality_thresholds(study)
+    if study.coassemble:
+        steps += _coassembly_steps(study, layout, all_reads, binning_opts, comp, cont)
+    else:
+        steps += _cohort_steps(study, layout, ran_read_qc, all_reads, binning_opts, comp, cont)
+    return steps
+
+
+def _final_bins(study: Study, layout: Layout, binning_opts: Sequence[str]) -> str:
+    """The bin folder later steps should read in a co-assembly study: the latest one produced."""
+    comp, cont = _quality_thresholds(study)
+    if "reassemble_bins" in study.steps:
+        return layout.reassembled_bins
+    if "bin_refinement" in study.steps:
+        return layout.refined_bins(comp, cont)
+    return layout.binner_bins(selected_binners(binning_opts)[0])
+
+
+def _sample_final_bins(
+    study: Study, layout: Layout, sample: str, binning_opts: Sequence[str]
+) -> str:
+    """The same question for one sample of a cohort, answered from the same list of steps."""
+    comp, cont = _quality_thresholds(study)
+    if "reassemble_bins" in study.steps:
+        return layout.sample_reassembled_bins(sample)
+    if "bin_refinement" in study.steps:
+        return layout.sample_refined_bins(sample, comp, cont)
+    return layout.sample_binner_bins(sample, selected_binners(binning_opts)[0])
+
+
+def _coassembly_steps(
+    study: Study,
+    layout: Layout,
+    all_reads: List[str],
+    binning_opts: List[str],
+    comp: int,
+    cont: int,
+) -> List[Step]:
+    """Everything after the assembly when all the samples were assembled together.
+
+    One assembly, one bin set, one of each downstream step - which is the whole reason this is
+    separate from the cohort plan rather than a flag inside one.
+    """
+    steps: List[Step] = []
     if "kraken2" in study.steps:
         steps.append(
             Step(
@@ -498,7 +671,6 @@ def plan_steps(study: Study, layout: Layout) -> List[Step]:
             )
         )
 
-    binning_opts = study.extra("binning") or list(DEFAULT_BINNERS)
     if "binning" in study.steps:
         steps.append(
             Step(
@@ -510,15 +682,17 @@ def plan_steps(study: Study, layout: Layout) -> List[Step]:
             )
         )
 
-    comp, cont = _quality_thresholds(study)
     if "bin_refinement" in study.steps:
         # Hand refinement only the bin sets binning was actually asked to produce. Passing a
         # fixed -A/-B/-C meant a study that selected, say, "--metabat2 --concoct" failed here
-        # with "INITIAL_BINNING/maxbin2_bins is not a valid directory".
+        # with "INITIAL_BINNING/maxbin2_bins is not a valid directory". Repeated --bins rather
+        # than -A/-B/-C because the letters stop at F and zipping against three of them silently
+        # dropped the fourth bin set; --bins is the form bin_refinement documents for a caller
+        # generating its arguments, which is what this is.
         selected = selected_binners(binning_opts)
         argv = ["-o", layout.refinement_dir]
-        for flag, binner in zip(("-A", "-B", "-C"), selected):
-            argv += [flag, layout.binner_bins(binner)]
+        for binner in selected:
+            argv += ["--bins", layout.binner_bins(binner)]
         steps.append(
             Step(
                 name="bin_refinement",
@@ -537,7 +711,7 @@ def plan_steps(study: Study, layout: Layout) -> List[Step]:
     )
 
     if "reassemble_bins" in study.steps:
-        reads = clean_reads_for(layout, study, study.samples[0], ran_read_qc)
+        reads = clean_reads_for(layout, study, study.samples[0], "read_qc" in study.steps)
         argv = [
             "-b",
             best_bins,
@@ -557,9 +731,7 @@ def plan_steps(study: Study, layout: Layout) -> List[Step]:
                 outputs=[layout.reassembled_bins],
             )
         )
-        final_bins = layout.reassembled_bins
-    else:
-        final_bins = best_bins
+    final_bins = _final_bins(study, layout, binning_opts)
 
     if "quant_bins" in study.steps:
         steps.append(
@@ -574,27 +746,7 @@ def plan_steps(study: Study, layout: Layout) -> List[Step]:
             )
         )
 
-    if "classify_bins" in study.steps:
-        steps.append(
-            Step(
-                name="classify_bins",
-                module="classify_bins",
-                argv=["-b", final_bins, "-o", layout.classify_dir] + study.extra("classify_bins"),
-                inputs=[final_bins],
-                outputs=[os.path.join(layout.classify_dir, "bin_taxonomy.tsv")],
-            )
-        )
-
-    if "annotate_bins" in study.steps:
-        steps.append(
-            Step(
-                name="annotate_bins",
-                module="annotate_bins",
-                argv=["-b", final_bins, "-o", layout.annotate_dir] + study.extra("annotate_bins"),
-                inputs=[final_bins],
-                outputs=[os.path.join(layout.annotate_dir, "bin_funct_annotations")],
-            )
-        )
+    steps += _bin_annotation_steps(study, layout, final_bins)
 
     if "blobology" in study.steps:
         steps.append(
@@ -608,14 +760,249 @@ def plan_steps(study: Study, layout: Layout) -> List[Step]:
                 outputs=[os.path.join(layout.blobology_dir, "blobplot_figures")],
             )
         )
+    return steps
 
+
+def _bin_annotation_steps(study: Study, layout: Layout, bins: str) -> List[Step]:
+    """classify_bins and annotate_bins, which care only about a folder of bins.
+
+    Shared between the two modes because they are the two steps where a cohort and a co-assembly
+    differ only in which folder is handed over - the catalogue, or the one bin set there was.
+    """
+    steps: List[Step] = []
+    if "classify_bins" in study.steps:
+        steps.append(
+            Step(
+                name="classify_bins",
+                module="classify_bins",
+                argv=["-b", bins, "-o", layout.classify_dir] + study.extra("classify_bins"),
+                inputs=[bins],
+                outputs=[os.path.join(layout.classify_dir, "bin_taxonomy.tsv")],
+            )
+        )
+    if "annotate_bins" in study.steps:
+        steps.append(
+            Step(
+                name="annotate_bins",
+                module="annotate_bins",
+                argv=["-b", bins, "-o", layout.annotate_dir] + study.extra("annotate_bins"),
+                inputs=[bins],
+                outputs=[os.path.join(layout.annotate_dir, "bin_funct_annotations")],
+            )
+        )
+    return steps
+
+
+def _cohort_steps(
+    study: Study,
+    layout: Layout,
+    ran_read_qc: bool,
+    all_reads: List[str],
+    binning_opts: List[str],
+    comp: int,
+    cont: int,
+) -> List[Step]:
+    """Everything after the assemblies when each sample was assembled on its own.
+
+    This is the cohort pipeline of the plan: one coverage pass across every assembly, per-sample
+    binning on a slice of that one depth table, per-sample consolidation, then one dereplication into
+    a species catalogue that the quantifier and the annotators see instead of any single sample's
+    bins.
+
+    Each per-sample stage is its own parallel group, so a cohort runs N samples at a time through a
+    stage rather than one sample end to end - which is what keeps the thread budget divided by the
+    driver rather than by luck.
+    """
+    steps: List[Step] = []
+    samples = [s.name for s in study.samples]
+    reads_of = {s.name: clean_reads_for(layout, study, s, ran_read_qc) for s in study.samples}
+
+    if "kraken2" in study.steps:
+        for sample in samples:
+            steps.append(
+                Step(
+                    name="kraken2:%s" % sample,
+                    module="kraken2",
+                    argv=["-o", layout.sample_kraken_dir(sample)]
+                    + study.extra("kraken2")
+                    + reads_of[sample]
+                    + [layout.sample_assembly(sample)],
+                    parallel_group="kraken2",
+                    inputs=reads_of[sample] + [layout.sample_assembly(sample)],
+                    outputs=[os.path.join(layout.sample_kraken_dir(sample), "kronagram.html")],
+                )
+            )
+
+    # One coverage pass for the whole cohort: every sample's reads against the concatenated
+    # catalogue of every sample's assembly. N alignments, not N per assembly - which is the only
+    # reason multi-sample binning is affordable at cohort scale.
+    cohort_coverage = "coverage" in study.steps
+    if cohort_coverage:
+        argv: List[str] = []
+        for sample in samples:
+            argv += ["-a", "%s=%s" % (sample, layout.sample_assembly(sample))]
+        argv += ["-o", layout.coverage_dir]
+        steps.append(
+            Step(
+                name="coverage",
+                module="coverage",
+                argv=argv + study.extra("coverage") + all_reads,
+                inputs=[layout.sample_assembly(s) for s in samples] + all_reads,
+                outputs=[layout.coverage_depth(s) for s in samples],
+            )
+        )
+
+    if "binning" in study.steps:
+        for sample in samples:
+            argv = ["-a", layout.sample_assembly(sample), "-o", layout.sample_binning_dir(sample)]
+            if cohort_coverage:
+                # The point of the coverage stage: this sample's contigs, every sample's depths,
+                # and nothing aligned here at all.
+                argv += ["--depth", layout.coverage_depth(sample)]
+                inputs = [layout.sample_assembly(sample), layout.coverage_depth(sample)]
+            else:
+                # No coverage stage means single-sample coverage, which is a weaker binning and is
+                # what the user asked for by dropping the step.
+                argv += reads_of[sample]
+                inputs = [layout.sample_assembly(sample)] + reads_of[sample]
+            steps.append(
+                Step(
+                    name="binning:%s" % sample,
+                    module="binning",
+                    argv=argv + binning_opts,
+                    parallel_group="binning",
+                    inputs=inputs,
+                    outputs=[
+                        layout.sample_binner_bins(sample, b) for b in selected_binners(binning_opts)
+                    ],
+                )
+            )
+
+    if "bin_refinement" in study.steps:
+        selected = selected_binners(binning_opts)
+        for sample in samples:
+            argv = ["-o", layout.sample_refinement_dir(sample)]
+            for binner in selected:
+                argv += ["--bins", layout.sample_binner_bins(sample, binner)]
+            steps.append(
+                Step(
+                    name="bin_refinement:%s" % sample,
+                    module="bin_refinement",
+                    argv=argv + study.extra("bin_refinement"),
+                    parallel_group="bin_refinement",
+                    inputs=[layout.sample_binner_bins(sample, b) for b in selected],
+                    outputs=[layout.sample_refined_bins(sample, comp, cont)],
+                )
+            )
+
+    if "reassemble_bins" in study.steps:
+        for sample in samples:
+            bins = (
+                layout.sample_refined_bins(sample, comp, cont)
+                if "bin_refinement" in study.steps
+                else layout.sample_binner_bins(sample, selected_binners(binning_opts)[0])
+            )
+            reads = reads_of[sample]
+            argv = ["-b", bins, "-o", layout.sample_reassembly_dir(sample), "-1", reads[0]]
+            if len(reads) > 1:
+                argv += ["-2", reads[1]]
+            steps.append(
+                Step(
+                    name="reassemble_bins:%s" % sample,
+                    module="reassemble_bins",
+                    argv=argv + study.extra("reassemble_bins"),
+                    parallel_group="reassemble_bins",
+                    inputs=[bins] + reads,
+                    outputs=[layout.sample_reassembled_bins(sample)],
+                )
+            )
+
+    per_sample_bins = [_sample_final_bins(study, layout, s, binning_opts) for s in samples]
+    catalogue = layout.catalogue_genomes
+    if "dereplicate" in study.steps:
+        argv = []
+        for bins in per_sample_bins:
+            argv += ["-b", bins]
+        argv += ["-o", layout.catalogue_dir]
+        steps.append(
+            Step(
+                name="dereplicate",
+                module="dereplicate",
+                argv=argv + study.extra("dereplicate"),
+                inputs=per_sample_bins,
+                outputs=[catalogue],
+            )
+        )
+    # Without dereplication there is no one folder of bins for the cohort, so the steps that want
+    # one get the first sample's - which is wrong for a cohort and is why dereplicate is a default.
+    final_bins = catalogue if "dereplicate" in study.steps else per_sample_bins[0]
+
+    if "quant_bins" in study.steps:
+        # Against the catalogue, with no -a: near-identical MAGs from different samples would
+        # otherwise steal each other's reads, and there is no single assembly to point at anyway.
+        steps.append(
+            Step(
+                name="quant_bins",
+                module="quant_bins",
+                argv=["-b", final_bins, "-o", layout.quant_dir]
+                + study.extra("quant_bins")
+                + all_reads,
+                inputs=[final_bins] + all_reads,
+                outputs=[os.path.join(layout.quant_dir, "bin_abundance_table.tsv")],
+            )
+        )
+
+    steps += _bin_annotation_steps(study, layout, final_bins)
+
+    if "blobology" in study.steps:
+        for sample, bins in zip(samples, per_sample_bins):
+            steps.append(
+                Step(
+                    name="blobology:%s" % sample,
+                    module="blobology",
+                    argv=[
+                        "-a",
+                        layout.sample_assembly(sample),
+                        "-o",
+                        layout.sample_blobology_dir(sample),
+                        "--bins",
+                        bins,
+                    ]
+                    + study.extra("blobology")
+                    + reads_of[sample],
+                    parallel_group="blobology",
+                    inputs=[layout.sample_assembly(sample), bins] + reads_of[sample],
+                    outputs=[os.path.join(layout.sample_blobology_dir(sample), "blobplot_figures")],
+                )
+            )
     return steps
 
 
 def selected_binners(binning_options: Sequence[str]) -> List[str]:
-    """Which binners a set of `binning` options turns on, in bin_refinement's -A/-B/-C order."""
-    selected = [b for b in ("metabat2", "maxbin2", "concoct") if "--" + b in binning_options]
-    return selected or [b.lstrip("-") for b in DEFAULT_BINNERS]
+    """Which binners a set of `binning` options turns on, in the order refinement is given them.
+
+    The order comes from the binning module's own ``BINNERS``, so a binner added there is wired
+    here without a second edit. It used to be a literal list of the three classical binners, which
+    meant a sheet saying ``--metabat2 --semibin2`` had SemiBin2's bins dropped before refinement,
+    and a sheet saying ``--semibin2`` alone fell through to the default pair and pointed refinement
+    at two directories that were never created.
+
+    ``--preset`` is resolved from the binning module's own table, with the same precedence that module
+    applies: an explicitly named binner wins, and the preset is only consulted when none was. Without
+    this, a sheet saying ``--preset very-fast`` matched no ``--<binner>`` flag, fell through to the
+    default pair, and failed at refinement with "maxbin2_bins is not a directory" - after paying for
+    the binning. Every preset but ``fast`` was unusable from a study sheet.
+    """
+    selected = [b for b in _binning.BINNERS if "--" + b in binning_options]
+    if selected:
+        return selected
+    if "--preset" in binning_options:
+        index = binning_options.index("--preset") + 1
+        if index < len(binning_options):
+            preset = _binning.PRESETS.get(binning_options[index])
+            if preset:
+                return [b for b in _binning.BINNERS if b in preset]
+    return [b.lstrip("-") for b in DEFAULT_BINNERS]
 
 
 def _quality_thresholds(study: Study) -> Tuple[int, int]:
@@ -668,8 +1055,10 @@ class StepState:
         _ok, reason = self.manifest.can_skip(step.name, whole_file=self.strict)
         return reason
 
-    def start(self, step: Step, command: Sequence[str]) -> float:
-        return self.manifest.start(step.name, command, step.inputs)
+    def start(
+        self, step: Step, command: Sequence[str], grant: Optional[Dict[str, Any]] = None
+    ) -> float:
+        return self.manifest.start(step.name, command, step.inputs, grant=grant)
 
     def finish(
         self,
@@ -792,7 +1181,10 @@ def run_step(
         print("[plan] %s" % " ".join(shlex.quote(a) for a in argv))
         return step, COMPLETED, log_path
 
-    started = state.start(step, argv) if state is not None else time.time()
+    grant: Dict[str, Any] = {"threads": threads}
+    if memory_gb is not None:
+        grant["memory_gb"] = memory_gb
+    started = state.start(step, argv, grant=grant) if state is not None else time.time()
     status = FAILED
     usage: Dict[str, Any] = {}
     try:
@@ -860,6 +1252,8 @@ def execute(
         if not pending:
             _after_group(group[0], layout, study, dry_run)
             continue
+
+        _before_group(group[0], layout, study, dry_run)
 
         workers = max(1, min(jobs, len(pending)))
         per_step_threads = max(1, threads // workers)
@@ -961,6 +1355,25 @@ def audit_outputs(state: StepState, layout: Layout) -> None:
         comm("output audit: every recorded output is present and non-empty")
 
 
+def _before_group(step: Step, layout: Layout, study: Study, dry_run: bool) -> None:
+    """The plumbing a step needs in place before it runs.
+
+    One case, and it was a real hole: a co-assembly reads ``ALL_READS_1.fastq``, which is built by
+    concatenating the samples, and that only happened after a ``read_qc`` step. A study that
+    co-assembles *without* read QC - every arm of a benchmark that holds QC constant, for instance -
+    therefore planned an assembly whose inputs nothing created, and failed on "does not exist" naming
+    the files but not the cause.
+
+    Building it here instead of after read_qc covers both: with QC the files are already current by the
+    time assembly starts and this is a no-op, and without it the raw reads get concatenated.
+    ``clean_reads_for`` already knew how to answer "which reads, QC'ed or not" - it was simply never
+    asked in this case.
+    """
+    if step.module == "assembly" and study.coassemble:
+        announcement("CONCATENATING READS FOR THE CO-ASSEMBLY")
+        concatenate_for_coassembly(layout, study, dry_run)
+
+
 def _after_group(step: Step, layout: Layout, study: Study, dry_run: bool) -> None:
     """The plumbing between steps: exactly the ``mv``/``cat`` the tutorial asks users to do."""
     if step.module == "read_qc":
@@ -973,10 +1386,20 @@ def _after_group(step: Step, layout: Layout, study: Study, dry_run: bool) -> Non
 # --- entry point --------------------------------------------------------------------------
 
 
-def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(
-        prog="metawrap2 run",
-        description="Run the whole MetaWrap2 pipeline for a study described by a sample sheet.",
+def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> int:
+    """Plan and execute a study.
+
+    *cohort* is what `metawrap2 cohort` passes: the same planner with per-sample assembly forced on,
+    so there is one driver to keep correct rather than two.
+    """
+    ap = make_parser(
+        prog=prog,
+        description=(
+            "Assemble and bin each sample of a cohort separately, then collapse the results "
+            "into one non-redundant genome catalogue."
+            if cohort
+            else "Run the whole MetaWrap2 pipeline for a study described by a sample sheet."
+        ),
     )
     ap.add_argument(
         "sheet", nargs="?", help="sample sheet (.toml/.yaml), or a directory of read files"
@@ -987,7 +1410,8 @@ def main(argv: List[str]) -> int:
         "--threads",
         type=int,
         default=None,
-        help="total threads to use (default: [settings] threads in metawrap2.toml)",
+        help="total threads to use, divided between concurrent steps "
+        "(default: [settings] threads in metawrap2.toml, else the [limits] budget)",
     )
     ap.add_argument(
         "-j",
@@ -1006,7 +1430,11 @@ def main(argv: List[str]) -> int:
     ap.add_argument(
         "--no-coassembly",
         action="store_true",
-        help="assemble each sample separately instead of co-assembling",
+        help=(
+            argparse.SUPPRESS
+            if cohort
+            else "assemble each sample separately instead of co-assembling"
+        ),
     )
     ap.add_argument(
         "--dry-run",
@@ -1029,7 +1457,7 @@ def main(argv: List[str]) -> int:
         type=int,
         default=None,
         help="total memory budget in GB, divided between concurrent steps "
-        "(default: let each module use its own default)",
+        "(default: the [limits] budget)",
     )
     ap.add_argument(
         "--strict-fingerprints",
@@ -1063,10 +1491,22 @@ def main(argv: List[str]) -> int:
 
     if args.steps:
         study.steps = tuple(args.steps)
+        study.steps_chosen = True
+    if args.no_coassembly or cohort:
+        if cohort and study.coassemble_chosen and study.coassemble:
+            # The sheet asked for a co-assembly and the command asked for a cohort. The command
+            # wins, because `metawrap2 cohort` is nothing but per-sample assembly - but say so,
+            # rather than quietly ignoring a line the user wrote.
+            warning(
+                "the sheet sets coassemble = true, but `metawrap2 cohort` assembles each sample "
+                "separately; running per-sample. Use `metawrap2 run` to honour the sheet."
+            )
+        study.coassemble = False
+    # After the mode is final, not before: --no-coassembly changes which default step list applies,
+    # and --skip has to subtract from whichever one won.
+    resolve_steps(study)
     if args.skip:
         study.steps = tuple(s for s in study.steps if s not in args.skip)
-    if args.no_coassembly:
-        study.coassemble = False
     if not study.steps:
         error("no steps left to run.")
 
@@ -1081,7 +1521,34 @@ def main(argv: List[str]) -> int:
     force = bool(args.force or _command.runner.force)
 
     settings = load_settings(args.config)
-    threads = args.threads or settings.threads or 1
+    # The driver is the one process that knows how many steps will run at once, so it is the one
+    # that has to divide the budget. Resolving it here (rather than letting each module resolve
+    # the whole machine for itself) is what keeps N concurrent steps from each claiming 80% of
+    # the RAM between them. See metawrap2.limits.
+    budget = _limits.resolve(settings.limits)
+    threads = args.threads or settings.threads or budget.threads
+    if threads > budget.threads:
+        if args.threads is not None:
+            warning(
+                "Asked for %d threads but the budget allows %d of this machine's %d cores; "
+                "using %d. Raise [limits] max_thread_fraction or max_threads to use more."
+                % (threads, budget.threads, budget.machine_cores, budget.threads)
+            )
+        threads = budget.threads
+    memory_gb = args.memory or max(1, int(budget.memory_gb))
+    if memory_gb > budget.memory_gb:
+        if args.memory is not None:
+            warning(
+                "Asked for %d GB but the budget allows %d GB of this machine's %s; using %d. "
+                "Raise [limits] max_memory_fraction or max_memory_gb to use more."
+                % (
+                    memory_gb,
+                    int(budget.memory_gb),
+                    _limits.human(budget.machine_memory_bytes),
+                    int(budget.memory_gb),
+                )
+            )
+        memory_gb = max(1, int(budget.memory_gb))
     layout = Layout(args.output)
     os.makedirs(layout.root, exist_ok=True)
 
@@ -1103,6 +1570,13 @@ def main(argv: List[str]) -> int:
         % ("co-" if study.coassemble else "per-sample", threads, args.jobs)
     )
     comm("output: %s" % layout.root)
+    comm("Resource budget: %s" % budget.describe())
+    overrides = _limits.overrides()
+    if overrides:
+        comm(
+            "Budget overridden on the command line: %s"
+            % ", ".join("--%s %s" % (k.replace("_", "-"), v) for k, v in sorted(overrides.items()))
+        )
 
     state = StepState(layout, resume=resume, strict_fingerprints=args.strict_fingerprints)
     return execute(
@@ -1115,7 +1589,7 @@ def main(argv: List[str]) -> int:
         global_flags,
         state,
         dry_run,
-        memory_gb=args.memory,
+        memory_gb=memory_gb,
     )
 
 

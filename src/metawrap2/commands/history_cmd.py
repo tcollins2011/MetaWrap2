@@ -17,13 +17,13 @@ MetaWrap2 is installed. This command reads it back.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shlex
 from typing import Any, Dict, List, Optional
 
 from .. import history as _history
+from ..cliformat import make_parser
 
 _STATUS_MARK = {
     _history.COMPLETED: "ok",
@@ -182,7 +182,7 @@ def _print_diff(rows: List[Dict[str, Any]], left: str, right: str) -> int:
 
 
 def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(
+    ap = make_parser(
         prog="metawrap2 history", description="Show the history of MetaWrap2 runs on this machine."
     )
     ap.add_argument(

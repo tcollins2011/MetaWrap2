@@ -21,7 +21,8 @@ import shlex
 import shutil
 from typing import List
 
-from ..config import load_settings
+from ..cliformat import make_parser
+from ..config import MODULE_ENVS, load_settings
 from ..io import reads as _reads
 from ..io.seqio import smart_open
 from ..scripts import select_human_reads, skip_human_reads
@@ -50,12 +51,14 @@ from ._common import (
     warning,
 )
 
-CONDA_ENV = "metawrap2-read_qc"
+CONDA_ENV = MODULE_ENVS["read_qc"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 FASTQC = "fastqc -q -t {threads} -o {outdir} -f fastq {files}"
 TRIM_GALORE = "trim_galore --no_report_file --paired -j {trim_threads} -o {outdir} {r1} {r2}"
 TRIM_GALORE_SINGLE = "trim_galore --no_report_file -j {trim_threads} -o {outdir} {reads}"
+FASTP = "fastp -i {r1} -I {r2} -o {o1} -O {o2} -w {trim_threads} -j {json} -h {html}"
+FASTP_SINGLE = "fastp -i {reads} -o {o1} -w {trim_threads} -j {json} -h {html}"
 BMTAGGER = "bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1" " -1 {r1} -2 {r2} -o {listfile}"
 BMTAGGER_SINGLE = (
     "bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1" " -1 {reads} -o {listfile}"
@@ -65,11 +68,25 @@ DEFAULT_HOST = "hg38"  # prefix of the host index inside the bmtagger database f
 # trim_galore's own docs warn that -j above 4 gives no further speedup (cutadapt scaling),
 # and it spawns ~4 processes per core, so we cap it rather than passing -t straight through.
 TRIM_GALORE_MAX_THREADS = 4
+# fastp is single-pass and threads properly, but its own docs put the useful ceiling at 16 -
+# beyond that it is I/O bound and the extra workers just contend.
+FASTP_MAX_THREADS = 16
+#: Which trimmer runs by default. Measured, not assumed: `benchmark run cami2_gi trimmer` over the
+#: 10 CAMI2 GI samples (333M read pairs) put fastp ahead on both halves of the ratio at once - it
+#: kept marginally more of everything (+0.03% reads, +0.83% bases, +0.40% Q30 bases) for 5.8% fewer
+#: CPU-hours and 29% less wall time, because cutadapt stops scaling at 4 threads and fastp does not.
+#: The quality margins are small enough to call a tie, and cost is what breaks a tie. trim-galore
+#: remains fully supported via
+#: --trimmer trim-galore, and is the better choice if 1.3 GB of RSS is too much (it peaks at 0.1 GB).
+#: Re-measure with `metawrap2 benchmark score cami2_gi trimmer`; the rows are in
+#: benchmarks/results/cami2_gi.tsv.
+DEFAULT_TRIMMER = "fastp"
+TRIMMERS = ("trim-galore", "fastp")
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = make_parser(
         prog="metawrap2 read_qc",
         usage="metawrap2 read_qc [options] -1 reads_1.fastq [-2 reads_2.fastq] -o output_dir",
         description="Quality-trim reads and remove host sequences. Paired files may use any "
@@ -99,6 +116,15 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--skip-trimming", action="store_true", help="dont trim sequences with trimgalore"
+    )
+    p.add_argument(
+        "--trimmer",
+        choices=list(TRIMMERS),
+        default=DEFAULT_TRIMMER,
+        help="which trimmer to use (default %s). fastp is single-pass and threads to %d, past the "
+        "%d-thread cutadapt ceiling trim-galore is stuck behind, and on CAMI2 it kept marginally "
+        "more bases for less CPU; both are fully supported."
+        % (DEFAULT_TRIMMER, FASTP_MAX_THREADS, TRIM_GALORE_MAX_THREADS),
     )
     p.add_argument(
         "--skip-pre-qc-report",
@@ -182,6 +208,71 @@ def _fastqc_report(args, env, name: str, files: List[str]) -> None:
     comm("%s saved to: %s" % (name, outdir))
 
 
+def _run_trim_galore(args, env, streams: List[str], paired: bool) -> List[str]:
+    """Trim with Trim Galore. Returns the files it produced, in mate order."""
+    trim_threads = min(args.threads, TRIM_GALORE_MAX_THREADS)
+    if paired:
+        run(
+            TRIM_GALORE.format(
+                outdir=args.output, r1=streams[0], r2=streams[1], trim_threads=trim_threads
+            ),
+            env=env,
+            tool="trim_galore",
+        )
+        # Trim Galore names paired output <stem>_val_1.fq / <stem>_val_2.fq, and single-end
+        # output <stem>_trimmed.fq.
+        return [
+            os.path.join(args.output, "%s_val_%d.fq" % (_trim_stem(streams[i]), i + 1))
+            for i in range(2)
+        ]
+    run(
+        TRIM_GALORE_SINGLE.format(outdir=args.output, reads=streams[0], trim_threads=trim_threads),
+        env=env,
+        tool="trim_galore",
+    )
+    return [os.path.join(args.output, "%s_trimmed.fq" % _trim_stem(streams[0]))]
+
+
+def _run_fastp(args, env, streams: List[str], trimmed: List[str], paired: bool) -> List[str]:
+    """Trim with fastp. Returns the files it produced, in mate order.
+
+    fastp writes where it is told, so unlike Trim Galore there is no output-naming convention to
+    predict - it is pointed straight at the final `trimmed_N.fastq` names, and the move afterwards
+    is a no-op. It also emits a JSON/HTML report, which is kept: the JSON carries before/after read
+    counts and Q30 fractions, which is what a trimmer comparison is scored on.
+    """
+    trim_threads = min(args.threads, FASTP_MAX_THREADS)
+    report_json = os.path.join(args.output, "fastp.json")
+    report_html = os.path.join(args.output, "fastp.html")
+    if paired:
+        run(
+            FASTP.format(
+                r1=streams[0],
+                r2=streams[1],
+                o1=trimmed[0],
+                o2=trimmed[1],
+                trim_threads=trim_threads,
+                json=report_json,
+                html=report_html,
+            ),
+            env=env,
+            tool="fastp",
+        )
+        return [trimmed[0], trimmed[1]]
+    run(
+        FASTP_SINGLE.format(
+            reads=streams[0],
+            o1=trimmed[0],
+            trim_threads=trim_threads,
+            json=report_json,
+            html=report_html,
+        ),
+        env=env,
+        tool="fastp",
+    )
+    return [trimmed[0]]
+
+
 def _deinterleave_input(args, sample: str) -> List[str]:
     """Split interleaved input into two mate files inside the output dir; return both paths."""
     announcement("SPLITTING INTERLEAVED READS INTO MATES")
@@ -263,38 +354,22 @@ def main(argv: List[str]) -> int:
             os.path.join(args.output, "trimmed_%d.fastq" % (i + 1)) for i in range(len(streams))
         ]
         if not args.skip_trimming and ckpt.todo("trimming"):
-            announcement("RUNNING TRIM-GALORE")
-            trim_threads = min(args.threads, TRIM_GALORE_MAX_THREADS)
-            if paired:
-                run(
-                    TRIM_GALORE.format(
-                        outdir=args.output, r1=streams[0], r2=streams[1], trim_threads=trim_threads
-                    ),
-                    env=env,
-                    tool="trim_galore",
-                )
-                # Trim Galore names paired output <stem>_val_1.fq / <stem>_val_2.fq, and
-                # single-end output <stem>_trimmed.fq.
-                produced = [
-                    os.path.join(args.output, "%s_val_%d.fq" % (_trim_stem(streams[i]), i + 1))
-                    for i in range(2)
-                ]
+            if args.trimmer == "fastp":
+                announcement("RUNNING FASTP")
+                produced = _run_fastp(args, env, streams, trimmed, paired)
             else:
-                run(
-                    TRIM_GALORE_SINGLE.format(
-                        outdir=args.output, reads=streams[0], trim_threads=trim_threads
-                    ),
-                    env=env,
-                    tool="trim_galore",
-                )
-                produced = [os.path.join(args.output, "%s_trimmed.fq" % _trim_stem(streams[0]))]
+                announcement("RUNNING TRIM-GALORE")
+                produced = _run_trim_galore(args, env, streams, paired)
             for src, dest in zip(produced, trimmed):
-                fs_move(src, dest)
+                # fastp was pointed at the final names already; only Trim Galore's convention-named
+                # output needs moving.
+                if os.path.abspath(src) != os.path.abspath(dest):
+                    fs_move(src, dest)
             if not file_size(trimmed[0]):
                 error("Something went wrong with trimming the reads. Exiting.")
             for path in trimmed:
                 expect_produced(
-                    path, "trimmed reads", hint="Check Trim Galore's output in run.stderr."
+                    path, "trimmed reads", hint="Check %s's output in run.stderr." % args.trimmer
                 )
             comm("Trimmed reads saved to: %s" % ", ".join(trimmed))
             streams = list(trimmed)
@@ -394,7 +469,7 @@ def main(argv: List[str]) -> int:
 
         # Drop the decompressed copies of the (compressed) inputs - the final reads are
         # written, so these are now just a duplicate of data the user already has.
-        for path in (decompressed if not dry_run() else []):
+        for path in decompressed if not dry_run() else []:
             if os.path.isfile(path) and os.path.abspath(path) not in {
                 os.path.abspath(f) for f in final
             }:

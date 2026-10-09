@@ -1,0 +1,12 @@
+# CheckM2, alone, because it cannot be solved with anything else here.
+#
+# Not a size decision: CheckM2 and the CheckM1/GUNC/DAS Tool set have no common solution at all
+# (verified against conda-forge + bioconda), so this is the one split in the bin-QC workflow that is
+# forced rather than chosen. It is also the faster scorer of the two and the one every benchmark in
+# this repo uses, so it is worth the second install.
+name: metawrap2-checkm2
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - checkm2 >=1.0.2

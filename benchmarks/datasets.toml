@@ -1,0 +1,193 @@
+# MetaWrap2 benchmark datasets.
+#
+# This file is data, not code, so that adding a dataset is a change a reviewer can read in one
+# sitting: the URL, the checksum, the exact size on the wire, and where the gold standard lives,
+# all next to each other.
+#
+# Every `bytes` value here was measured with a HEAD request against the host, not estimated.
+# That is the point of recording it: `metawrap2 benchmark fetch` compares the total against the
+# [limits] disk ceiling and refuses to start when there is no room, instead of filling the
+# filesystem and finding out at 80 GB. Sizes are also the cheap half of verification - a
+# truncated download is caught by its length before anything spends minutes hashing it.
+#
+# `md5` values are copied from the publisher's own `md5sums.tsv`, which is itself fetchable at
+# `<base_url><checksum_manifest>`. They are pinned here rather than read from that file at fetch
+# time on purpose: pinned, a re-fetch in two years verifies against the bytes this benchmark was
+# actually built on, and a silent re-publication upstream shows up as a checksum failure rather
+# than as quietly different results.
+
+schema = 1
+
+# --------------------------------------------------------------------------------------------
+# The real benchmark: CAMI2's human gastrointestinal body site. Ten samples of simulated short
+# reads with a known ground truth, which is the only way to measure binning *correctness* rather
+# than CheckM's opinion of it.
+# --------------------------------------------------------------------------------------------
+[cami2_gi]
+title = "CAMI2 human microbiome challenge - gastrointestinal, short read"
+description = """\
+Ten simulated Illumina samples from the CAMI2 human gastrointestinal body site, with a per-contig \
+gold standard mapping every contig to the genome it came from. Because the truth is known, this \
+measures whether a bin is right, not just whether CheckM thinks it is complete."""
+citation = "Meyer F, et al. Critical Assessment of Metagenome Interpretation - the second round of challenges. Nat Methods 19:429-440 (2022)."
+doi = "10.4126/FRL01-006425518"
+license = "CC BY 4.0"
+base_url = "https://frl.publisso.de/data/frl:6425518/"
+checksum = "md5"
+checksum_manifest = "md5sums.tsv"
+
+# The published dataset interleaves gastrointestinal and oral samples in one directory; these ten
+# are the gastrointestinal ones, per the dataset's own README. Taking a subset of body sites is
+# deliberate - one body site is a benchmark, all of them is a cluster job.
+samples = [0, 1, 2, 3, 4, 5, 9, 10, 11, 12]
+
+# Roughly 95% of each 10 GB archive is per-OTU BAM alignments that a binning benchmark never
+# reads. Keeping only these members does not shrink the download - the archive is a single gzip
+# stream, so there is no way to fetch part of it - but it keeps the extracted footprint to the
+# reads and contigs, which is the difference between 100 GB on disk and a few GB.
+keep = [
+    "*/reads/*",
+    "*/contigs/*",
+    "*/*.tsv",
+    "*/*.tsv.gz",
+    "*/*.yaml",
+]
+
+# The reads are interleaved pairs in one FASTQ per sample. read_qc needs them split, so the
+# harness deinterleaves on the way in; declaring the shape here is what tells it to.
+#
+# The glob names the file rather than the directory because reads/ also contains a 3 MB
+# subsample_0.fq debugging extract, which sits under the same sample_N directory and therefore
+# carries the same sample label. A directory-wide match finds both, and the small one wins - a
+# trimmer benchmarked on 3 MB of a 10 GB sample. The archives ship it uncompressed, so the
+# trailing wildcard is there only to keep a re-published .fq.gz matching.
+reads_glob = "*/reads/anonymous_reads.fq*"
+reads_layout = "interleaved"
+
+# Which genome every read came from, one file per sample, which is the only truth that can say how
+# much of a sample an organism actually was. The gold_standard binning file cannot: it maps contigs
+# to genomes, and a contig carries no abundance. Quantifier comparisons score against this; the
+# keep list above already retains it.
+abundance_truth_glob = "*/reads/reads_mapping.tsv.gz"
+
+# Peak disk is bounded by the download itself: each archive is deleted once extracted, so what
+# lands can never exceed what arrived. Deinterleaving into mate files happens later, under the
+# benchmark's own work directory, and roughly doubles the reads - budget for that separately. No
+# multiplier is applied here because a measured upper bound beats an invented one.
+disk_note = "peak disk is bounded by the download; archives are removed as they are extracted"
+
+[[cami2_gi.files]]
+sample = 0
+path = "gastrooral/sample_0.tar.gz"
+md5 = "60e04c041c38ea168af03fc55dff15d6"
+bytes = 9738621091
+
+[[cami2_gi.files]]
+sample = 1
+path = "gastrooral/sample_1.tar.gz"
+md5 = "c3747f91ae06188d0cf8d76a2ac02118"
+bytes = 10250974699
+
+[[cami2_gi.files]]
+sample = 2
+path = "gastrooral/sample_2.tar.gz"
+md5 = "843990471f8ef667ff87ac2626c68d01"
+bytes = 10170187766
+
+[[cami2_gi.files]]
+sample = 3
+path = "gastrooral/sample_3.tar.gz"
+md5 = "9d8edda648e0fee325e5d224f94389ec"
+bytes = 10177029140
+
+[[cami2_gi.files]]
+sample = 4
+path = "gastrooral/sample_4.tar.gz"
+md5 = "377e8a41e8761a5a50a5994baae862b0"
+bytes = 10175871265
+
+[[cami2_gi.files]]
+sample = 5
+path = "gastrooral/sample_5.tar.gz"
+md5 = "31bfddea9681fb3b69a01870a524f7db"
+bytes = 10104055457
+
+[[cami2_gi.files]]
+sample = 9
+path = "gastrooral/sample_9.tar.gz"
+md5 = "f3c155ef8e50a946d5b526ef5df47a6e"
+bytes = 10197695847
+
+[[cami2_gi.files]]
+sample = 10
+path = "gastrooral/sample_10.tar.gz"
+md5 = "b976afea3dd99c1dc550caf576856a11"
+bytes = 10222472111
+
+[[cami2_gi.files]]
+sample = 11
+path = "gastrooral/sample_11.tar.gz"
+md5 = "cf527e8420911e6cfbee0f6c07816636"
+bytes = 10254410423
+
+[[cami2_gi.files]]
+sample = 12
+path = "gastrooral/sample_12.tar.gz"
+md5 = "fd67f3823b6d7ede682c02f1586c372d"
+bytes = 10146112667
+
+# The gold standard. Three files out of the 505 in the published directory - the other 502 are
+# per-OTU assemblies and BAMs that answer a different question.
+[[cami2_gi.gold_standard]]
+role = "assembly"
+path = "per_bodysite/gastro_bam/gsa.fa"
+md5 = "22018c5a264d309bcf8412f816260052"
+bytes = 972133785
+note = "pooled gold-standard assembly across the ten samples; AMBER's reference assembly"
+
+[[cami2_gi.gold_standard]]
+role = "binning"
+path = "per_bodysite/gastro_bam/gsa_pooled_mapping_fixed.tsv"
+md5 = "954106872f9af342c0b7fd4422d8db9f"
+bytes = 12597447
+note = "contig -> genome truth, AMBER's -g argument. The 'fixed' file is the one to use; the unfixed one is kept alongside it upstream and has known duplicate rows"
+
+[[cami2_gi.gold_standard]]
+role = "binning_raw"
+path = "per_bodysite/gastro_bam/gsa_pooled_mapping.tsv"
+md5 = "6bed38a056082b3358c8796c97f136cf"
+bytes = 25194106
+note = "the unfixed mapping, pinned only so a run can show the two agree where it matters"
+
+
+# --------------------------------------------------------------------------------------------
+# The fixture: a few hundred contigs from three synthetic genomes, committed to the repository.
+# It exists so the harness itself - the fetch plan, the scorers, the TSV schema, the
+# time-to-performance arithmetic - is testable without a 100 GB download, which is the only way
+# any of that gets exercised in CI.
+# --------------------------------------------------------------------------------------------
+[tiny]
+title = "Tiny synthetic fixture (committed, no download)"
+description = """\
+Three synthetic genomes shredded into a few hundred contigs, with a gold standard mapping. Far \
+too small to say anything about a binner's accuracy; large enough to prove the harness computes \
+and records the numbers it claims to."""
+local = "fixtures/tiny"
+reads_glob = "reads/*.fq.gz"
+reads_layout = "paired"
+
+[[tiny.files]]
+sample = 1
+path = "reads/sample_1_1.fq.gz"
+
+[[tiny.files]]
+sample = 1
+path = "reads/sample_1_2.fq.gz"
+
+[[tiny.gold_standard]]
+role = "assembly"
+path = "assembly.fa"
+
+[[tiny.gold_standard]]
+role = "binning"
+path = "gold_standard_binning.tsv"

@@ -9,6 +9,12 @@ short-read SNP cutoff would tolerate, so any aligned read is recruited and the m
 is not used. ``reassemble_bins`` passes these to SPAdes as ``--nanopore`` alongside the
 short-read pairs.
 
+Only primary alignments are recruited, which this did not previously enforce. ``minimap2 -ax map-ont``
+emits secondary alignments by default and writes their SEQ as ``*``, so every repeat a long read
+crosses added a one-base read to the FASTQ that SPAdes was handed. The old test for "did this align"
+was the presence of an ``NM`` tag, which minimap2 puts on secondary records too, so it did not catch
+them; alignment status now comes off the FLAG, where SAM puts it.
+
 Usage (``reassemble_bins`` does this for you)::
 
     minimap2 -ax map-ont assembly.fa nanopore.fastq \\
@@ -29,8 +35,9 @@ from typing import Dict, Iterator, List, Optional, TextIO
 
 from ..progress import bar
 from .filter_reads_for_bin_reassembly import (
+    EXTRA_ALIGNMENT_FLAGS,
     FLAG_REVERSE,
-    has_nm_tag,
+    aligned,
     load_contig_bins,
     reverse_complement,
 )
@@ -48,7 +55,17 @@ def _records(stream: Iterator[str], contig_bins: Dict[str, str]) -> Iterator[Lis
             continue
         if fields[2] not in contig_bins:
             continue
-        if not has_nm_tag(fields):
+        # Secondary and supplementary alignments are dropped here, and this is the path where it
+        # matters most: `minimap2 -ax map-ont` emits secondary alignments by default, writes SEQ as
+        # `*` on every one of them, and sets NM on them - so the old NM-presence test let them
+        # through and each became a one-base read in the FASTQ handed to SPAdes. A long read
+        # crossing a repeat produces several.
+        try:
+            if int(fields[1]) & EXTRA_ALIGNMENT_FLAGS:
+                continue
+        except ValueError:
+            continue
+        if not aligned(fields):
             continue
         yield fields
 

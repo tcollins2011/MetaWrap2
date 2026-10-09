@@ -12,6 +12,7 @@ nav:
   - Installation: installation.md
   - Usage: usage.md
   - Modules: modules.md
+  - Benchmarks: benchmarks.md
   - Provenance & reproducibility: provenance.md
   - Contributing: contributing.md
 markdown_extensions:

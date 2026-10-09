@@ -156,6 +156,10 @@ class RunRecorder:
     started: str = field(default_factory=_now)
     commands: List[str] = field(default_factory=list)
     environment: Dict[str, Any] = field(default_factory=dict)
+    #: The resolved resource budget, and what it was measured against. Worth recording for the
+    #: same reason the databases are: "why was this run slower than that one" is unanswerable if
+    #: nothing says how much of the machine each was allowed. See metawrap2.limits.
+    budget: Dict[str, Any] = field(default_factory=dict)
     _t0: float = field(default_factory=time.time)
 
     def elapsed(self) -> float:
@@ -179,6 +183,7 @@ class RunRecorder:
             "conda_env": self.conda_env,
             "conda_packages": conda_env_packages(self.conda_env),
             "platform": self.platform,
+            "budget": dict(self.budget),
             "python": sys.version.split()[0],
             "metawrap2_version": self.version,
             "metawrap2_source": source_revision(),
@@ -241,6 +246,7 @@ class RunRecorder:
             "conda_env": self.conda_env,
             "databases": self.databases,
             "platform": self.platform,
+            "budget": dict(self.budget),
             "tool_versions": tool_versions,
             "environment": self.environment,
             "inputs": input_paths,

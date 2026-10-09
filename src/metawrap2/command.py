@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from typing import List, Optional, Protocol, Sequence, TextIO, Union
+from typing import Dict, List, Optional, Protocol, Sequence, TextIO, Union
 
 from .logfilter import LogFilter
 from .logging import log_tool_output
@@ -45,6 +46,7 @@ class Recorder(Protocol):
 
 __all__ = [
     "CommandRunner",
+    "EnvManagerMissing",
     "ToolError",
     "run",
     "runner",
@@ -79,6 +81,28 @@ class ToolError(RuntimeError):
         if self.hint:
             msg.append("Hint: " + self.hint)
         return "\n".join(msg)
+
+
+class EnvManagerMissing(RuntimeError):
+    """Raised when a command needs a conda environment but the env manager is not on PATH.
+
+    Without this check the failure surfaces from deep inside :func:`subprocess.Popen` as a bare
+    ``FileNotFoundError: 'mamba'``, which reads like the *tool* is missing rather than the thing
+    that was supposed to find it. It is raised when the argv is built rather than when it runs, so
+    a long pipeline stops on its first step instead of recording a directory of failed ones.
+    """
+
+    def __init__(self, env_manager: str, env: str) -> None:
+        super().__init__(
+            "%s is not on PATH, so tools cannot be run inside their conda environment (%s).\n"
+            "Either add it - a conda/mamba install usually needs "
+            'PATH="$HOME/miniforge3/bin:$PATH" exported, which a non-login shell and most '
+            "batch schedulers do not do for you - or set use_conda_envs = false under [settings] "
+            "in ~/.metawrap2/config.toml to run whatever is already on PATH instead."
+            % (env_manager, env)
+        )
+        self.env_manager = env_manager
+        self.env = env
 
 
 _RUN_FLAGS_CACHE: dict = {}
@@ -179,6 +203,10 @@ class CommandRunner:
         """argv prefix that runs a command inside conda env *env* (or [] if None)."""
         if not env:
             return []
+        if not self.dry_run and shutil.which(self.env_manager) is None:
+            # Not under a dry run: a dry run is for seeing the plan on a machine that may not have
+            # anything installed yet, and printing the command it would run costs nothing there.
+            raise EnvManagerMissing(self.env_manager, env)
         return [self.env_manager, "run"] + _run_flags(self.env_manager) + ["-n", env]
 
     # -- execution ------------------------------------------------------------------------
@@ -194,6 +222,7 @@ class CommandRunner:
         hint: str = "",
         check: bool = True,
         cwd: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> int:
         argv = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
         tool = tool or (argv[0] if argv else "external tool")
@@ -220,6 +249,8 @@ class CommandRunner:
             check=check,
             cwd=cwd,
             recorded=recorded,
+            isolate_user_site=bool(env),
+            extra_env=extra_env,
         )
 
     def _open_run_log(self, path: Optional[str], header: str):
@@ -230,7 +261,41 @@ class CommandRunner:
         fh.write(header)
         return fh
 
-    def _execute(self, full, *, tool, stdout_path, hint, check, cwd, recorded) -> int:
+    def _child_env(
+        self, isolate_user_site: bool, extra: Optional[Dict[str, str]] = None
+    ) -> Optional[Dict[str, str]]:
+        """The environment for the child process, or None to inherit this one unchanged.
+
+        A tool running inside a conda env gets ``PYTHONNOUSERSITE=1``, because ``~/.local`` comes
+        *before* the env on ``sys.path`` and silently overrides whatever the env pinned. That is not
+        hypothetical: AMBER's env pins matplotlib below 3.9 for an API it uses, and a matplotlib 3.11
+        in the user's own site-packages was imported instead and crashed it. Only for env-wrapped
+        commands - without an env there is no pin to protect, and a tool the user pip-installed into
+        ``~/.local`` is then exactly the tool they meant to run.
+
+        *extra* is for a tool that needs a variable set for it specifically; see THREAD_LIMITS.
+        """
+        if not isolate_user_site and not extra:
+            return None
+        child = dict(os.environ)
+        if isolate_user_site:
+            child["PYTHONNOUSERSITE"] = "1"
+        child.update(extra or {})
+        return child
+
+    def _execute(
+        self,
+        full,
+        *,
+        tool,
+        stdout_path,
+        hint,
+        check,
+        cwd,
+        recorded,
+        isolate_user_site=False,
+        extra_env=None,
+    ) -> int:
         header = "\n$ %s\n" % recorded
         run_out = self._open_run_log(self.run_stdout_path, header)
         run_err = self._open_run_log(self.run_stderr_path, header)
@@ -251,6 +316,7 @@ class CommandRunner:
                 cwd=cwd,
                 text=True,
                 bufsize=1,
+                env=self._child_env(isolate_user_site, extra_env),
                 start_new_session=True,  # own process group, so Ctrl-C can kill the tree
             )
             # stderr always streams to the screen + run.stderr (+ tail for error messages)
@@ -272,13 +338,17 @@ class CommandRunner:
                 )
             for t in threads:
                 t.start()
-            try:
-                rc = proc.wait()
-            except KeyboardInterrupt:
-                self._terminate(proc)
-                raise
+            rc = proc.wait()
             for t in threads:
                 t.join()
+        except KeyboardInterrupt:
+            # Everything from Popen onwards, not just the wait: an interrupt arriving while the
+            # output pumps were being started left the tool running with all 96 threads it had
+            # been granted, orphaned by the run that was exiting - and the next thing the user
+            # started then competed with it for the machine.
+            if proc is not None:
+                self._terminate(proc)
+            raise
         finally:
             # Report what was collapsed, so a quiet log never hides that it was filtered.
             for fh, filt in ((run_out, out_filter), (run_err, err_filter)):
@@ -308,6 +378,31 @@ class CommandRunner:
 
 # One shared instance the whole package uses; configured by the CLI and start_run().
 runner = CommandRunner()
+
+
+#: Environment that confines a tool to the parallelism it was *asked* for.
+#:
+#: A numerical library picks its own thread count from the core count unless told otherwise, so a tool
+#: that forks N workers and does linear algebra in each gets N x cores threads fighting over cores.
+#:
+#: Measured, not theorised, and measured *after* the fix rather than assumed from it: capping the
+#: libraries took CONCOCT binning one CAMI2 sample from 29.9 CPU-hours to 23.8, a 1.3x saving, for a
+#: bin set identical down to the count. Small but free, so it stays.
+#:
+#: Worth stating what it does not explain. The same CONCOCT version, with byte-identical arguments and
+#: input, costs 5.6 CPU-hours under a pipeline whose environment carries MKL and Python 2.7 instead of
+#: a pthreads OpenBLAS and 3.12. The cap closes a fifth of that; the rest is somewhere in the compiled
+#: numerical stack and is not accounted for here. Do not read this constant as having fixed it.
+#:
+#: Applies to any tool that forks *and* does array maths. Passed explicitly rather than set globally,
+#: because a tool that is internally threaded and does not fork wants the opposite.
+THREAD_LIMITS = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
 
 
 def run(cmd, **kw) -> int:
@@ -388,3 +483,34 @@ def tool_path_in_env(env: Optional[str], tool: str) -> str:
         pass
     _TOOL_PATH_CACHE[key] = resolved
     return resolved
+
+
+def capture_in_env(env: Optional[str], argv: Sequence[str], timeout: int = 120) -> str:
+    """Run *argv* inside conda env *env* and return its stdout, or ``""`` if anything went wrong.
+
+    For asking an env a question rather than making it do work - "can torch see a GPU in here?" -
+    where the answer decides a flag and no answer is itself an answer. Deliberately silent: every
+    caller has a usable fallback, and a traceback from a probe would look like a failure of the thing
+    being probed for.
+    """
+    try:
+        if env:
+            full = (
+                [runner.env_manager, "run"]
+                + _run_flags(runner.env_manager)
+                + ["-n", env]
+                + list(argv)
+            )
+        else:
+            full = list(argv)
+        out = subprocess.run(
+            full,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return (out.stdout or "") if out.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""

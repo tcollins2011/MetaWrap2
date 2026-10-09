@@ -19,7 +19,8 @@ import os
 import random
 from typing import List
 
-from ..config import load_settings
+from ..cliformat import make_parser
+from ..config import MODULE_ENVS, load_settings
 from ..io.seqio import smart_open
 from ..progress import bar
 from ..scripts import kraken2_translate, kraken_to_krona
@@ -40,7 +41,7 @@ from ._common import (
     warning,
 )
 
-CONDA_ENV = "metawrap2-kraken2"
+CONDA_ENV = MODULE_ENVS["kraken2"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 KRAKEN2_PAIRED = (
@@ -55,7 +56,7 @@ FASTA_EXTS = (".fa", ".fasta", ".fa.gz", ".fasta.gz")
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = make_parser(
         prog="metawrap2 kraken2",
         usage="metawrap2 kraken2 [options] -o output_dir assembly.fasta reads_1.fastq reads_2.fastq ...",
         description="Taxonomic profiling of any number of assembly FASTA files (*.fa/*.fasta) "

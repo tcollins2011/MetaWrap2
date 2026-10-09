@@ -74,7 +74,7 @@ def test_lock_platform_translates_each_machine(monkeypatch, machine, system, exp
 
 def test_write_lockfile_records_explicit_urls_with_checksums(envs_dir, monkeypatch):
     stub_conda(monkeypatch)
-    path = ie.write_lockfile("binning", "metawrap2-binning", "linux-64")
+    path = ie.write_lockfile("binning", "metawrap2-bins", "linux-64")
     assert path == ie.lock_path("binning", "linux-64")
     content = read(path)
     assert "@EXPLICIT" in content
@@ -84,7 +84,7 @@ def test_write_lockfile_records_explicit_urls_with_checksums(envs_dir, monkeypat
 def test_write_lockfile_refuses_output_that_is_not_explicit(envs_dir, monkeypatch):
     """A `conda list` that fell back to human-readable output must not be saved as a lockfile."""
     stub_conda(monkeypatch, stdout="samtools 1.20 h50ea8bc_0 conda-forge\n")
-    assert ie.write_lockfile("binning", "metawrap2-binning", "linux-64") is None
+    assert ie.write_lockfile("binning", "metawrap2-bins", "linux-64") is None
     assert not os.path.exists(ie.lock_path("binning", "linux-64"))
 
 
@@ -103,13 +103,13 @@ def test_create_from_lock_invokes_conda_create_with_the_file(envs_dir, monkeypat
         return 0
 
     monkeypatch.setattr(ie, "run", fake_run)
-    assert ie.create_from_lock("binning", "metawrap2-binning", "linux-64") is True
+    assert ie.create_from_lock("binning", "metawrap2-bins", "linux-64") is True
     assert seen["cmd"] == [
         "/usr/bin/conda",
         "create",
         "-y",
         "-n",
-        "metawrap2-binning",
+        "metawrap2-bins",
         "--file",
         lock,
     ]
@@ -147,3 +147,46 @@ def test_fix_rebuilds_only_the_broken_environments(monkeypatch, capsys):
     assert "read_qc" not in argv
     assert "--force" in argv and "-t" in argv and "6" in argv and "--no-test" in argv
     assert "All rebuilt environments are healthy" in capsys.readouterr().out
+
+
+def test_recreating_an_env_removes_it_first_rather_than_passing_force(tmp_path, monkeypatch):
+    """`mamba env create --force` does not exist in mamba 2.x, where the command is micromamba's.
+
+    It exits with "The following argument was not expected: --force", so every --force rebuild failed
+    without creating anything - and the env the user asked to replace was still the old one.
+    """
+    calls = []
+    monkeypatch.setattr(subprocess, "call", lambda cmd, **_kw: calls.append(cmd) or 0)
+    ie._create_one("benchmark-amber", "metawrap2-benchmark-amber", "spec.yaml", True, str(tmp_path))
+
+    assert calls[0][:4] == ["mamba", "env", "remove", "-y"]
+    assert "metawrap2-benchmark-amber" in calls[0]
+    assert calls[1][:3] == ["mamba", "env", "create"]
+    assert not any("--force" in cmd for cmd in calls)
+
+
+def test_creating_a_new_env_does_not_remove_anything(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "call", lambda cmd, **_kw: calls.append(cmd) or 0)
+    ie._create_one("binning", "metawrap2-bins", "spec.yaml", False, str(tmp_path))
+    assert [cmd[:3] for cmd in calls] == [["mamba", "env", "create"]]
+
+
+def test_the_global_force_flag_reaches_the_installer(monkeypatch, envs_dir):
+    """--force is stripped by the CLI before the module's parser sees it, wherever it was written.
+
+    So `metawrap2 install-env benchmark-amber --force` set the global flag and left args.force False:
+    the installer said "already exists; skipping (use --force to recreate)" to somebody who had just
+    typed --force.
+    """
+    with open(os.path.join(envs_dir, "benchmark-amber.yaml"), "w") as fh:
+        fh.write("name: metawrap2-benchmark-amber\n")
+    monkeypatch.setattr(ie, "ensure_mamba", lambda: True)
+    monkeypatch.setattr(ie, "conda_env_exists", lambda _env: True)
+    monkeypatch.setattr(ie.runner, "force", True)
+    built = []
+    monkeypatch.setattr(
+        ie, "_create_one", lambda m, e, y, force, log: built.append((m, force)) or (m, True, log)
+    )
+    assert ie.main(["benchmark-amber", "--no-test"]) == 0
+    assert built == [("benchmark-amber", True)]
