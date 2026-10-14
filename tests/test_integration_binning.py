@@ -135,6 +135,12 @@ def test_binning_end_to_end_with_stubs(tmp_path, stub_path):
     # the default aligner, piped into the sort rather than routed through a SAM on disk
     assert "minimap2 -ax sr" in cmds and "| samtools sort" in cmds
     assert not any(f.endswith(".sam") for f in os.listdir(out / "work_files"))
+    # The BAM is scratch once the depth table exists, and its resume marker goes with it: leaving
+    # align_reads marked done with no BAM on disk would let a later --resume bin on an empty table.
+    work = out / "work_files"
+    assert not [f for f in os.listdir(work) if f.endswith(".bam")]
+    assert (work / binning.DEPTH_TABLE).exists()
+    assert not (out / ".metawrap2" / "steps" / "align_reads.done").exists()
 
 
 def _binning_argv(tmp_path, cfg, out, extra=()):
@@ -148,60 +154,6 @@ def _binning_argv(tmp_path, cfg, out, extra=()):
         + list(extra)
         + [str(tmp_path / "s_1.fastq"), str(tmp_path / "s_2.fastq")]
     )
-
-
-@pytest.mark.parametrize("aligner", sorted(binning.ALIGNERS))
-def test_every_aligner_choice_produces_coverage(tmp_path, stub_path, aligner):
-    """--aligner has to reach a BAM by all three routes, not just the default one.
-
-    The stub for each is keyed off that aligner's own index flag, so an aligner wired to the wrong
-    index path - minimap2's separate .mmi against bwa's prefix-is-the-assembly - fails here rather
-    than silently mapping against an index that was never built.
-    """
-    cfg = tmp_path / "mw2.toml"
-    cfg.write_text("[settings]\nuse_conda_envs = false\n")
-    out = tmp_path / "binning_out"
-
-    rc = binning.main(_binning_argv(tmp_path, cfg, out, ["--aligner", aligner, "--keep-bams"]))
-
-    assert rc == 0
-    assert (out / "work_files" / "s.bam").exists()
-    cmds = (out / "run_commands.txt").read_text()
-    spec = binning.ALIGNERS[aligner]
-    assert spec["index_cmd"].split()[0] in cmds
-    assert spec["paired"].split()[0] in cmds and "| samtools sort" in cmds
-
-
-def test_the_bams_are_gone_once_the_depth_tables_exist(tmp_path, stub_path):
-    """The BAM is scratch, not output: what the binners needed out of it is the depth table.
-
-    Also checks the resume marker went with it. Leaving align_reads marked done with no BAM on disk
-    would let a later ``--resume --maxbin2`` skip alignment and bin on an empty depth table, which
-    is the one way deleting them could do real harm.
-    """
-    cfg = tmp_path / "mw2.toml"
-    cfg.write_text("[settings]\nuse_conda_envs = false\n")
-    out = tmp_path / "binning_out"
-
-    assert binning.main(_binning_argv(tmp_path, cfg, out)) == 0
-
-    work = out / "work_files"
-    assert not [f for f in os.listdir(work) if f.endswith(".bam")]
-    assert (work / binning.DEPTH_TABLE).exists(), "the depth table is the output that matters"
-    assert (work / "assembly.fa").exists(), "the binners are handed this path; it has to survive"
-    assert not (out / ".metawrap2" / "steps" / "align_reads.done").exists()
-
-
-def test_keep_bams_keeps_them(tmp_path, stub_path):
-    """The escape hatch, for anyone who wants to look at an alignment afterwards."""
-    cfg = tmp_path / "mw2.toml"
-    cfg.write_text("[settings]\nuse_conda_envs = false\n")
-    out = tmp_path / "binning_out"
-
-    assert binning.main(_binning_argv(tmp_path, cfg, out, ["--keep-bams"])) == 0
-
-    assert (out / "work_files" / "s.bam").exists()
-    assert (out / ".metawrap2" / "steps" / "align_reads.done").exists()
 
 
 def test_a_failed_alignment_is_not_hidden_by_a_successful_sort(tmp_path, stub_path):

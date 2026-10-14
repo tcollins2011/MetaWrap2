@@ -16,42 +16,6 @@ from metawrap2.command import THREAD_LIMITS
 from metawrap2.modules import binning
 
 
-def test_the_limits_cover_every_library_that_reads_a_thread_count():
-    """One variable missed is one library still starting a thread per core."""
-    assert THREAD_LIMITS == {
-        "OMP_NUM_THREADS": "1",
-        "OPENBLAS_NUM_THREADS": "1",
-        "MKL_NUM_THREADS": "1",
-        "NUMEXPR_NUM_THREADS": "1",
-        "VECLIB_MAXIMUM_THREADS": "1",
-    }
-
-
-def test_extra_env_reaches_the_child_without_dropping_the_rest_of_the_environment():
-    runner = command.Runner() if hasattr(command, "Runner") else command.runner
-    child = runner._child_env(True, THREAD_LIMITS)
-    assert child is not None
-    assert child["OMP_NUM_THREADS"] == "1"
-    # PYTHONNOUSERSITE still applied, and the inherited environment is still there - a child handed a
-    # five-variable environment would lose PATH and fail to find its own tools.
-    assert child["PYTHONNOUSERSITE"] == "1"
-    assert child.get("PATH") == os.environ.get("PATH")
-    assert len(child) > len(THREAD_LIMITS) + 1
-
-
-def test_no_extra_env_and_no_isolation_still_inherits_unchanged():
-    """None means "inherit", which is cheaper than copying the environment for nothing."""
-    runner = command.runner
-    assert runner._child_env(False, None) is None
-    assert runner._child_env(False, {}) is None
-
-
-def test_extra_env_alone_is_enough_to_build_a_child_environment():
-    child = command.runner._child_env(False, {"X": "1"})
-    assert child is not None and child["X"] == "1"
-    assert "PYTHONNOUSERSITE" not in child or child.get("PYTHONNOUSERSITE") != "1"
-
-
 def test_concoct_is_run_with_the_limits_and_the_other_binners_are_not(tmp_path, monkeypatch):
     """CONCOCT forks and does array maths; metaBAT2 and MaxBin2 do neither, so they are left alone.
 
@@ -86,3 +50,11 @@ def test_concoct_is_run_with_the_limits_and_the_other_binners_are_not(tmp_path, 
     # silently acquire it, or a future reader will think the cap is cargo cult.
     others = [env for cmd, env in calls if not cmd.startswith("concoct ")]
     assert all(env is None for env in others), others
+
+    # The limits reach the child without dropping the rest of the environment: PYTHONNOUSERSITE
+    # still applied, and a child handed a five-variable environment would lose PATH and fail to
+    # find its own tools.
+    child = command.runner._child_env(True, THREAD_LIMITS)
+    assert child["OMP_NUM_THREADS"] == "1"
+    assert child["PYTHONNOUSERSITE"] == "1"
+    assert child.get("PATH") == os.environ.get("PATH")

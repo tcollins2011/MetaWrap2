@@ -1,87 +1,103 @@
 # Contributing to MetaWrap2
 
-Thanks for helping improve MetaWrap2! It is a pure-Python package - no Bash, Perl, or R.
+Thanks for helping. MetaWrap2 is pure Python, with no shell, Perl or R scripts.
 
 ## Setup
+
 ```
 git clone https://github.com/ursky/MetaWrap2.git
 cd MetaWrap2
 pip install -e ".[dev]"
-pre-commit install                      # format/lint what you touch, per commit
-pre-commit install --hook-type pre-push  # run the full gate before anything leaves your machine
+pre-commit install                       # format and lint what you touch, on each commit
+pre-commit install --hook-type pre-push  # run the full test gate before each push
 ```
 
 ## Running the tests
+
 ```
-python tests/run_on_small_machine.py -q   # the suite, exactly as the pre-push hook and CI run it
-python -m pytest -q tests/test_x.py       # one file, quickly, while you work
-metawrap2 doctor                          # probe module conda envs, software and databases
+python tests/run_on_small_machine.py -q   # the whole suite, as the pre-push hook and CI run it
+python -m pytest -q tests/test_x.py       # one file, while you work
+metawrap2 doctor                          # check conda envs, tools and databases
 ```
 
-The suite must give the same answer on any machine. Two rules keep it that way:
+No bioinformatics tool needs to be installed to run the suite.
 
-- Don't let a test depend on the host. `tests/conftest.py` gives every test the same fixed
-  machine (32 cores, 128 GB, no GPU, plenty of free disk) and the same `use_conda_envs` setting,
-  whatever it is really running on. If your test needs a different machine, monkeypatch
-  `limits.machine_cores` / `machine_memory_bytes` / `shutil.disk_usage` in the test; if it is about
-  measuring the real host, mark it `@pytest.mark.real_machine`.
-- Run it through `tests/run_on_small_machine.py` before you push (the pre-push hook does this for
-  you). It pretends to be a 2-core, 4 GB, 95%-full machine, so a test that only passes on a big
-  laptop fails here rather than on a CI runner after the push.
-No bioinformatics tool is needed for the test suite. Two kinds of test are worth knowing about
-before you change behaviour:
+The suite has to give the same result on every machine:
 
-- **Golden tests** (`tests/test_bin_refinement_golden.py`) run the real refinement algorithm -
-  real Binning_refiner, real consolidation and dereplication, with only CheckM replaced by a
-  deterministic stand-in - and compare every output file against recorded values. If your change
-  is not meant to alter results and one of these fails, the failure is the notification.
-- **The golden end-to-end test** (`tests/test_golden_end_to_end.py`) puts stub tools on PATH and
-  runs binning into bin_refinement, quant_bins and annotate_bins, pinning the output tree and the
-  `.stats.tsv` contract byte-for-byte. It catches what unit tests structurally cannot: a module
-  writing where the next one does not look.
+- `tests/conftest.py` gives every test the same simulated machine (32 cores, 128 GB, no GPU, plenty
+  of free disk) and the same `use_conda_envs` setting. If a test needs a different machine,
+  monkeypatch `limits.machine_cores`, `limits.machine_memory_bytes` or `shutil.disk_usage` in that
+  test. A test that measures the real host is marked `@pytest.mark.real_machine`.
+- `tests/run_on_small_machine.py` runs the suite as a 2-core, 4 GB machine with a 95%-full disk. A
+  test that only passes on a large machine fails there, before the push.
 
-Changing a golden value is fine when the change is intended - do it in the same commit, so the
-diff shows what the output used to be.
+Two kinds of test check results rather than code:
+
+- Golden tests (`tests/test_bin_refinement_golden.py`) run the real refinement algorithm, with
+  only CheckM replaced by a deterministic stand-in, and compare every output file with recorded
+  values.
+- The end-to-end golden test (`tests/test_golden_end_to_end.py`) puts stub tools on `PATH`, runs
+  binning through refinement, quantification and annotation, and checks the output tree and the
+  `.stats.tsv` format byte for byte.
+
+If a change is meant to alter results, update the golden values in the same commit so the diff
+shows the old output next to the new.
 
 ## Project layout
-- `src/metawrap2/modules/<module>.py` - one flat "recipe" per pipeline module. The commands a
-  module runs live in the `COMMANDS` block and the tunable numbers in the `CONSTANTS` block at
-  the top of the file. Keep them there and visible.
-- `src/metawrap2/command.py` - the single place that runs an external command (mamba env
-  wrapping, logging, provenance, dry-run). Don't call `subprocess` directly in a module.
-- `src/metawrap2/{config,provenance,logging,checkpoint,checkm,constants,utils}.py` and
-  `modules/_common.py` - shared helpers.
-- `src/metawrap2/{manifest,validate,history,scratch,runlock,interrupt,usage,dbcheck}.py` - the
-  infrastructure behind verified resume, fail-fast input checks, the durable run history, the
-  scratch policy, the output-directory lock, signal handling, per-step measurement, and database
-  identity. Each module's docstring explains what problem it exists for.
-- `src/metawrap2/envs/<module>.yaml` - the per-module conda env (`metawrap2-<module>`), with
-  committed exact-build lockfiles in `src/metawrap2/envs/locks/`. Both ship as package data, so
-  they must keep working from an installed wheel and not only from a checkout.
-- `tests/` - pytest suite.
+
+- `src/metawrap2/modules/<module>.py`: one file per module. The commands it runs are in the
+  `COMMANDS` block and its tunable numbers in the `CONSTANTS` block, both at the top. Keep them
+  there.
+- `src/metawrap2/command.py`: the only place that runs an external command. It handles conda env
+  wrapping, logging, provenance and `--dry-run`. Modules call `metawrap2.command.run(...)`, never
+  `subprocess`.
+- `src/metawrap2/modules/_common.py` and the top-level modules (`config`, `provenance`, `manifest`,
+  `validate`, `history`, `limits`, and so on): shared infrastructure. Each file's docstring says
+  what it is for.
+- `src/metawrap2/envs/<name>.yaml`: the conda environments, one per workflow, with exact-build
+  lockfiles in `src/metawrap2/envs/locks/`. They ship inside the wheel, so `install-env` has to work
+  from an installed package as well as from a checkout.
+- `benchmarks/`: the comparisons behind the defaults (`configurations.toml`), the committed
+  results, and the figure scripts.
+- `tests/`: the pytest suite.
 
 ## Guidelines
-- Keep modules flat and legible - the commands must stay easy to read and edit. Avoid adding
-  frameworks/abstractions that hide what runs.
-- Don't change scientific defaults or swap tools without discussion; MetaWrap2 keeps the same
-  algorithms and software as metaWRAP.
-- Run tools only through `metawrap2.command.run(...)` so logging, provenance, and env-wrapping
-  stay consistent.
-- Add or update tests for any change (command-template formatting, pure helpers, provenance).
-- Bins are named with `constants.bin_filename()`; don't hardcode `bin_001.fasta` or an extension.
-  Anything comparing or globbing bins uses `constants.BIN_EXTENSION`, and any `-x` flag passed to
-  CheckM or GTDB-Tk is derived from it - a stale `-x fa` silently scores zero bins.
-- `black` formats, `isort` orders imports, `ruff` lints, `mypy` type-checks. `ruff-format` is
-  deliberately not enabled: two formatters fight each other over the same files.
-- `black`, `isort`, `ruff`, `mypy` and `pytest` must all pass before a push (the pre-push hooks
-  run them), and CI gates the same five on Python 3.10-3.13. The hook and CI use the same tool
-  versions - pinned in `pyproject.toml`'s dev extras and in `.pre-commit-config.yaml`, which must
-  agree (a test checks this). When you bump one, bump both. Formatting is *checked*, never
-  applied, in CI - a job that rewrites your code and then passes teaches you nothing.
-- `pre-commit` also enforces the "no .sh/.pl/.R" rule; so does CI.
+
+- Keep modules flat and readable. Avoid abstractions that hide what a module runs.
+- A scientific default changes only on a benchmark: add the comparison to
+  `benchmarks/configurations.toml`, commit the result, and record the change in the release notes.
+  Open an issue first if you are unsure.
+- Add or update tests for every change.
+- Name bins with `constants.bin_filename()` and match them with `constants.BIN_EXTENSION`. Any `-x`
+  flag passed to CheckM or GTDB-Tk is derived from it, and a wrong extension scores zero bins.
+- `black` formats, `isort` orders imports, `ruff` lints and `mypy` type-checks. These four and
+  `pytest` must pass before a push; the pre-push hook runs them, and CI runs them on Python 3.10 to
+  3.14. CI checks formatting but does not apply it.
+- The hook and CI use the same tool versions, pinned in `pyproject.toml`'s dev extras and in
+  `.pre-commit-config.yaml`. A test fails if the two disagree, so bump both together.
+- Documentation is written plainly: present tense, one reason where a choice is surprising, and
+  no paired "X rather than Y" unless a reader would otherwise do the wrong thing. The commit hook
+  runs `dev/check_prose.py` on changed docs and prints the habits it finds; it never blocks.
+- Every module-level import must be a declared dependency, in both `pyproject.toml` and
+  `conda_pkg/meta.yaml`. A test checks this too. An optional dependency is imported inside the
+  function that needs it.
+
+## Releasing
+
+A release updates two documents:
+
+- `CHANGELOG`: one entry per change, grouped as New, Changed, Fixed, Removed and Known issue. A
+  changed default states the old value and how to get it back.
+- `docs/releases/<version>.md`: what a user reads before upgrading. It covers what the version adds,
+  which defaults changed and the measurement behind each, and what is still open. Add the page to
+  `docs/releases/index.md` and to the `mkdocs.yml` nav in the same change.
+
+Bump the version in `pyproject.toml`, `src/metawrap2/__init__.py`, `CITATION.cff` and
+`conda_pkg/meta.yaml`. A test checks they match.
 
 ## Reporting bugs
-Open an issue with the version (`metawrap2 -v`), the full output, and the run's
-`metawrap2.log` - it holds MetaWrap2's own messages and every line of every tool, timestamped.
-`run_config.json` and `run_environment.json` from the same directory say exactly which tool
-versions, conda packages and databases were used.
+
+Open an issue with the version (`metawrap2 -v`), the full output, and the run's `metawrap2.log`,
+which holds MetaWrap2's messages and every line of tool output with timestamps. `run_config.json`
+and `run_environment.json` from the same directory list the tool versions, conda packages and
+databases used.

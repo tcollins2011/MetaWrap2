@@ -1,0 +1,24 @@
+# Comparative genomics over a cohort's MAGs: pangenomes and phylogenies.
+#
+# Two modules share this env because they share a pipeline: `pangenome` builds a species pangenome
+# per dereplication cluster and can write its core-gene alignment, and `phylogeny` turns an
+# alignment into a tree. Splitting them would mean installing PPanGGOLiN to produce an alignment and
+# IQ-TREE to read it, from two environments, for one question.
+#
+# IQ-TREE rather than FastTree as the default, and FastTree is here anyway: IQ-TREE's ModelFinder
+# chooses a substitution model from the data and its ultrafast bootstrap gives support values that
+# mean something, which on a 120-marker concatenation is the difference between a tree and a
+# picture. FastTree is orders of magnitude faster and is the right choice for hundreds of genomes.
+#
+# MAFFT is PPanGGOLiN's aligner for the core-gene MSA; it does not bundle one.
+name: metawrap2-comparative
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - ppanggolin >=2.0
+  # >=3 because that is what installs the `iqtree` entry point this module calls; the 2.x packages
+  # install `iqtree2` instead, and the flags used here are the same in both.
+  - iqtree >=3.0
+  - fasttree >=2.1
+  - mafft >=7.5

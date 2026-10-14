@@ -28,6 +28,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .. import gunc as _gunc
+
 #: The TSV's columns, in order. Frozen on purpose: ``benchmarks/results/*.tsv`` is committed
 #: history, and a column reorder would make every old file unreadable by the current code.
 COLUMNS = (
@@ -41,9 +43,22 @@ COLUMNS = (
     "source",
 )
 
-#: MIMAG-style bin quality tiers: ``(name, min completeness, max contamination)``. These are the
-#: community thresholds rather than MetaWrap2's own, so that a number reported here means the same
-#: thing as the number in a paper.
+#: Bin quality tiers: ``(name, min completeness, max contamination)``.
+#:
+#: Two of the three are MIMAG's (Bowers et al. 2017) and one is ours, which is worth stating because
+#: the file used to call all three "MIMAG-style":
+#:
+#: * ``bins_medium_quality`` (>=50 / <10) is MIMAG medium exactly.
+#: * ``bins_near_complete`` (>=90 / <5) is MIMAG high-quality *minus* its rRNA and tRNA requirement -
+#:   23S, 16S and 5S present plus at least 18 tRNAs - which is the half that is hard to satisfy and
+#:   the reason this tier is not called high-quality here.
+#: * ``bins_high_quality`` (>=70 / <10) is **not a MIMAG tier at all**. It is the working threshold
+#:   this project reports on, chosen because it is where bin_refinement's defaults sit and where the
+#:   MAG-recovery literature usually counts, and it is the headline number in docs/benchmarks.md.
+#:
+#: The name stays despite being a borrowed label: it is the metric key in every committed row of
+#: benchmarks/results/, so renaming it either invalidates those rows or needs a migration, and the
+#: label was the inaccurate part rather than the number.
 QUALITY_TIERS = (
     ("bins_near_complete", 90.0, 5.0),
     ("bins_high_quality", 70.0, 10.0),
@@ -323,11 +338,37 @@ def gunc_pass_fraction(path: str) -> Optional[float]:
         if verdict is None:
             continue
         total += 1
-        if str(verdict).strip().lower() in ("true", "1", "yes", "pass"):
+        # Through gunc.passed_value because GUNC writes this column as True/False or as 1.0/0.0
+        # depending on how pandas typed it, and accepting only the words reported a 166-bin set as
+        # 0% non-chimeric. `nan` - a bin with too little reference representation to assess - is
+        # neither a pass nor a fail, but it stays in the denominator, because that is what this
+        # metric's committed rows mean; gunc_unassessed_fraction says how much of it that is.
+        if _gunc.passed_value(verdict) is True:
             passed += 1
     if not total:
         return None
     return passed / total
+
+
+def gunc_unassessed_fraction(path: str) -> Optional[float]:
+    """Fraction of bins GUNC could not assess - the part of the denominator above that is not a
+    verdict.
+
+    Reported separately rather than folded in, because "chimeric" and "too little of this lineage
+    in the reference to say" are different findings and only the first is about the bin set. On one
+    real 258-bin set it is 24 bins, enough to move a pass fraction by six points.
+    """
+    total = unassessed = 0
+    for record in _read_table(path):
+        verdict = _first_column(record, "pass.GUNC", "pass_GUNC", "pass.gunc")
+        if verdict is None:
+            continue
+        total += 1
+        if _gunc.passed_value(verdict) is None:
+            unassessed += 1
+    if not total:
+        return None
+    return unassessed / total
 
 
 def assembly_stats(path: str) -> Dict[str, float]:

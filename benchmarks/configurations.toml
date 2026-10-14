@@ -225,9 +225,12 @@ with the consolidated arms."""
 [[binner_set.variants]]
 name = "metabat2_semibin2_comebin_gpu"
 args = ["--metabat2", "--semibin2", "--comebin", "--device", "cuda"]
-note = """The three-binner ensemble: 183 bins at 70/10, 177 of them non-chimeric by GUNC, for 52.8 \
-cpu-hours on a GPU. It was the `--preset slow` tier and is no longer, because the comparison that put it \
-there was against a wrong number.
+note = """The three-binner ensemble, and the `--preset slow` tier: 183 bins at 70/10, 177 of them \
+non-chimeric by GUNC, for 52.8 cpu-hours on a GPU.
+
+It was briefly dropped in favour of COMEBin alone, on a comparison against a wrong number, and was \
+restored once the end-to-end measurement was run - see below. Three algorithm families rather than one \
+is also the reason it is the tier to reach for on a dataset nothing here has measured.
 
 COMEBin alone had been credited with 158 clean MAGs - 178 HQ bins times an 88.8% GUNC pass rate. GUNC had \
 run over all 376 bins COMEBin emits, 198 of which never pass 70/10 and were never MAG candidates, so that \
@@ -235,11 +238,77 @@ percentage was partly about bins nobody was counting. This arm's 96.7% was undil
 on an already-consolidated 183-bin set, so the two percentages were never comparable. Counted per bin, 176 \
 of COMEBin's 178 HQ bins pass GUNC: 98.9%, the cleanest set measured here.
 
-So the ensemble's margin over one binner is one bin for 33% more cpu, which is a tie. `slow` is COMEBin \
-alone, and the arm stays here because the question recurs with every new binner: it is the control for \
-"does consolidating a strong binner with weaker ones still pay". On this data it does not - the same thing \
-happens a tier down, where SemiBin2 alone beats metaBAT2+SemiBin2 on a GPU. Worth re-testing on a second \
-dataset before treating that as general."""
+So on the gold assembly the ensemble's margin over one binner is one bin for 33% more cpu, which is a \
+tie. That tie is why this comparison alone could not settle the tier, and the end-to-end measurement \
+did: on real per-sample assemblies the trio returns 64 high-quality and 60 clean MAGs for 120.7 \
+cpu-hours and 2.36 gpu-hours, against COMEBin alone at 61 and 57 for 80.9 and 1.73. Ensembles help \
+more on a fragmented self-assembly than on a gold one, which is the general lesson here and the reason \
+a binner comparison run only on gold assemblies understates them. `--preset slow` is \
+metaBAT2+SemiBin2+COMEBin.
+
+metaBAT2 is the third member on cost and cleanliness rather than on the union: the best trio by clean-MAG \
+union is COMEBin+SemiBin2+MaxBin2 at 182 against this trio's 181, and MaxBin2's one extra genome costs \
+24.5 cpu-hours against metaBAT2's ~1.5, with 37.7% of its bins passing GUNC against metaBAT2's much \
+cleaner set. The arm stays here because the question recurs with every new binner: it is the control for \
+"does consolidating a strong binner with weaker ones still pay"."""
+
+# --------------------------------------------------------------------------------------------
+# Multi-split binning: bin the concatenated catalogue of a cohort, then split the clusters back out
+# per sample. Söding's analysis reports 19% more bins and 79% more high-quality bins from splitting
+# the embedding space by sample, and nf-core/mag has the mode; this is the cheap half of testing it
+# here, because it is a re-bin rather than a re-assembly.
+#
+# Both variants bin the *same* sequence - the three-sample concatenated catalogue, passed with
+# --assembly - and differ only in whether the resulting clusters are split by their sample prefix.
+# That is the only way to isolate the splitting: a per-sample-assembly arm bins different sequence,
+# so it belongs in the cohort benchmark rather than in this comparison, and B5 arm c is the row to
+# read it against.
+#
+# No AMBER metrics. The truth table is written against CAMI2's pooled gold assembly and these are
+# self-assembled contigs renamed with a sample prefix, so AMBER would score nothing; CheckM2 tiers
+# and GUNC are what the cohort benchmark uses for the same reason.
+[multisplit]
+module = "binning"
+question = "Does splitting a concatenated-catalogue bin set by sample beat leaving it whole?"
+metrics = ["bins_near_complete", "bins_high_quality", "gunc_pass_fraction"]
+# metaBAT2 + MaxBin2, which is what B5's cohort arms used, so the quality numbers here can be read
+# against arm c's row. Neither binner splits natively, so this exercises the post-hoc path in
+# metawrap2.binsplit rather than SemiBin2's or VAMB's own.
+common_args = ["--metabat2", "--maxbin2"]
+
+[[multisplit.variants]]
+name = "concatenated_unsplit"
+default = true
+args = []
+note = """the control: bins of the concatenated catalogue, left whole. A genome present in three \
+samples assembles three times, so a cluster that gathers all three copies is one bin containing \
+three near-identical genomes - which CheckM2 reads as contamination. This is what a cohort gets \
+from binning a catalogue without the splitting step, and it is not a strawman: it is what \
+`coverage` plus a plain `binning` run produced before --binsplit existed."""
+
+[[multisplit.variants]]
+name = "concatenated_split"
+args = ["--binsplit", "~"]
+note = """the same clusters, split by the sample prefix `coverage` writes. The separator is passed \
+explicitly because VAMB's default is `C`, which shreds any contig id containing a capital C.
+
+Measured on cami2_gi 2026-10-13, three samples. Splitting is clearly worth it *given* that the \
+catalogue was binned: metaBAT2 goes from 86 bins and 16 clean high-quality MAGs to 166 bins and 37, \
+MaxBin2 from 114 and 15 to 258 and 19. Clean counts are the CheckM2 and GUNC reports joined per bin, \
+never an HQ count times a pass fraction. Cost is identical - 3.29 cpu-hours against the control's \
+3.28 - because splitting is a pass over bins that are already written.
+
+The chimerism moves the other way and is reported with it: metaBAT2's GUNC pass fraction falls from \
+60.5% to 55.4%, and 10.8% of the split pieces are bins GUNC cannot assess at all, where none of the \
+catalogue-wide bins were. More, smaller bins means more of them sit below the reference \
+representation GUNC needs.
+
+What this comparison cannot say is whether binning a catalogue beats binning per sample, because \
+both of its arms bin the catalogue. That took the cohort benchmark, and the answer there is no - see \
+bench_work/multisplit/summary.tsv: 29 clean high-quality MAGs against the shipped per-sample path's \
+34, for 9.09 cpu-hours against 8.71, on the same assemblies and the same cross-sample depth table. \
+So --binsplit stays a flag rather than becoming the cohort default: it is necessary for anyone who \
+bins a catalogue, and binning a catalogue is not the better route on this data."""
 
 # --------------------------------------------------------------------------------------------
 [aligner]

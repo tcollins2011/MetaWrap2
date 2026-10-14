@@ -1,5 +1,5 @@
 site_name: MetaWrap2
-site_description: A flexible, Python-native pipeline for genome-resolved metagenomic data analysis
+site_description: MetaWrap2, a benchmarked pipeline for genome-resolved metagenomics, from reads to MAGs and their functions
 theme:
   name: material
   palette:
@@ -13,7 +13,17 @@ nav:
   - Usage: usage.md
   - Modules: modules.md
   - Benchmarks: benchmarks.md
+  - Release notes:
+      - Overview: releases/index.md
+      - 2.1.2: releases/2.1.2.md
+      - 2.1.1: releases/2.1.1.md
+      - 2.1.0: releases/2.1.0.md
+      - 2.0.1: releases/2.0.1.md
+      - 2.0.0: releases/2.0.0.md
   - Provenance & reproducibility: provenance.md
+  - Plans:
+      - Functional annotation: plan_functional_annotation.md
+      - Other modules: plan_other_modules.md
   - Contributing: contributing.md
 markdown_extensions:
   - admonition

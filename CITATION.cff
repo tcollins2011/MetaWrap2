@@ -1,9 +1,9 @@
 cff-version: 1.2.0
 message: "If you use MetaWrap2, please cite it using the metadata below."
 title: "MetaWrap2"
-abstract: "A flexible, Python-native pipeline for genome-resolved metagenomic data analysis."
+abstract: "A benchmarked pipeline for genome-resolved metagenomics, from reads to MAGs and their functions."
 type: software
-version: "2.1.0"
+version: "2.1.2"
 authors:
   - family-names: "Uritskiy"
     given-names: "Gherman"

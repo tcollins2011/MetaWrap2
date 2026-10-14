@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -62,15 +62,16 @@ jobs:
         run: |
           metawrap2 --version
           metawrap2 --help
-          for module in read_qc assembly kraken2 blobology binning coverage bin_refinement \
-                        reassemble_bins quant_bins dereplicate classify_bins annotate_bins; do
+          # Read from the CLI's own tables, so a new module is smoke-tested the day it is added.
+          modules=$(python -c "import metawrap2.cli as c; print(' '.join(c.MODULES))")
+          utilities=$(python -c "import metawrap2.cli as c; print(' '.join(c.UTILITIES))")
+          for module in $modules; do
             echo "--- $module --help"
             metawrap2 "$module" --help > /dev/null
           done
-          for util in quickstart check doctor install-env install-db history status calibrate \
-                      run cohort benchmark test config completion; do
+          for util in $utilities; do
             echo "--- $util --help"
-            metawrap2 "$util" --help > /dev/null || true
+            metawrap2 "$util" --help > /dev/null
           done
 
   no-legacy-scripts:

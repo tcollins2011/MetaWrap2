@@ -21,8 +21,10 @@ import re
 import shutil
 from typing import IO, Dict, List, Tuple
 
+from .. import binsplit as _binsplit
 from .. import checkm as _checkm
 from .. import depth as _depth
+from .. import longreads as _long
 from ..aligners import ALIGNERS, DEFAULT_ALIGNER, INDEX_SUFFIXES
 from ..cliformat import bounded_int, make_parser, percent
 from ..command import THREAD_LIMITS, capture_in_env
@@ -54,6 +56,7 @@ from ._common import (
     start_run,
     threads_arg,
     validate_inputs,
+    warning,
 )
 
 CONDA_ENV = MODULE_ENVS["binning"]
@@ -77,9 +80,9 @@ CONCOCT = (
     " -b {concoct_out} --seed {seed}"
 )
 CONCOCT_MERGE = "merge_cutup_clustering.py {clustering}"
-#: ``single_easy_bin`` is the right subcommand for what this module has: one contig set and several
-#: BAMs, which SemiBin2 reads as multi-sample coverage of one assembly. ``multi_easy_bin`` is for a
-#: combined assembly whose contig names carry a sample prefix, which is not how MetaWrap2 assembles.
+#: ``single_easy_bin`` is the right subcommand for one contig set and several BAMs, which SemiBin2
+#: reads as multi-sample coverage of one assembly. That is what this module has unless --binsplit
+#: says otherwise.
 #: ``--compression none`` because every other binner here hands over plain fastas and the rest of
 #: the pipeline reads them directly; the default gzips each bin.
 #: ``--self-supervised`` is already SemiBin2's default, and is passed anyway because the alternative
@@ -90,6 +93,19 @@ SEMIBIN2 = (
     "SemiBin2 single_easy_bin --input-fasta {assembly} --input-bam {bams} --output {out}"
     " --threads {threads} --min-len {min_len} --compression none --self-supervised"
     " --random-seed {seed} --tmpdir {tmp} --engine {engine}"
+)
+#: ``multi_easy_bin`` is the same binner over a *concatenated catalogue* whose contig names carry a
+#: sample prefix - what --binsplit asks for. ``-s`` is the separator between the sample label and the
+#: contig name (SemiBin2's own default is ``:``; MetaWrap2 writes ``~``, see binsplit.SEPARATOR).
+#:
+#: The difference from single_easy_bin is where the model is fitted. single_easy_bin fits one
+#: sample's contigs with every sample's coverage; multi_easy_bin fits every sample's contigs at
+#: once, so the same organism seen in ten samples contributes ten samples' worth of evidence to one
+#: clustering decision. That is the whole claim behind multi-split binning.
+SEMIBIN2_MULTI = (
+    "SemiBin2 multi_easy_bin --input-fasta {assembly} --input-bam {bams} --output {out}"
+    " --threads {threads} --min-len {min_len} --compression none --self-supervised"
+    " --random-seed {seed} --tmpdir {tmp} --engine {engine} -s '{separator}'"
 )
 #: Three of these flags are load-bearing in ways the help text does not make obvious.
 #:
@@ -109,9 +125,14 @@ SEMIBIN2 = (
 #: SemiBin2 takes a word and COMEBin takes a device string. One ``--device`` on this module covers
 #: all three (see LEARNED_DEVICES), which is what keeps "run the learned binners on the GPU" a
 #: single decision rather than three flags spelled differently.
+#: ``-o`` is the binsplit separator, and it is a parameter rather than a constant because the right
+#: value depends on what the assembly is. Empty disables binsplitting, which is correct for a single
+#: assembly - there is no sample prefix to split on, and VAMB's default ``C`` would shred bins on any
+#: contig id containing a capital C. Given a concatenated catalogue (--binsplit) the separator is
+#: what makes VAMB do the split itself, which is the mode its own authors report the gain for.
 VAMB = (
     "vamb bin default --outdir {out} --fasta {assembly} --bamdir {bamdir}"
-    " -m {min_len} -p {threads} --minfasta {minfasta} --seed {seed} -o '' {cuda}"
+    " -m {min_len} -p {threads} --minfasta {minfasta} --seed {seed} -o '{separator}' {cuda}"
 )
 #: ``run_comebin.sh`` is the only entry point; there is no ``comebin`` on PATH. Like VAMB it takes a
 #: BAM *directory* and globs ``*.bam`` out of it, so ``work_files`` is handed over whole.
@@ -234,32 +255,47 @@ BAM_BINNERS: Tuple[str, ...] = ("concoct", "semibin2", "vamb", "comebin")
 #: complete / <=10% contaminated *and* non-chimeric by GUNC, joined per bin rather than estimated as a
 #: product - see bench_work/clean_hq.py for why that distinction mattered:
 #:
-#:     tier       binners               HQ   clean HQ   clean/HQ   cpu-hours
-#:     very-fast  metaBAT2               37      35       94.6%       4.8
-#:     fast       metaBAT2 + MaxBin2     71      59       83.1%       7.1
-#:     default    metaBAT2 + SemiBin2   131     114       87.0%      86.8  (17 on a GPU)
-#:     slow       COMEBin               178     176       98.9%      39.6  (on a GPU)
+#:     tier       binners                        HQ   clean HQ   clean/HQ   cpu-hours
+#:     very-fast  metaBAT2                        37      35       94.6%       4.8
+#:     fast       metaBAT2 + MaxBin2              71      59       83.1%       7.1
+#:     default    metaBAT2 + SemiBin2            131     114       87.0%      86.8  (17 on a GPU)
+#:     slow       metaBAT2 + SemiBin2 + COMEBin  183     177       96.7%      52.8  (on a GPU)
 #:
-#: Four things to know before reading those as a ranking.
+#: End to end on per-sample assemblies - reads in, MAGs out, which is the axis a user chooses on - the
+#: same four tiers return 36, 41, 53 and 60 clean MAGs for 8.8, 13.8, 43.8 and 120.7 cpu-hours of
+#: binning and refinement, against metaWRAP 1.3.0's 48 for 52.5. `default` is the shipped tier because
+#: it is the first configuration measured here that beats metaWRAP 1 on both axes at once.
 #:
-#: `slow` is one binner, not three, and that is the second answer to the question rather than the first.
-#: It was metaBAT2 + SemiBin2 + COMEBin, on a measurement that said the ensemble recovered 177 clean MAGs
-#: against COMEBin's 158 - and the 158 was wrong. It came from multiplying COMEBin's 178 HQ bins by a GUNC
-#: pass rate of 88.8%, which GUNC had measured over all 376 bins COMEBin emitted, including 198 that
-#: never passed 70/10 and were never MAG candidates. Counted per bin, 176 of COMEBin's 178 HQ bins pass
-#: GUNC - 98.9%, the cleanest set measured here. So the ensemble's real margin is **one bin** (177 against
-#: 176) for 33% more cpu, which is a tie, and a tie goes to the cheaper arm.
+#: Three things to know before reading those as a ranking.
 #:
-#: Two consequences worth stating. The tiers are no longer supersets of one another, and the claim that
-#: "stepping up can only add genomes" is withdrawn: adding metaBAT2 and SemiBin2 to COMEBin added one bin.
-#: The same pattern shows up a tier down - SemiBin2 alone on a GPU recovers 116 clean MAGs against the
-#: pair's 114 for a fifth of the cpu - so consolidating a strong learned binner with weaker classical ones
-#: is not reliably worth its cost on this data. `default` keeps the pair anyway, because metaBAT2 reads
-#: the same depth table SemiBin2 does and costs ~1.3 cpu-hours beside it, which is a fair price for not
-#: betting a whole run on one model.
+#: **Why `slow` is three binners rather than COMEBin alone.** On the gold assembly the trio and COMEBin
+#: alone tie - 177 clean MAGs against 176 - which is what the ensemble used to be dropped for. End to
+#: end on per-sample assemblies they do not tie: the trio returns 60 clean MAGs against COMEBin's 57.
+#: The gold assembly flatters a single strong binner, because there the contigs are long and clean
+#: enough that one model can place nearly everything; on a real assembly there is more that one model
+#: gets wrong and another does not.
 #:
-#: `--metabat2 --semibin2 --comebin` is still there for anyone who wants the ensemble; it is just not what
-#: a tier name buys. `metabat2_comebin` - the cheap half of that ensemble - is unmeasured.
+#: Complementarity was measured directly to choose the members (bench_work/binner_complementarity.py:
+#: assign every clean high-quality bin to the reference genome owning most of its sequence, then take
+#: unions over pairs and trios). The binners are highly redundant here - COMEBin recovers 176 of the 182
+#: genomes the best trio reaches, 39 of them found by nothing else - so the union says a second and
+#: third binner buy little on this dataset, and the end-to-end number says they buy something anyway.
+#: One dataset also cannot say whether COMEBin's 39-genome edge is general or a property of CAMI2's gut
+#: community, and a top tier resting on one model has no fallback when it is wrong. Contrastive
+#: (COMEBin), self-supervised (SemiBin2) and composition-plus-coverage (metaBAT2) fail differently, and
+#: consolidation keeps the best version of each bin.
+#:
+#: metaBAT2 is the third member rather than VAMB, MaxBin2 or CONCOCT on cost. The best trio by union is
+#: COMEBin + SemiBin2 + MaxBin2 at 182 genomes against metaBAT2's trio at 181 - one genome, for which
+#: MaxBin2 charges 24.5 cpu-hours against metaBAT2's ~1.5, and brings a chimera tax with it: 37.7% of
+#: MaxBin2's bins pass GUNC, so consolidation has more to throw away. metaBAT2 reads the depth table
+#: SemiBin2 already built, which is where its ~1.5 comes from, against VAMB's 4.9 on a GPU (67 on a CPU)
+#: and CONCOCT's 238. It is also the most widely validated of the six, which is worth something in the
+#: member whose job is to be the fallback.
+#:
+#: The tiers are not supersets of one another and "stepping up can only add genomes" does not hold:
+#: `fast` runs MaxBin2, which `default` and `slow` do not. What holds is that each tier recovers more
+#: clean MAGs than the one below it.
 #:
 #: `slow` needs a GPU in practice rather than in principle. COMEBin on CPU reached epoch 20
 #: of 200 after 305 cpu-hours and was stopped; on one GPU the same run finishes in 40. It is offered
@@ -272,7 +308,9 @@ PRESETS: Dict[str, Tuple[str, ...]] = {
     "very-fast": ("metabat2",),
     "fast": ("metabat2", "maxbin2"),
     "default": ("metabat2", "semibin2"),
-    "slow": ("comebin",),
+    # Three different algorithm families on purpose; see the note above for the margin over COMEBin
+    # alone and why metaBAT2 is the third member rather than the one that wins the union by a genome.
+    "slow": ("metabat2", "semibin2", "comebin"),
 }
 
 #: The tier a pipeline run uses when its sheet names no binner. Named here rather than as a second
@@ -358,6 +396,14 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="run CheckM on the bins (uses the bin_refinement env; needs plenty of RAM)",
     )
     p.add_argument(
+        "--long-read-type",
+        choices=sorted(_long.READ_TYPES),
+        default=None,
+        help="the reads given are long reads of this platform. Sets minimap2's preset and "
+        "SemiBin2's sequencing type; mapping long reads with the short-read preset produces "
+        "coverage a binner reads as a different organism",
+    )
+    p.add_argument(
         "--aligner",
         choices=sorted(ALIGNERS),
         default=DEFAULT_ALIGNER,
@@ -376,6 +422,26 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "(the layout metawrap2 coverage and jgi_summarize_bam_contig_depths both write), aligning "
         "nothing. metaBAT2 and MaxBin2 only - "
         "the other binners read the alignments themselves. Reads are then not needed",
+    )
+    p.add_argument(
+        # A required value, not nargs="?". With an optional value this flag sits in front of the
+        # positional read files, so `--binsplit r_1.fastq` parsed the read file as the separator and
+        # then complained that no reads were given. argparse cannot tell the two apart, so the
+        # ambiguity has to go rather than be documented.
+        "--binsplit",
+        default="",
+        metavar="SEP",
+        # Concatenated rather than %-formatted. argparse interpolates help strings itself (that is
+        # how %(default)s works), so a string that has already been through % leaves a bare "%"
+        # behind and argparse then fails with "unsupported format character". One layer of escaping,
+        # argparse's, is the only safe number.
+        help="treat the assembly as a concatenated multi-sample catalogue (what `metawrap2 "
+        "coverage` writes), bin it as one unit, and split the bins back per sample afterwards. SEP "
+        "separates the sample label from the contig name; `coverage` writes '"
+        + _binsplit.SEPARATOR
+        + "'. This is multi-split binning: the model is fitted on every sample's contigs at once "
+        "rather than one sample at a time, which is reported to recover 19%% more bins and 79%% "
+        "more high-quality bins. Pass the catalogue with -a and its depth table with --depth",
     )
     p.add_argument(
         "--min-identity",
@@ -456,6 +522,7 @@ def _align_reads(args, env, work, assembly_copy) -> None:
         env=env,
         single_end=args.single_end,
         interleaved=args.interleaved,
+        long_read_type=args.long_read_type,
     )
 
 
@@ -924,25 +991,90 @@ def _run_semibin2(args, env, work, assembly_copy):
     device = resolve_device(args.device, env)
     out = os.path.join(work, "semibin2_out")
     comm("Starting binning with SemiBin2...")
-    run(
-        SEMIBIN2.format(
-            assembly=assembly_copy,
-            bams=_bams(work),
-            out=out,
-            threads=args.threads,
-            min_len=args.min_len,
-            seed=SEMIBIN2_SEED,
-            tmp=short_tmpdir(os.path.join(work, "tmp-semibin2")),
-            # SemiBin2 spells the accelerator "gpu"; --device speaks cuda like the other two.
-            engine="gpu" if device.startswith("cuda") else "cpu",
-        ),
-        env=env,
-        tool="SemiBin2",
-    )
+    separator = getattr(args, "binsplit", "") or ""
+    fields = {
+        "assembly": assembly_copy,
+        "bams": _bams(work),
+        "out": out,
+        "threads": args.threads,
+        "min_len": args.min_len,
+        "seed": SEMIBIN2_SEED,
+        "tmp": short_tmpdir(os.path.join(work, "tmp-semibin2")),
+        # SemiBin2 spells the accelerator "gpu"; --device speaks cuda like the other two.
+        "engine": "gpu" if device.startswith("cuda") else "cpu",
+    }
+    if separator:
+        comm("multi-sample mode: SemiBin2 fits one model over every sample's contigs")
+        command = SEMIBIN2_MULTI.format(separator=separator, **fields)
+    else:
+        command = SEMIBIN2.format(**fields)
+    if getattr(args, "long_read_type", None):
+        # SemiBin2 distinguishes short from long and nothing finer, and the difference is real: its
+        # default feature extraction assumes short-read coverage profiles. The platform name comes
+        # from metawrap2.longreads so Flye's flag, minimap2's preset and this cannot disagree.
+        command += " --sequencing-type=%s" % _long.resolve(args.long_read_type).semibin2_type
+        comm("SemiBin2 in long-read mode")
+    run(command, env=env, tool="SemiBin2")
 
     _adopt_bins(
         os.path.join(out, SEMIBIN2_BIN_DIR), os.path.join(args.output, "semibin2_bins"), "SemiBin2"
     )
+
+
+#: Binners that do the per-sample split themselves when given a separator, so MetaWrap2 must not do
+#: it again. SemiBin2 via multi_easy_bin -s and VAMB via -o; everything else gets the generic split.
+NATIVE_BINSPLIT: Tuple[str, ...] = ("semibin2", "vamb")
+
+
+def _post_split(args, selected: List[str]) -> None:
+    """Split each bin set that the binner did not split itself, into <bins>_split/<sample>/.
+
+    The split sets go beside the originals rather than replacing them. Two reasons: the catalogue-wide
+    bins are what the binner actually produced and what a chimerism check should see, and a
+    consolidation step later wants per-sample sets that line up with per-sample assemblies. Keeping
+    both means neither question needs a re-run.
+    """
+    if dry_run():
+        return
+    for binner in selected:
+        if binner in NATIVE_BINSPLIT:
+            comm("%s split its own bins by sample (it was given the separator)" % binner)
+            continue
+        bins_dir = os.path.join(args.output, "%s_bins" % binner)
+        if not os.path.isdir(bins_dir):
+            continue
+        out_dir = os.path.join(args.output, "%s_bins_split" % binner)
+        report = _binsplit.split_bin_set(bins_dir, out_dir, args.binsplit)
+        # Also as one flat directory of `<sample>~bin_xxx.fasta`, because the nested layout is the
+        # wrong shape for anything that treats a bin set as a folder of FASTA files - including this
+        # project's benchmark scorer, which collects top-level `*_bins` directories and would
+        # otherwise score the unsplit catalogue bins and report the split arm as identical to its
+        # control. Hard-linked, so the second view costs inodes rather than sequence.
+        flat_dir = os.path.join(args.output, "%s_split_bins" % binner)
+        linked = _binsplit.flatten_split_bins(out_dir, flat_dir)
+        comm(
+            "%s: %d catalogue bin(s) -> %d per-sample bin(s) across %d sample(s); %d linked into %s"
+            % (
+                binner,
+                report.bins_in,
+                report.pieces_out,
+                len(report.labels),
+                linked,
+                os.path.basename(flat_dir),
+            )
+        )
+        if report.unprefixed_contigs:
+            warning(
+                "%s: %d contig(s) had no '%s' prefix and were left out of the split. That means the "
+                "assembly was not a catalogue built by `coverage`, so --binsplit is binning one "
+                "sample's contigs and splitting nothing"
+                % (binner, report.unprefixed_contigs, args.binsplit)
+            )
+        elif not report.worthwhile:
+            comm(
+                "%s: no bin drew contigs from more than one sample, so this run got nothing from "
+                "multi-split that per-sample binning would not also have found" % binner
+            )
 
 
 def _adopt_bins(produced: str, bins_dir: str, tool: str) -> None:
@@ -1000,6 +1132,7 @@ def _run_vamb(args, env, work, assembly_copy):
             threads=args.threads,
             minfasta=VAMB_MIN_FASTA,
             seed=VAMB_SEED,
+            separator=getattr(args, "binsplit", "") or "",
             cuda="--cuda" if device.startswith("cuda") else "",
         ),
         env=env,
@@ -1266,6 +1399,8 @@ def main(argv: List[str]) -> int:
             if args.comebin and ckpt.todo("comebin"):
                 _run_comebin(args, learned_envs["comebin"], work, assembly_copy)
                 ckpt.done("comebin")
+            if args.binsplit:
+                _post_split(args, [b for b in BINNERS if getattr(args, b, False)])
             if not args.keep_bams and not dry_run():
                 _discard_alignments(work, ckpt)
         except ValueError as e:  # read-collection / validation errors

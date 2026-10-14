@@ -11,18 +11,22 @@ where they actually live, inside each env.
 
 from __future__ import annotations
 
+import shutil
 from typing import List
 
 from ..cliformat import make_parser
 from ..config import (
     DB_KEYS,
-    MODULE_ENVS,
     MODULE_TOOLS,
     OPTIONAL_DB_KEYS,
     check_databases,
-    check_tools,
     conda_env_exists,
+    explain_unknown_name,
+    legacy_module_for,
     load_settings,
+    resolve_env_name,
+    tool_in_env,
+    tools_for_name,
 )
 
 OK = "  OK   "
@@ -41,12 +45,38 @@ def main(argv: List[str]) -> int:
 
     settings = load_settings(args.config)
     modules = args.modules or sorted(MODULE_TOOLS)
+    # Refused rather than checked. `check bin_refinement-checkm2` used to print "Preflight OK for:
+    # bin_refinement-checkm2" - it matched no module, so it checked nothing and declared success,
+    # which is the worst of the three possible answers.
+    unknown = [name for name in modules if resolve_env_name(name) is None]
+    if unknown:
+        for name in unknown:
+            for line in explain_unknown_name(name):
+                print(line)
+        return 1
+    # A legacy or env-level name resolves to an env but is not a module, so it has no tool list and
+    # no databases; report what can be reported rather than inventing a module row for it.
+    # A 2.0.x name is <module>-<tool>, so check the module it came from rather than reporting OK
+    # about an environment with no tool list attached.
+    translated = []
+    for name in modules:
+        module = legacy_module_for(name)
+        if module:
+            print(
+                "'%s' was an environment name in MetaWrap2 2.0.x; checking the '%s' module, which "
+                "is where that tool lives now." % (name, module)
+            )
+            translated.append(module)
+        else:
+            translated.append(name)
+    modules = translated
 
     missing = 0
+    missing_tools: List[str] = []
 
     print("\nConda environments:\n")
     for module in modules:
-        env = MODULE_ENVS.get(module)
+        env = resolve_env_name(module)
         if not env:
             continue
         exists = conda_env_exists(env) if settings.use_conda_envs else True
@@ -55,10 +85,27 @@ def main(argv: List[str]) -> int:
         note = "" if settings.use_conda_envs else " (conda envs disabled; using PATH)"
         print("  [%s]  %-28s %s%s" % (_status(exists), env, module, note))
 
-    print("\nExternal tools (on PATH -- informational; see `metawrap2 test`):\n")
-    for tool, module, present in check_tools(modules):
-        # A tool absent from PATH is fine (expected, even) if it lives in the module's env.
-        print("  [%s]  %-18s (%s)" % (_status(present), tool, module))
+    where = "in the module's conda env" if settings.use_conda_envs else "on PATH"
+    print("\nExternal tools (%s):\n" % where)
+    checked_any = False
+    for module in modules:
+        env = resolve_env_name(module)
+        for tool in tools_for_name(module):
+            checked_any = True
+            if settings.use_conda_envs and env:
+                present = bool(tool_in_env(tool, env))
+            else:
+                present = shutil.which(tool) is not None
+            print("  [%s]  %-18s (%s)" % (_status(present), tool, module))
+            if not present:
+                # Counted separately from the env rows: a present env with a missing tool is a
+                # half-built environment, and telling the user "1 conda env missing" sends them to
+                # install-env when what they need is --force.
+                missing_tools.append("%s (%s)" % (tool, module))
+    if not checked_any:
+        # Never silently. `check <something with no tool list>` used to print "Preflight OK" having
+        # looked at nothing, which is a worse answer than either yes or no.
+        print("  (nothing to check: %s names no tools)" % ", ".join(modules))
 
     # Only databases a *selected* module actually reads count towards the verdict, and
     # opt-in-path databases (Bakta, GTDB-Tk, ...) never do.
@@ -89,7 +136,14 @@ def main(argv: List[str]) -> int:
             "config, or set them yourself under [databases] in metawrap2.toml."
             % (len(missing_dbs), ", ".join(missing_dbs))
         )
-    if missing or missing_dbs:
+    if missing_tools:
+        print(
+            "\n%d tool(s) are absent from an environment that exists: %s"
+            "\nThat is a half-built environment rather than a missing one; rebuild it with "
+            "`metawrap2 install-env %s --force`."
+            % (len(missing_tools), ", ".join(missing_tools), " ".join(modules))
+        )
+    if missing or missing_dbs or missing_tools:
         print()
         return 1
     print("\nPreflight OK for: %s\n" % ", ".join(modules))

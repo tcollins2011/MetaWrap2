@@ -20,11 +20,17 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
+      # Test fixtures and recorded benchmark inputs are verbatim tool output, whitespace included;
+      # rewriting them changes what the tests compare against.
       - id: end-of-file-fixer
+        exclude: ^(tests/fixtures/|benchmarks/figure_inputs/|benchmarks/fixtures/)
       - id: trailing-whitespace
+        exclude: ^(tests/fixtures/|benchmarks/figure_inputs/|benchmarks/fixtures/)
       - id: check-yaml
       - id: check-added-large-files
         args: [--maxkb=512]
+        # The vendored KEGG definitions `pathways` reads at run time: package data, not an accident.
+        exclude: ^src/metawrap2/data/kegg/
       - id: check-merge-conflict
   - repo: local
     hooks:
@@ -33,6 +39,13 @@ repos:
         entry: bash -c 'if find . -path ./.git -prune -o \( -name "*.sh" -o -name "*.pl" -o -name "*.R" \) -print | grep .; then exit 1; fi'
         language: system
         pass_filenames: false
+      # Advisory: prints the writing habits the docs were edited to remove, never fails.
+      - id: prose-check
+        name: prose habits in docs (advisory)
+        entry: python dev/check_prose.py
+        language: system
+        files: '(\.md|CHANGELOG)$'
+        verbose: true
 
       # --- the pre-push gate -------------------------------------------------------------
       # These run once per push, not per commit, because they are slower and are about the

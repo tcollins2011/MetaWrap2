@@ -1,0 +1,2 @@
+Contig	CRISPR	Start	End	Consensus_repeat	N_repeats	Repeat_len	Spacer_len_avg	Repeat_identity	Spacer_identity	Spacer_len_sem	Trusted	Prediction	Subtype	Subtype_probability
+k141_45765_length_125938_cov_13.0000	k141_45765_length_125938_cov_13.0000_1	96679	97221	GTATTAATTGTACCTTATGGAATTGAAAT	9	29	35.2	97.0	60.1	0.5	True	I-B	I-B	0.997

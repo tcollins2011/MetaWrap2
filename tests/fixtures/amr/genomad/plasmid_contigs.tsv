@@ -1,0 +1,4 @@
+genome	seq_name	length	topology	plasmid_score	n_genes	n_hallmarks
+assembly	k141_50126_length_5891_cov_5.0000	5891	No terminal repeats	0.9953	8	0
+assembly	k141_31974_length_1083_cov_3.0000	1083	No terminal repeats	0.9951	2	1
+assembly	k141_30532_length_13234_cov_10.9649	13234	No terminal repeats	0.9946	18	3

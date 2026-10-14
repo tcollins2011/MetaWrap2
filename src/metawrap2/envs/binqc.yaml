@@ -16,5 +16,8 @@ dependencies:
   - setuptools <81
   - checkm-genome >=1.2.0
   - pplacer
-  - gunc >=1.0.6
+  # >=1.1.1, not >=1.0.6: `gunc merge_checkm` and the summarise path in 1.0.6 label every genome as
+  # passing, so a chimerism column produced with it says nothing. The floor has to exclude it rather
+  # than merely allow something newer, because a solver is free to pick the floor.
+  - gunc >=1.1.1
   - das_tool >=1.1.7

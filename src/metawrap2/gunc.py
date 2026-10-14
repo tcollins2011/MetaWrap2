@@ -79,6 +79,36 @@ def find_report(out_dir: str) -> Optional[str]:
     return None
 
 
+def passed_value(raw: object) -> Optional[bool]:
+    """GUNC's ``pass.GUNC`` cell as a verdict, or None when it does not state one.
+
+    GUNC writes this column two ways depending on how pandas typed it: ``True``/``False`` when the
+    column stayed boolean, and ``1.0``/``0.0`` when a ``nan`` in it forced a float dtype. Both came
+    out of the *same* GUNC version in one benchmark run - one bin set each - so this is not a
+    version question that pinning solves.
+
+    Accepting only the words cost a real number: a 166-bin set whose column was written as floats
+    scored a GUNC pass fraction of **0**, which reads as every bin being chimeric. That is the kind
+    of wrong number that gets believed, because 0 is a plausible-looking answer.
+
+    ``nan`` is None, not False. GUNC writes it when a bin had too little reference representation
+    for the score to mean anything, and a bin it could not assess has not failed.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if text in ("", "nan", "na", "none"):
+        return None
+    if text in ("true", "yes", "pass", "passed"):
+        return True
+    if text in ("false", "no", "fail", "failed"):
+        return False
+    try:
+        return float(text) != 0.0
+    except ValueError:
+        return None
+
+
 def parse_report(path: str) -> Dict[str, Verdict]:
     """GUNC's verdict per bin, keyed by bin name.
 
@@ -101,11 +131,8 @@ def parse_report(path: str) -> Dict[str, Verdict]:
                 # A bin GUNC could not score, or a header repeated mid-file. Skipping it leaves the
                 # bin unannotated, which reads as "not assessed" rather than as "passed".
                 continue
-            raw_pass = record.get(columns.get("pass.gunc", ""), "")
-            if raw_pass not in (None, ""):
-                passed = str(raw_pass).strip().lower() in ("true", "1", "yes", "pass")
-            else:
-                passed = css <= CSS_THRESHOLD
+            stated = passed_value(record.get(columns.get("pass.gunc", ""), ""))
+            passed = stated if stated is not None else css <= CSS_THRESHOLD
             level = (record.get(columns.get("taxonomic_level", ""), "") or "").strip()
             verdicts[name] = Verdict(css=css, passed=passed, level=level)
     return verdicts

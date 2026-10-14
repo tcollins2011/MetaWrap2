@@ -69,7 +69,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--bakta",
         action="store_true",
         help="annotate with Bakta instead of PROKKA (needs the "
-        "metawrap2-annotate_bins-bakta env and a Bakta database)",
+        "metawrap2-annotate env and a Bakta database; `metawrap2 install-env annotate`)",
     )
     p.add_argument(
         "--bakta-db",

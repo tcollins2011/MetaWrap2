@@ -1,0 +1,15 @@
+gene	sample	sequence	num_hits	coverage	taxonomy	found_in
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAAAATACTCCTGGAGACGGAGGTCGTTTTGTAAGATCATCTGGAACTTATGCTTCTTTA	2	9.38	Root; d__Archaea; p__Methanobacteriota; c__Methanobacteria; o__Methanobacteriales; f__Methanobacteriaceae; g__Methanocatella; s__Methanocatella smithii	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGCTACTTCCTGGAAAGGGCGGACAGCTTGTTCGTTCAGCAGGACTTAGCGCACAGCTT	1	4.69	Root; d__Bacteria; p__Bacillota; c__Clostridia; o__Lachnospirales; f__Lachnospiraceae; g__Roseburia	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGATGCGCCCCGACAAGGGCGCCCAGCTGGTCCGCTCCGCCGGTGCCTACGCCCAGCTG	1	4.69	Root; d__Bacteria; p__Bacillota; c__Clostridia; o__Oscillospirales; f__Oscillospiraceae; g__Vescimonas; s__Vescimonas sp000435975	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGATGCTGCCCGGCAAGGGCGCGGAGCTGGGCCGCTCCGCGGGAACCGCGGAGCAGCTG	1	4.69	Root; d__Bacteria; p__Pseudomonadota; c__Zetaproteobacteria; o__Mariprofundales; f__Mariprofundaceae; g__GCA-2401635	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGATGCACCCCGGCAAGGGCGCTCAGCTCGTCCGCTACGCCGGTACTGCTGCTCAGCTG	1	4.69	Root; d__Bacteria	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGCTGTATCCCGGCAGGGGCGGCCAGCTGGTCCGTTCCGCGGGCGTTATGGCGCAGCTG	1	4.69	Root; d__Bacteria; p__Bacillota; c__Clostridia; o__Oscillospirales; f__Ruminococcaceae; g__Gemmiger; s__Gemmiger formicilis	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGCTGTATCCCGGCCGGGGCGCTCAGCTGGTTCGTTCCGCTGGCAACATGGCTCAGCTG	1	4.69	Root; d__Bacteria	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAAATGAAACCCGGTAAGGGAGCACAGCTTGTTCGTGCAGCAGGTGACGTAGCTCAGCTT	1	4.69	Root; d__Bacteria; p__Bacillota; c__Clostridia; o__Lachnospirales; f__Anaerotignaceae; g__Metalachnospira; s__Metalachnospira sp900553995	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAAATGCAACCTGGAAAAGGTGGACAAATCGCAAGATCTGCTGGTGTGTCTGCTCAAATC	2	9.38	Root; d__Bacteria; p__Bacillota_I; c__Bacilli_A; o__Erysipelotrichales; f__Coprobacillaceae	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGCTTCATCCTGGAAAGGGCGGACAGATGGTTCGTTCTGCTGGAAACGGCGCTCAGTTA	1	4.69	Root; d__Bacteria; p__Bacillota; c__Clostridia; o__Lachnospirales; f__Lachnospiraceae; g__Blautia_A	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGCTTTACCCCGGCGGGGGCGGCCGGCTGGCAAGAGCGGCGGGCAACTCCGCACAGCTC	1	4.69	Root; d__Bacteria; p__Bacillota; c__Clostridia; o__Oscillospirales; f__Acutalibacteraceae	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAGCTTCATCCTGGAAAAGGCGGACAGATGGTTCGTTCTGCAGGAAACGGCGCACAGCTC	1	4.69	Root; d__Bacteria; p__Bacillota; c__Clostridia; o__Lachnospirales	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAAGTTCGTCCGGGTCAAGGCGCTGCTTTGGTTCGCTCGGCTGGTAACTTCGCTCAGTTG	1	4.69	Root; d__Bacteria; p__Bacteroidota; c__Bacteroidia; o__Bacteroidales; f__Bacteroidaceae; g__Bacteroides; s__Bacteroides eggerthii	
+S3.1.ribosomal_protein_L2_rplB	ERR011347_1	GAATTACGTCCGGGACAAGGCGCTGCCTTGGTTCGCTCGGCTGGTAACTTCGCTCAGTTG	1	4.69	Root; d__Bacteria; p__Bacteroidota; c__Bacteroidia; o__Bacteroidales; f__Bacteroidaceae; g__Bacteroides	

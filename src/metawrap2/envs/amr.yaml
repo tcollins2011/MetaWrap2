@@ -1,0 +1,24 @@
+# Resistance and virulence: AMRFinderPlus, plus the tools that make more than one backend useful.
+#
+# AMRFinderPlus is the default backend and the only one here that needs no second decision: NCBI
+# curates a per-gene threshold for every reference, it handles point mutations as well as acquired
+# genes, and its `--plus` mode emits virulence entries in the same schema, so virulence calling costs
+# nothing extra to start.
+#
+# hAMRonization is what makes a second backend worth having at all. Three tools produce three
+# incomparable tables; it normalises them into one 35-field schema. argNorm then maps every call onto
+# an ARO term, so a gene found by two backends is recognisably one gene rather than two.
+#
+# RGI is not here. It solves against pinned older dependencies that conflict with this set, and it
+# needs CARD's data downloaded and loaded separately, so it gets its own env (rgi.yaml) for the same
+# reason CheckM2 does - the split is forced by the solver, not chosen.
+name: metawrap2-amr
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # The database is versioned separately from the tool and is fetched with `amrfinder -u`; the
+  # version of both goes into provenance, because an ARG call is only as datable as its database.
+  - ncbi-amrfinderplus >=4.0
+  - hamronization >=1.1
+  - argnorm >=0.6

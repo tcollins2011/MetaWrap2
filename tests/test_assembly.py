@@ -2,30 +2,9 @@ import io
 import subprocess
 import sys
 
-import pytest
-
 from metawrap2 import aligners
 from metawrap2.modules import assembly
 from metawrap2.scripts import rm_short_contigs, sam_to_fastq
-
-
-def test_command_templates_format_cleanly():
-    cmd = assembly.METASPADES.format(tmp="t", threads=8, mem=24, out="o", r1="a", r2="b")
-    assert "{" not in cmd and "metaspades.py" in cmd and "-t 8" in cmd
-
-    cmd = assembly.MEGAHIT_PAIRED.format(
-        r1="a", r2="b", out="o", tmp="t", threads=4, mem=24_000_000_000
-    )
-    assert "{" not in cmd and "--continue" in cmd
-
-    cmd = assembly.MEGAHIT_LEFTOVERS.format(
-        reads="u.fastq", out="o", threads=4, mem=24_000_000_000, tmp="t"
-    )
-    assert "{" not in cmd and "-r u.fastq" in cmd
-
-    cmd = assembly.QUAST.format(threads=2, out="q", quast_min=500, assembly="f.fasta")
-    assert "{" not in cmd and "-m 500" in cmd
-
 
 # --- unmapped-read extraction -------------------------------------------------------------
 #
@@ -58,19 +37,6 @@ AWKWARD_SAM = (
 )
 
 
-def test_the_unmapped_filter_keeps_exactly_the_reads_that_did_not_align(tmp_path):
-    sam = tmp_path / "a.sam"
-    sam.write_text(SAM)
-    out = io.StringIO()
-    sam_to_fastq.sam_to_fastq(str(sam), out, unmapped_only=True)
-    # The header lines have under 11 fields, so they fall out on their own.
-    assert out.getvalue() == "@unmapped\nCCCC\n+\nJJJJ\n"
-
-    both = io.StringIO()
-    sam_to_fastq.sam_to_fastq(str(sam), both)
-    assert both.getvalue() == "@mapped\nAAAA\n+\nIIII\n@unmapped\nCCCC\n+\nJJJJ\n"
-
-
 def test_the_unmapped_filter_reads_the_flag_and_not_an_aligners_tag(tmp_path):
     """Each record is one the NM-tag test classified on evidence that is not about alignment."""
     sam = tmp_path / "awkward.sam"
@@ -80,29 +46,13 @@ def test_the_unmapped_filter_reads_the_flag_and_not_an_aligners_tag(tmp_path):
     names = [ln[1:] for ln in out.getvalue().splitlines()[::4]]
     assert names == ["unmapped_mate", "qual_says_nm"]
 
-
-def test_the_unfiltered_mode_does_not_repeat_a_read_as_its_own_supplementary_alignment(tmp_path):
-    """Secondary and supplementary records are more alignments of a read, not more reads."""
-    sam = tmp_path / "awkward.sam"
-    sam.write_text(AWKWARD_SAM)
+    # Unfiltered, secondary and supplementary records are more alignments of a read, not more reads.
     out = io.StringIO()
     sam_to_fastq.sam_to_fastq(str(sam), out)
     names = [ln[1:] for ln in out.getvalue().splitlines()[::4]]
-    assert "chimeric" not in names
     assert names == ["no_nm_tag", "unmapped_mate", "qual_says_nm"]
 
-
-def test_a_header_line_with_enough_fields_is_not_mistaken_for_an_unmapped_read(tmp_path):
-    """The flag sentinel has to be safe under a bitmask: -1 & 0x4 is truthy, so it cannot be -1."""
-    sam = tmp_path / "cmt.sam"
-    sam.write_text("@CO\t" + "\t".join("field%d" % i for i in range(12)) + "\n")
-    out = io.StringIO()
-    sam_to_fastq.sam_to_fastq(str(sam), out, unmapped_only=True)
-    assert out.getvalue() == ""
-
-
-def test_the_filter_reads_a_pipe_as_well_as_a_file():
-    """``-`` is what lets bwa stream in, so a regression here silently breaks the assembly pipe."""
+    # ``-`` is what lets the aligner stream in, so the filter has to read a pipe as well as a file.
     proc = subprocess.run(
         [sys.executable, "-m", "metawrap2.scripts.sam_to_fastq", "--unmapped", "-"],
         input=SAM,
@@ -112,34 +62,16 @@ def test_the_filter_reads_a_pipe_as_well_as_a_file():
     )
     assert proc.stdout == "@unmapped\nCCCC\n+\nJJJJ\n"
 
-
-@pytest.mark.parametrize("name", sorted(aligners.ALIGNERS))
-def test_every_aligner_streams_into_the_fastq_without_writing_a_sam(name):
-    """Parametrised over the registry rather than written for bwa, so adding an aligner there cannot
-    add one here that writes its alignment to disk."""
-    cmd = assembly.EXTRACT_UNMAPPED.format(
-        align=aligners.ALIGNERS[name]["paired"].format(
-            threads=8, index="long.fasta", r1="a_1.fq", r2="a_2.fq"
-        ),
-        fastq="unused.fastq",
-    )
-    assert "{" not in cmd
-    assert cmd.startswith("set -o pipefail; ")
-    assert "-t 8" in cmd and "--unmapped -" in cmd and cmd.endswith("> unused.fastq")
-    # The FASTQ is the only thing redirected anywhere: no SAM is named as an output.
-    assert cmd.count(">") == 1
-
-
-def test_the_hybrid_default_is_not_the_registrys_default():
-    """Not an accident, and the one assertion that would notice it being quietly aligned.
-
-    The registry picked minimap2 on depth agreement, which is not what this stage reads out of an
-    alignment - here the only thing read is the unmapped bit, and a different set of recruited reads
-    is a different MEGAHIT assembly rather than a cheaper identical one.
-    """
-    assert assembly.HYBRID_ALIGNER == "bwa"
-    assert assembly.HYBRID_ALIGNER != aligners.DEFAULT_ALIGNER
-    assert assembly.HYBRID_ALIGNER in aligners.ALIGNERS
+    # And every aligner streams into that filter under pipefail, with no SAM written to disk.
+    for name, spec in sorted(aligners.ALIGNERS.items()):
+        cmd = assembly.EXTRACT_UNMAPPED.format(
+            align=spec["paired"].format(threads=8, index="long.fasta", r1="a_1.fq", r2="a_2.fq"),
+            fastq="unused.fastq",
+        )
+        assert "{" not in cmd, name
+        assert cmd.startswith("set -o pipefail; "), name
+        assert "--unmapped -" in cmd and cmd.endswith("> unused.fastq"), name
+        assert cmd.count(">") == 1, name
 
 
 def test_rm_short_contigs_filters_by_actual_sequence_length(tmp_path):

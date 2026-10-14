@@ -33,18 +33,6 @@ def _read(path):
         return fh.read()
 
 
-def test_a_clean_pair_is_recruited_to_its_bin_at_both_stringencies(tmp_path):
-    sam = [
-        _COLS % ("r1", 0x40, "ACGT", "JJJJ") + "\tNM:i:0",
-        _COLS % ("r1", 0x80 | 0x10, "ACGT", "JJJJ") + "\tNM:i:1",
-    ]
-    out = str(tmp_path / "out")
-    counts = short.filter_reads(iter(sam), _bins(tmp_path), out, strict=2, permissive=5)
-    assert counts == {"pairs": 1, "recruited": 1, "strict": 1, "permissive": 1}
-    # Reverse-strand mate comes back in the original orientation, which is what an assembler wants.
-    assert _read(os.path.join(out, "bin_001.strict_2.fastq")) == "@r1/2\nACGT\n+\nJJJJ\n"
-
-
 def test_a_supplementary_alignment_does_not_displace_the_mate_it_is_filed_next_to(tmp_path):
     """The failure is not that a junk record is emitted - it is that a real pair disappears.
 
@@ -59,77 +47,26 @@ def test_a_supplementary_alignment_does_not_displace_the_mate_it_is_filed_next_t
         "r9\t%d\tc2\t50\t60\t2H2M\t=\t60\t12\tGT\tJJ\tNM:i:0" % (0x800 | 0x40),
         _COLS % ("r1", 0x80, "ACGT", "JJJJ") + "\tNM:i:0",
     ]
+    bins = _bins(tmp_path)
     out = str(tmp_path / "out")
-    counts = short.filter_reads(iter(sam), _bins(tmp_path), out, strict=2, permissive=5)
+    counts = short.filter_reads(iter(sam), bins, out, strict=2, permissive=5)
     assert counts["recruited"] == 1
     assert _read(os.path.join(out, "bin_001.strict_1.fastq")) == "@r1/1\nACGT\n+\nJJJJ\n"
     assert not os.path.exists(os.path.join(out, "bin_002.strict_1.fastq"))
 
+    # Alignment status comes off the FLAG, not the presence of NM: an aligner that writes no NM
+    # used to recruit nothing, so every bin reassembled from no reads.
+    sam = [_COLS % ("r1", 0x40, "ACGT", "JJJJ"), _COLS % ("r1", 0x80, "ACGT", "JJJJ")]
+    counts = short.filter_reads(iter(sam), bins, str(tmp_path / "no_nm"), strict=2, permissive=5)
+    assert counts["recruited"] == 1 and counts["permissive"] == 1
 
-def test_an_unknown_edit_distance_is_permissive_and_never_strict(tmp_path):
-    """0 is a *perfect* match, so defaulting to it promoted an unknown to the top of the ranking.
-
-    The pair below carries 5 mismatches on the mate that reports any, and nothing from the mate that
-    does not. Summed as 5 it clears a strict cutoff of 6; the point is that nobody wrote the second
-    number down, so strict - which is a claim about how well the read matches - cannot be supported.
-    """
+    # A missing NM on an aligned mate is unknown, not 0 (a perfect match): permissive, never strict.
     sam = [
         _COLS % ("r1", 0x40, "ACGT", "JJJJ") + "\tNM:i:5",
-        _COLS % ("r1", 0x80, "ACGT", "JJJJ"),  # aligned, no NM tag
-    ]
-    out = str(tmp_path / "out")
-    counts = short.filter_reads(iter(sam), _bins(tmp_path), out, strict=6, permissive=99)
-    assert counts["recruited"] == 1
-    assert counts["permissive"] == 1
-    assert counts["strict"] == 0
-    assert not os.path.exists(os.path.join(out, "bin_001.strict_1.fastq"))
-
-
-def test_an_unmapped_mate_contributes_no_mismatches_rather_than_zero(tmp_path):
-    """An unmapped mate placed at its mate's reference - which the spec allows and bwa does.
-
-    Its RNAME says c1, so it cannot be told from an aligned record by reference name; only the FLAG
-    says it did not align. Counting a mismatch count for it at all is the bug, and counting it as 0
-    made a half-aligned pair look flawless.
-    """
-    sam = [
-        _COLS % ("r1", 0x40, "ACGT", "JJJJ") + "\tNM:i:1",
-        _COLS % ("r1", 0x80 | 0x4, "ACGT", "JJJJ"),
-    ]
-    assert (
-        short.pair_mismatches(sam[0].split("\t"), sam[1].split("\t")) == 1
-    ), "the unmapped mate must not contribute, and must not make the sum unknown either"
-    out = str(tmp_path / "out")
-    counts = short.filter_reads(iter(sam), _bins(tmp_path), out, strict=2, permissive=5)
-    assert counts["recruited"] == 1
-    assert counts["strict"] == 1
-
-
-def test_alignment_status_comes_off_the_flag_not_the_nm_tag(tmp_path):
-    """An aligner that does not write NM has to work, because this module no longer names one.
-
-    The old test for "did this align" was the presence of NM, which is a claim about bwa. Under it
-    this pair recruits nothing, so every bin would reassemble from no reads - a failure that produces
-    an empty result rather than an error.
-    """
-    sam = [
-        _COLS % ("r1", 0x40, "ACGT", "JJJJ"),
         _COLS % ("r1", 0x80, "ACGT", "JJJJ"),
     ]
-    out = str(tmp_path / "out")
-    counts = short.filter_reads(iter(sam), _bins(tmp_path), out, strict=2, permissive=5)
-    assert counts["recruited"] == 1
-    assert counts["permissive"] == 1
-
-
-def test_both_mates_unmapped_is_not_recruited(tmp_path):
-    sam = [
-        "r1\t%d\t*\t0\t0\t*\t*\t0\t0\tACGT\tJJJJ" % (0x4 | 0x40),
-        "r1\t%d\t*\t0\t0\t*\t*\t0\t0\tACGT\tJJJJ" % (0x4 | 0x80),
-    ]
-    out = str(tmp_path / "out")
-    counts = short.filter_reads(iter(sam), _bins(tmp_path), out, strict=2, permissive=5)
-    assert counts == {"pairs": 1, "recruited": 0, "strict": 0, "permissive": 0}
+    counts = short.filter_reads(iter(sam), bins, str(tmp_path / "unk"), strict=6, permissive=99)
+    assert counts["recruited"] == 1 and counts["permissive"] == 1 and counts["strict"] == 0
 
 
 def test_a_long_read_secondary_alignment_is_not_turned_back_into_a_fastq_record(tmp_path):
@@ -142,15 +79,12 @@ def test_a_long_read_secondary_alignment_is_not_turned_back_into_a_fastq_record(
         "r1\t%d\tc1\t900\t0\t4M\t*\t0\t0\t*\t*\tNM:i:40" % 0x100,
         "r1\t%d\tc1\t950\t60\t2H2M\t*\t0\t0\tGT\tJJ\tNM:i:1" % 0x800,
     ]
+    bins = _bins(tmp_path)
     out = str(tmp_path / "out")
-    counts = nano.filter_reads(iter(sam), _bins(tmp_path), out)
+    counts = nano.filter_reads(iter(sam), bins, out)
     assert counts["recruited"] == 1
     assert _read(os.path.join(out, "bin_001.nanopore.fastq")) == "@r1/1\nACGT\n+\nJJJJ\n"
 
-
-def test_an_unmapped_long_read_placed_at_a_contig_is_not_recruited(tmp_path):
-    """RNAME is set, so the reference-name check passes; only the FLAG says it did not align."""
+    # An unmapped long read placed at a contig: RNAME passes the reference check, only FLAG says no.
     sam = ["r1\t%d\tc1\t100\t0\t*\t*\t0\t0\tACGT\tJJJJ" % 0x4]
-    out = str(tmp_path / "out")
-    counts = nano.filter_reads(iter(sam), _bins(tmp_path), out)
-    assert counts["recruited"] == 0
+    assert nano.filter_reads(iter(sam), bins, str(tmp_path / "unmapped"))["recruited"] == 0

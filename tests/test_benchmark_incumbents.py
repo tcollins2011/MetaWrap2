@@ -15,8 +15,6 @@ in a constant, in `add_argument(default=...)`, or in a settings lookup.
 import argparse
 import importlib
 
-import pytest
-
 from metawrap2.benchmark.registry import load_configurations
 
 # Comparisons whose incumbent cannot be checked this way, with the reason. Kept explicit so a new
@@ -121,47 +119,36 @@ def _effective(module_name, namespace):
     return namespace if resolver is None else resolver(namespace)
 
 
-COMPARISONS = sorted(load_configurations().items())
+def test_the_incumbent_variants_flags_are_a_no_op():
+    """The incumbent parses to the shipped defaults, and every other variant does not.
 
-
-@pytest.mark.parametrize("name,comparison", COMPARISONS, ids=[n for n, _ in COMPARISONS])
-def test_the_incumbent_variants_flags_are_a_no_op(name, comparison):
-    if name in UNCHECKABLE:
-        pytest.skip(UNCHECKABLE[name])
-    incumbent = comparison.incumbent
-    assert incumbent is not None, "%s declares no incumbent" % name
-    module = importlib.import_module("metawrap2.modules.%s" % comparison.module)
-    base = _required_args(module)
-    shipped = _effective(comparison.module, _parsed(module, base))
-    # common_args deliberately are not defaults - they switch off work that is identical across
-    # variants so it cannot bury the difference - so only the variant's own flags are checked.
-    claimed = _effective(comparison.module, _parsed(module, base + list(incumbent.args)))
-    differing = {k: (shipped[k], claimed[k]) for k in shipped if shipped[k] != claimed[k]}
-    assert not differing, "%s: variant %r is marked default but changes %s" % (
-        name,
-        incumbent.name,
-        ", ".join("%s %r->%r" % (k, a, b) for k, (a, b) in sorted(differing.items())),
-    )
-
-
-@pytest.mark.parametrize("name,comparison", COMPARISONS, ids=[n for n, _ in COMPARISONS])
-def test_every_other_variant_actually_changes_something(name, comparison):
-    """The converse, and the cheaper half of the same guarantee.
-
-    A variant whose flags parse to the shipped defaults is not a challenger, it is a duplicate of the
-    incumbent under another name - and it would be recorded as its own row, so the same configuration
-    would appear twice in a results table with two different costs.
+    The converse is the cheaper half of the same guarantee. A variant whose flags parse to the
+    shipped defaults is not a challenger, it is a duplicate of the incumbent under another name - and
+    it would be recorded as its own row, so the same configuration would appear twice in a results
+    table with two different costs.
     """
-    if name in UNCHECKABLE:
-        pytest.skip(UNCHECKABLE[name])
-    module = importlib.import_module("metawrap2.modules.%s" % comparison.module)
-    base = _required_args(module)
-    shipped = _effective(comparison.module, _parsed(module, base))
-    for variant in comparison.variants:
-        if variant.default:
+    for name, comparison in sorted(load_configurations().items()):
+        if name in UNCHECKABLE:
             continue
-        got = _effective(comparison.module, _parsed(module, base + list(variant.args)))
-        assert got != shipped, "%s: variant %r parses identically to the incumbent" % (
+        incumbent = comparison.incumbent
+        assert incumbent is not None, "%s declares no incumbent" % name
+        module = importlib.import_module("metawrap2.modules.%s" % comparison.module)
+        base = _required_args(module)
+        shipped = _effective(comparison.module, _parsed(module, base))
+        # common_args deliberately are not defaults - they switch off work that is identical across
+        # variants so it cannot bury the difference - so only the variant's own flags are checked.
+        claimed = _effective(comparison.module, _parsed(module, base + list(incumbent.args)))
+        differing = {k: (shipped[k], claimed[k]) for k in shipped if shipped[k] != claimed[k]}
+        assert not differing, "%s: variant %r is marked default but changes %s" % (
             name,
-            variant.name,
+            incumbent.name,
+            ", ".join("%s %r->%r" % (k, a, b) for k, (a, b) in sorted(differing.items())),
         )
+        for variant in comparison.variants:
+            if variant.default:
+                continue
+            got = _effective(comparison.module, _parsed(module, base + list(variant.args)))
+            assert got != shipped, "%s: variant %r parses identically to the incumbent" % (
+                name,
+                variant.name,
+            )

@@ -1,16 +1,16 @@
 # Contributing
 
-See [CONTRIBUTING.md](https://github.com/ursky/MetaWrap2/blob/main/CONTRIBUTING.md) in the
-repository for the full guide. In short:
+The full guide is [CONTRIBUTING.md](https://github.com/ursky/MetaWrap2/blob/main/CONTRIBUTING.md)
+in the repository. In short:
 
 ```bash
 pip install -e ".[dev]"
-pre-commit install
-python -m pytest -q
+pre-commit install && pre-commit install --hook-type pre-push
+python tests/run_on_small_machine.py -q
 ```
 
-- MetaWrap2 is Python-only (no `.sh`/`.pl`/`.R`).
-- Keep modules flat: commands live in the `COMMANDS`/`CONSTANTS` blocks at the top of each
+- MetaWrap2 is Python only, with no `.sh`, `.pl` or `.R` files.
+- Each module is one file, with its commands in the `COMMANDS` and `CONSTANTS` blocks at the top of
   `src/metawrap2/modules/<module>.py`.
-- Run external tools only through `metawrap2.command.run(...)`.
-- Add tests for any change; `ruff` + `pre-commit` enforce style and the no-legacy-scripts rule.
+- External tools run only through `metawrap2.command.run(...)`.
+- Every change comes with tests. A default changes only on a committed benchmark.

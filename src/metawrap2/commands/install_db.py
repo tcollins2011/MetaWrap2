@@ -21,6 +21,7 @@ you want for a smoke test of the pipeline rather than a production analysis.
 from __future__ import annotations
 
 import concurrent.futures
+import glob
 import gzip
 import os
 import shutil
@@ -56,6 +57,12 @@ class Database(NamedTuple):
     #: Written into the config instead of the install directory, when the tool wants a file rather
     #: than a directory - GUNC takes ``--db_file``, so GUNC_DB has to name the .dmnd itself.
     key_file: Optional[str] = None
+    #: Like ``key_file``, for a path whose name is not known until it is downloaded. SingleM's
+    #: metapackage directory carries its own version (``S6.5.0.GTDB_r232.metapackage_...``), and
+    #: that version is part of the answer - a per-cell fraction is only as current as the reference
+    #: behind it - so the versioned directory is what goes into the config rather than a `latest`
+    #: symlink that would hide it.
+    key_glob: Optional[str] = None
 
 
 DATABASES: Dict[str, Database] = {
@@ -102,6 +109,51 @@ DATABASES: Dict[str, Database] = {
         small_size=None,
         describe="GUNC proGenomes 2.1 reference (diamond .dmnd; unpacks larger than it downloads)",
         key_file="gunc_db_progenomes2.1.dmnd",
+    ),
+    "dbcan": Database(
+        key="DBCAN_DB",
+        used_by="annotate --cazy",
+        size="7.4 GB",
+        small_size=None,
+        describe="dbCAN CAZyme HMMs, CAZy DIAMOND database and substrate mapping",
+    ),
+    "pfam": Database(
+        key="PFAM_DB",
+        used_by="annotate --pfam",
+        size="399 MB download, 1.6 GB unpacked",
+        small_size=None,
+        describe="Pfam-A HMMs with their per-family gathering thresholds, plus the release notes",
+        key_file="Pfam-A.hmm",
+    ),
+    "card": Database(
+        key="CARD_DB",
+        used_by="amr --rgi",
+        size="4 MB download",
+        small_size=None,
+        describe="CARD's resistance ontology and reference sequences (card.json plus its FASTAs)",
+        key_file="card.json",
+    ),
+    "singlem": Database(
+        key="SINGLEM_METAPACKAGE",
+        used_by="appraise",
+        size="2.2 GB download, 9.7 GB unpacked",
+        small_size=None,
+        describe="SingleM GTDB marker metapackage (single-copy marker genes + their taxonomy)",
+        key_glob="*.smpkg.zb",
+    ),
+    "kofam": Database(
+        key="KOFAM_DB",
+        used_by="annotate --kofam",
+        size="1.5 GB download",
+        small_size=None,
+        describe="KOfam HMM profiles and their per-profile thresholds (ko_list)",
+    ),
+    "kegg": Database(
+        key="KEGG_BRITE",
+        used_by="pathways (functional hierarchy and Krona plots)",
+        size="4 MB",
+        small_size=None,
+        describe="KEGG BRITE ko00001: KO -> pathway -> category, projected to one table",
     ),
     "host": Database(
         key="BMTAGGER_DB",
@@ -392,6 +444,143 @@ def _install_gunc(target: str, small: bool, jobs: int = 8) -> bool:
     return _gunzip(archive, dmnd)
 
 
+def _install_dbcan(target: str, small: bool, jobs: int = 8) -> bool:
+    """dbCAN's databases, fetched by dbCAN itself.
+
+    ``--aws_s3`` rather than the default HTTP path, and that is the whole decision here: dbCAN's
+    own help calls the HTTP route "db_current (moving snapshot)" while the S3 route is a pinned
+    release. A CAZyme family call is only reproducible against the release that produced it, so a
+    database that changes under a stable name is worse than a large one.
+
+    ``--small`` is ignored: the HMM sets are the method, and the three-method agreement this module
+    reports needs all three present.
+    """
+    marker = os.path.join(target, "dbCAN.hmm")
+    if os.path.isfile(marker) and os.path.getsize(marker):
+        print("  dbCAN database already present.")
+        return True
+    os.makedirs(target, exist_ok=True)
+    if (
+        _mamba_run(
+            MODULE_ENVS["annotate"],
+            ["run_dbcan", "database", "--db_dir", target, "--aws_s3"],
+        )
+        != 0
+    ):
+        return False
+    return os.path.isfile(marker) and os.path.getsize(marker) > 0
+
+
+def _install_pfam(target: str, small: bool, jobs: int = 8) -> bool:
+    """Pfam-A, from EBI's current release.
+
+    The HMMs carry their own gathering thresholds, which is why no separate cutoff table is needed -
+    and why this is one file rather than the half-dozen InterProScan's data would be.
+
+    `relnotes.txt` is fetched with them and is not decoration: Pfam renumbers and merges families
+    between releases, so a domain call means "PF00001 as of release 37.0" and the release is what
+    makes it reproducible. `--small` is ignored; the profile set is the method.
+    """
+    marker = os.path.join(target, "Pfam-A.hmm")
+    if os.path.isfile(marker) and os.path.getsize(marker):
+        print("  Pfam already present (release %s)." % _pfam_release(target))
+        return True
+    os.makedirs(target, exist_ok=True)
+    base = "https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release"
+    for name in ("Pfam-A.hmm.gz", "Pfam-A.hmm.dat.gz"):
+        if not _fetch("%s/%s" % (base, name), os.path.join(target, name)):
+            return False
+    _fetch("%s/relnotes.txt" % base, os.path.join(target, "relnotes.txt"))
+    for name in ("Pfam-A.hmm.gz", "Pfam-A.hmm.dat.gz"):
+        if _run(["gunzip", "-f", os.path.join(target, name)]) != 0:
+            return False
+    if not (os.path.isfile(marker) and os.path.getsize(marker)):
+        return False
+    print("  Pfam release %s" % _pfam_release(target))
+    return True
+
+
+def _pfam_release(target: str) -> str:
+    from ..pfam import release_from_notes
+
+    return release_from_notes(target)
+
+
+def _install_card(target: str, small: bool, jobs: int = 8) -> bool:
+    """CARD's data, from CARD's own `latest/data` endpoint.
+
+    Fetched by URL rather than by a tool, because RGI has no downloader: `rgi load` takes a
+    card.json that is already on disk. The tarball is 4 MB, which is why this one is listed with no
+    `--small` variant - there is nothing to trim.
+
+    The version inside card.json is what dates every call made against it, so it is printed here and
+    recorded per run in the AMR table. CARD releases every few months and the URL always points at
+    the newest one, so two installs months apart are different databases under one path: rename the
+    directory after the version if that matters to you.
+    """
+    marker = os.path.join(target, "card.json")
+    if os.path.isfile(marker) and os.path.getsize(marker):
+        print("  CARD database already present (version %s)." % _card_version(marker))
+        return True
+    os.makedirs(target, exist_ok=True)
+    archive = os.path.join(target, "card_data.tar.bz2")
+    if not _fetch("https://card.mcmaster.ca/latest/data", archive):
+        return False
+    import tarfile
+
+    try:
+        with tarfile.open(archive, "r:bz2") as tar:
+            # No member path escapes the target: a tarball is untrusted input, and `extractall`
+            # without this will happily write to ../ if a member says so.
+            for member in tar.getmembers():
+                destination = os.path.realpath(os.path.join(target, member.name))
+                if not destination.startswith(os.path.realpath(target) + os.sep):
+                    print("  refusing to extract %r: it escapes %s" % (member.name, target))
+                    return False
+            tar.extractall(target)
+    except (OSError, tarfile.TarError) as problem:
+        print("  could not unpack CARD: %s" % problem)
+        return False
+    if not (os.path.isfile(marker) and os.path.getsize(marker)):
+        return False
+    print("  CARD version %s" % _card_version(marker))
+    return True
+
+
+def _card_version(card_json: str) -> str:
+    from ..amr import card_version
+
+    return card_version(card_json)
+
+
+def _install_singlem(target: str, small: bool, jobs: int = 8) -> bool:
+    """The SingleM metapackage, fetched by SingleM itself.
+
+    ``singlem data`` is the supported route for the same reason ``checkm2 database --download`` is:
+    the package lives in a Zenodo record whose DOI SingleM pins per release, it is distributed as a
+    ZenodoBackpack with checksums SingleM verifies after unpacking, and a hand-picked URL goes stale
+    at the next upgrade.
+
+    ``--small`` is ignored. The metapackage is the marker set and its taxonomy; a trimmed copy would
+    not be a faster appraisal but a different reference, and the whole figure is relative to that
+    reference.
+    """
+    existing = glob.glob(os.path.join(target, "*.smpkg.zb"))
+    if existing:
+        print("  SingleM metapackage already present: %s" % os.path.basename(existing[0]))
+        return True
+    os.makedirs(target, exist_ok=True)
+    if (
+        _mamba_run(
+            MODULE_ENVS["appraise"],
+            ["singlem", "data", "--output-directory", target],
+        )
+        != 0
+    ):
+        return False
+    return bool(glob.glob(os.path.join(target, "*.smpkg.zb")))
+
+
 def _install_host(target: str, small: bool, jobs: int = 8) -> bool:
     fasta = os.path.join(target, "hg38.fa")
     os.makedirs(target, exist_ok=True)
@@ -444,6 +633,56 @@ def _install_host(target: str, small: bool, jobs: int = 8) -> bool:
     return os.path.isfile(bitmask) and os.path.isfile(srprism + ".idx")
 
 
+def _install_kofam(target: str, small: bool, jobs: int = 8) -> bool:
+    """KOfam: the HMM profiles and ko_list, their per-profile thresholds, from KEGG's FTP.
+
+    The two belong together: a profile's threshold is what makes a hit a KO call, so they are
+    downloaded into one directory and `annotate` reads the thresholds from beside the profiles.
+    `--small` is ignored; the profile set is the method.
+    """
+    from ..kofam import KO_LIST_MD5, KOFAM_URL, ko_list_md5
+
+    ko_list = os.path.join(target, "ko_list.gz")
+    if os.path.isfile(ko_list) and os.path.isdir(os.path.join(target, "profiles")):
+        print("  KOfam already present.")
+        return True
+    os.makedirs(target, exist_ok=True)
+    if not _fetch(KOFAM_URL + "ko_list.gz", ko_list):
+        return False
+    if ko_list_md5(ko_list) != KO_LIST_MD5:
+        print("  note: this ko_list differs from the one this release was validated on.")
+    archive = os.path.join(target, "profiles.tar.gz")
+    if not _fetch(KOFAM_URL + "profiles.tar.gz", archive):
+        return False
+    _untar(archive, target)
+    return os.path.isdir(os.path.join(target, "profiles"))
+
+
+def _install_kegg(target: str, small: bool, jobs: int = 8) -> bool:
+    """KEGG BRITE ko00001, projected to the per-(KO, pathway) table `pathways` reads.
+
+    The download is recorded in SNAPSHOT.json (date and md5), and every hierarchy row names it:
+    BRITE is revised, so a percentage is only comparable with one over the same hierarchy.
+    """
+    from ..hierarchy import BRITE_URL, HIERARCHY_FILE, project_htext, write_snapshot
+
+    if os.path.isfile(os.path.join(target, HIERARCHY_FILE)):
+        print("  KEGG hierarchy already present.")
+        return True
+    os.makedirs(target, exist_ok=True)
+    htext = os.path.join(target, "ko00001.keg")
+    if not _fetch(BRITE_URL, htext):
+        return False
+    rows = project_htext(htext, os.path.join(target, HIERARCHY_FILE))
+    if rows == 0:
+        print("  the download did not look like BRITE ko00001: no KO rows found")
+        return False
+    write_snapshot(target, htext, BRITE_URL, rows)
+    os.remove(htext)
+    print("  %d KO-pathway rows" % rows)
+    return True
+
+
 INSTALLERS: Dict[str, Callable[..., bool]] = {
     "checkm": _install_checkm,
     "taxdump": _install_taxdump,
@@ -451,6 +690,12 @@ INSTALLERS: Dict[str, Callable[..., bool]] = {
     "blast": _install_blast,
     "checkm2": _install_checkm2,
     "gunc": _install_gunc,
+    "card": _install_card,
+    "pfam": _install_pfam,
+    "dbcan": _install_dbcan,
+    "singlem": _install_singlem,
+    "kofam": _install_kofam,
+    "kegg": _install_kegg,
     "host": _install_host,
 }
 
@@ -575,6 +820,17 @@ def main(argv: List[str]) -> int:
             _say("  ERROR installing %s: %s" % (name, exc))
             ok = False
         value = os.path.join(target, db.key_file) if db.key_file else target
+        if db.key_glob:
+            # The path is not known until the download names it; take the newest match so an
+            # upgraded metapackage beside an old one points at the new one.
+            matches = sorted(glob.glob(os.path.join(target, db.key_glob)))
+            if matches:
+                value = matches[-1]
+                if len(matches) > 1:
+                    _say(
+                        "  %s holds %d versions of this database; configuring %s"
+                        % (target, len(matches), os.path.basename(value))
+                    )
         return name, value, db.key, ok
 
     workers = max(1, min(args.threads, len(names)))

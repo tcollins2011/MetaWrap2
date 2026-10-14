@@ -19,3 +19,6 @@ site/
 
 # OS cruft
 .DS_Store
+
+# Benchmark datasets: tens of GB, fetched with `metawrap2 benchmark fetch`
+benchmarks/data/

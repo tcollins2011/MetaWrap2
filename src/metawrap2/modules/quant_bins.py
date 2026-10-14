@@ -112,6 +112,7 @@ MAKE_HEATMAP = py_module("metawrap2.scripts.make_heatmap", "{table}", "{png}")
 COVERM_GENOME = (
     "coverm genome --genome-fasta-list {genome_list} "
     "--coupled {coupled} --methods {methods} --min-covered-fraction {min_covered} "
+    "--min-read-percent-identity {min_identity} --min-read-aligned-percent {min_aligned} "
     "--mapper {mapper} --threads {threads} --output-file {out}"
 )
 # sylph works in two stages, and both of them are sketching: once over the bins (producing one
@@ -133,6 +134,25 @@ COVERM_METHOD = "relative_abundance"
 #: zero for it. CoverM's own default is 10%, and the reason to keep it is that a handful of reads
 #: landing on a conserved gene is not evidence that a genome is present.
 COVERM_MIN_COVERED_FRACTION = 10
+#: Alignment filters, stated rather than left to CoverM's defaults, which are **0 and 0** - every
+#: alignment counts toward a genome's coverage however poorly it matches. On a MAG catalogue that is
+#: not a neutral default: reads from a relative of a binned genome map to it at lower identity, and
+#: with no floor they are counted as that genome's abundance. It is the same failure the depth table
+#: was given a floor for (see depth.PERCENT_IDENTITY), so the number is the same 90%, and for the same
+#: reason: 97 loses real coverage on a MAG assembled from a population rather than a clone.
+#:
+#: ``--min-read-aligned-percent`` is the second half of it. A read that matches at 95% identity over a
+#: third of its length is a fragment of homology, not an observation of this genome.
+#:
+#: Both are percentages, checked against `coverm genome --full-help` rather than assumed: "Exclude
+#: reads by overall percent identity e.g. 95 for 95%". A tool taking 0-1 here and being handed 90
+#: would silently accept everything, which is the shape of bug that merged two Enterococcus species
+#: in dRep when skani's alignment-fraction units were read the other way round.
+#:
+#: What these are worth is a question for the quantifier benchmark rather than for taste - the same
+#: benchmark that chose sylph's ANI floor - but 0 is not a defensible starting point.
+COVERM_MIN_READ_IDENTITY = 90
+COVERM_MIN_READ_ALIGNED = 75
 #: CoverM's own default, pinned here rather than left implicit: it changed between CoverM releases
 #: (0.8 defaults to strobealign where earlier versions did not), and a mapper swapping itself out
 #: underneath a user is a change in the numbers, not just in the runtime. `coverm genome --full-help`
@@ -496,6 +516,8 @@ def _quantify_coverm(args: argparse.Namespace, pairs: list, table: str, env, ckp
                 coupled=" ".join("%s %s" % (r1, r2) for _, r1, r2 in pairs),
                 methods=COVERM_METHOD,
                 min_covered=COVERM_MIN_COVERED_FRACTION,
+                min_identity=COVERM_MIN_READ_IDENTITY,
+                min_aligned=COVERM_MIN_READ_ALIGNED,
                 mapper=COVERM_MAPPER,
                 threads=args.threads,
                 out=raw,

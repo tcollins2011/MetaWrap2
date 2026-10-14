@@ -1,0 +1,7 @@
+sample	domain	coverage_binned	coverage_not_found	percent_binned
+ERR011347_1	d__Archaea	1	3	25.0
+ERR011347_1	d__Bacteria	23	176	11.6
+total	d__Archaea	1	3	25.0
+average	d__Archaea	1.0	3.0	25.0
+total	d__Bacteria	23	176	11.6
+average	d__Bacteria	23.0	176.0	11.6

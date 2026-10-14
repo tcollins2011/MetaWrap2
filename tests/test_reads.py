@@ -15,8 +15,4 @@ def test_paired_ok(tmp_path):
     assert rs.layout == "paired"
     assert rs.r1 == str(r1) and rs.r2 == str(r2)
 
-
-def test_interleaved(tmp_path):
-    r1 = tmp_path / "s.fastq"
-    _write_fastq(r1, "x")
     assert reads.classify([str(r1)], interleaved=True).layout == "interleaved"

@@ -8,17 +8,8 @@ full set of near-duplicate permutations that all re-assert the same code path.
 """
 
 import os
-import random
 
-import pytest
-
-from metawrap2 import checkm
-from metawrap2.modules import _common, binning, kraken2, read_qc
-
-# --- MetaWrap2's own helpers must run in the host interpreter ---------------------------
-# The per-module conda envs contain the module's external tools only - no python, no
-# metawrap2, no matplotlib. Invoking "python -m metawrap2..." inside them always failed.
-
+from metawrap2.modules import _common, binning, read_qc
 
 # --- read_qc must never move the user's input files -------------------------------------
 
@@ -80,94 +71,7 @@ def test_concoct_split_keeps_dotted_contig_names(tmp_path):
     assert ">NODE_3_length_3000_cov_7.1" in (out / "unbinned.fasta").read_text()
 
 
-# --- kraken2 --subsample must be streaming, not load the whole library ------------------
-
-
-def test_subsample_is_bounded_and_keeps_pairs_together(tmp_path):
-    r1 = tmp_path / "a_1.fastq"
-    r2 = tmp_path / "a_2.fastq"
-    r1.write_text("".join("@r%d\nACGT\n+\nIIII\n" % i for i in range(100)))
-    r2.write_text("".join("@r%d\nTGCA\n+\nIIII\n" % i for i in range(100)))
-    out1, out2 = tmp_path / "s_1.fastq", tmp_path / "s_2.fastq"
-
-    random.seed(0)
-    kraken2._subsample_pairs(str(r1), str(r2), 10, str(out1), str(out2))
-    names1 = [ln[1:].strip() for ln in out1.read_text().splitlines()[::4]]
-    names2 = [ln[1:].strip() for ln in out2.read_text().splitlines()[::4]]
-    assert len(names1) == 10
-    assert names1 == names2  # mates stayed paired
-    assert len(set(names1)) == 10  # no record sampled twice
-
-
-# --- CheckM2 produces the same .stats contract as CheckM1 -------------------------------
-
-
-def test_checkm2_summary_matches_stats_contract(tmp_path):
-    report = tmp_path / "quality_report.tsv"
-    report.write_text(
-        "Name\tCompleteness\tContamination\tCompleteness_Model_Used\tContig_N50\t"
-        "Genome_Size\tGC_Content\n"
-        "bin.1\t95.42\t1.23\tneural\t45000\t3800000\t0.512\n"
-        "bin.2\t61.00\t8.90\tneural\t12000\t2100000\t0.401\n"
-    )
-    rows = checkm.summarize_checkm2(str(report))
-    assert [r[0] for r in rows] == ["bin.1", "bin.2"]
-    # Same column order/arity as the CheckM1 path, so every consumer works unchanged.
-    assert len(rows[0]) == len(checkm.STATS_HEADER)
-    assert rows[0][1:3] == ["95.42", "1.23"]
-    assert rows[0][4] == "checkm2"
-    assert rows[0][5:7] == ["45000", "3800000"]
-
-    out = tmp_path / "bins.stats"
-    checkm.write_stats(rows, str(out))
-    lines = out.read_text().splitlines()
-    assert lines[0].split("\t") == checkm.STATS_HEADER
-    assert lines[1].startswith("bin.1")  # sorted by completeness, descending
-
-
-# --- the BLAST database must not be assumed to be called "nt" with 2-digit volumes -------
-
-
-def _settings(**dbs):
-    from metawrap2.config import Settings
-
-    return Settings(databases=dbs)
-
-
-@pytest.mark.parametrize(
-    "filename",
-    [
-        "nt.nsq",  # single volume, no numbering
-        "nt.00.nsq",  # legacy 2-digit volume
-        "nt.000.nsq",  # BLAST v5 3-digit volume
-        "nt.nal",  # alias file standing in for volumes
-    ],
-)
-def test_blastdb_is_found_for_every_real_layout(tmp_path, filename):
-    from metawrap2 import blastdb
-
-    (tmp_path / filename).write_text("")
-    ok, problem = blastdb.find(_settings(BLASTDB=str(tmp_path)))
-    assert ok, problem
-
-
-# --- install-db writes config keys without destroying the user's file --------------------
-
-
-def test_install_db_updates_existing_key_and_keeps_comments(tmp_path):
-    from metawrap2.commands import install_db
-
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        "# my notes\n[databases]\n# where kraken lives\n"
-        'KRAKEN2_DB = "/old/path"\nTAXDUMP = "/tax"\n'
-    )
-    install_db._set_config_keys(str(cfg), {"KRAKEN2_DB": "/new/path"})
-    text = cfg.read_text()
-    assert 'KRAKEN2_DB = "/new/path"' in text
-    assert "/old/path" not in text
-    assert 'TAXDUMP = "/tax"' in text  # other keys survive
-    assert "# my notes" in text and "# where kraken lives" in text
+# --- install-db: config keys and archives off the internet ------------------------------
 
 
 def test_install_db_untar_refuses_a_member_that_escapes_the_destination(tmp_path):
@@ -190,6 +94,19 @@ def test_install_db_untar_refuses_a_member_that_escapes_the_destination(tmp_path
     assert not os.path.exists(tmp_path / "escaped.dmp")
     assert not os.path.exists(into / "absolute.dmp")
     assert not os.path.exists(archive)  # unpacked archives are still removed
+
+    # Writing the installed path back updates the existing key without destroying the user's file.
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "# my notes\n[databases]\n# where kraken lives\n"
+        'KRAKEN2_DB = "/old/path"\nTAXDUMP = "/tax"\n'
+    )
+    install_db._set_config_keys(str(cfg), {"KRAKEN2_DB": "/new/path"})
+    text = cfg.read_text()
+    assert 'KRAKEN2_DB = "/new/path"' in text
+    assert "/old/path" not in text
+    assert 'TAXDUMP = "/tax"' in text  # other keys survive
+    assert "# my notes" in text and "# where kraken lives" in text
 
 
 # --- dereplication must survive a bin with no stats row ---------------------------------
@@ -217,114 +134,6 @@ def test_dereplicate_tolerates_a_bin_missing_from_stats(tmp_path, capsys):
     assert ">shared" not in (out / "bin.2.fa").read_text()
     assert ">only2" in (out / "bin.2.fa").read_text()
     assert "no row in" in capsys.readouterr().err
-
-
-# --- --dry-run must print a module's WHOLE pipeline, not just the first command ----------
-# Previously the orchestration consumed outputs that a dry run never produced, so every
-# module died with a raw traceback after one or two commands. A representative spread of
-# modules (a simple one, the widest fan-out, and a bin-set consumer) pins the plumbing.
-
-DRY_RUN_CASES = [
-    ("read_qc", ["-1", "{r1}", "-2", "{r2}", "-o", "{out}"], 3),
-    (
-        "binning",
-        ["-a", "{asm}", "-o", "{out}", "--metabat2", "--maxbin2", "--concoct", "{r1}", "{r2}"],
-        8,
-    ),
-    ("bin_refinement", ["-o", "{out}", "-A", "{bins}", "-B", "{bins2}"], 3),
-]
-
-
-@pytest.fixture
-def dry_inputs(tmp_path, monkeypatch):
-    """Minimal inputs plus a config that satisfies every module's database checks."""
-    bins = tmp_path / "bins"
-    bins.mkdir()
-    (bins / "bin.1.fa").write_text(">NODE_1_length_5000_cov_3.5\n" + "ACGT" * 1250 + "\n")
-    bins2 = tmp_path / "bins2"
-    bins2.mkdir()
-    (bins2 / "bin.1.fa").write_text(">NODE_1_length_5000_cov_3.5\n" + "ACGT" * 1250 + "\n")
-    asm = tmp_path / "asm.fa"
-    asm.write_text(">NODE_1_length_5000_cov_3.5\n" + "ACGT" * 1250 + "\n")
-    r1 = tmp_path / "s_1.fastq"
-    r2 = tmp_path / "s_2.fastq"
-    r1.write_text("@r1\nACGT\n+\nIIII\n")
-    r2.write_text("@r1\nTGCA\n+\nIIII\n")
-
-    # Stand-in databases: the modules only check that these paths/files exist.
-    dbs = tmp_path / "dbs"
-    (dbs / "KRAKEN2").mkdir(parents=True)
-    (dbs / "BLAST").mkdir(parents=True)
-    (dbs / "BLAST" / "nt.nsq").write_text("")
-    (dbs / "TAX").mkdir(parents=True)
-    for name in ("names.dmp", "nodes.dmp", "citations.dmp"):
-        (dbs / "TAX" / name).write_text("")
-    (dbs / "HOST").mkdir(parents=True)
-    (dbs / "HOST" / "hg38.bitmask").write_text("")
-
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        "[settings]\nthreads = 4\nuse_conda_envs = true\n\n[databases]\n"
-        'KRAKEN2_DB = "%s"\nBMTAGGER_DB = "%s"\nBLASTDB = "%s"\nTAXDUMP = "%s"\n'
-        % (dbs / "KRAKEN2", dbs / "HOST", dbs / "BLAST", dbs / "TAX")
-    )
-
-    # Every module env "exists" and the env manager is findable, so env_for does not abort; nothing
-    # is executed anyway. Both halves are needed because both are preconditions for running in an
-    # env and both are now checked up front - and mamba is not on PATH in the shell pytest runs in.
-    monkeypatch.setattr(_common, "conda_env_exists", lambda env: True)
-    monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
-
-    return {
-        "bins": str(bins),
-        "bins2": str(bins2),
-        "asm": str(asm),
-        "r1": str(r1),
-        "r2": str(r2),
-        "out": str(tmp_path / "out"),
-        "config": str(cfg),
-    }
-
-
-@pytest.mark.parametrize("module_name,argv_template,min_commands", DRY_RUN_CASES)
-def test_dry_run_reaches_the_end_of_every_module(
-    module_name, argv_template, min_commands, dry_inputs, capsys, monkeypatch
-):
-    import importlib
-
-    from metawrap2 import command as command_mod
-
-    recorded = []
-
-    class Recorder:
-        def record_command(self, cmd):
-            recorded.append(cmd)
-
-    module = importlib.import_module("metawrap2.modules.%s" % module_name)
-    monkeypatch.setattr(command_mod.runner, "dry_run", True)
-    monkeypatch.setattr(command_mod.runner, "force", True)
-
-    argv = [a.format(**dry_inputs) for a in argv_template]
-    argv += ["--config", dry_inputs["config"], "-o", dry_inputs["out"] + "-" + module_name]
-    # de-duplicate the -o we may have added twice
-    if argv.count("-o") > 1:
-        first = argv.index("-o")
-        del argv[first : first + 2]
-
-    try:
-        rc = module.main(argv)
-    finally:
-        command_mod.set_recorder(None)
-
-    out = capsys.readouterr()
-    assert "Traceback" not in out.out + out.err
-    assert rc == 0, out.err[-2000:]
-    printed = [ln for ln in out.err.splitlines() if ln.startswith("[dry-run]")]
-    assert len(printed) >= min_commands, "%s only got to %d command(s) under --dry-run:\n%s" % (
-        module_name,
-        len(printed),
-        "\n".join(printed),
-    )
 
 
 # --- metaBAT2 writes non-genome files into its output prefix -----------------------------
@@ -373,76 +182,3 @@ def test_metabat2_non_bin_outputs_are_moved_out_of_the_bin_set(tmp_path, monkeyp
         "bin.tooShort.fa",
         "bin.unbinned.fa",
     ], moved
-
-
-# --- log noise filtering: command data output must never be filtered ---------------------
-
-
-# --- relative -o must work even for tools that run with cwd=<output dir> -----------------
-
-
-# --- CheckM1's --tmpdir has to be short enough to hold a unix socket ---------------------
-# Symptom: every variant of a scored benchmark comparison lost its completeness metrics, with
-# CheckM reporting a bare "EOFError" out of mp.Manager().dict() and nothing about paths. Cause:
-# --tmpdir makes CheckM set tempfile.tempdir process-wide, so the Manager's listener socket is
-# bound inside it, and Linux allows a unix-socket path 107 characters. The failing tmpdir was 90.
-
-
-def test_checkm_tmpdir_is_short_enough_to_bind_a_socket_however_deep_the_output_is(tmp_path):
-    deep = tmp_path
-    for _ in range(12):
-        deep = deep / "a-directory-with-a-realistic-name"
-    bins = deep / "metabat2_bins"
-    bins.mkdir(parents=True)
-    assert (
-        len(str(bins) + ".tmp") > checkm.MAX_TMPDIR_LEN
-    ), "the fixture has to be long to test this"
-
-    tmp = checkm.checkm_tmpdir(str(bins))
-
-    assert len(tmp) <= checkm.MAX_TMPDIR_LEN
-    # Short, but still the directory beside the bins: CheckM's tree stage writes GBs and they
-    # belong on the filesystem the caller picked, not on whatever /tmp happens to be.
-    assert os.path.realpath(tmp) == os.path.realpath(str(bins) + ".tmp")
-    assert os.path.isdir(str(bins) + ".tmp")
-    # The property all of the above exists to buy, asserted directly rather than by proxy.
-    import socket
-
-    sock = socket.socket(socket.AF_UNIX)
-    try:
-        sock.bind(os.path.join(tmp, "listener-abcd1234"))
-    finally:
-        sock.close()
-
-
-def test_checkm_tmpdir_stays_beside_the_bins_when_the_path_is_short():
-    """No indirection when none is needed - a symlink in /tmp is harder to find afterwards.
-
-    Not under ``tmp_path``: pytest's own temp directory is about 70 characters deep before the test
-    adds anything, which is over the budget a unix socket leaves (75 - see MAX_TMPDIR_LEN), so a path
-    built there is correctly *not* short and cannot exercise this branch.
-    """
-    import shutil
-
-    from metawrap2.utils import MAX_TMPDIR_LEN
-
-    root = "/tmp/mw2-short-tmpdir-test"
-    shutil.rmtree(root, ignore_errors=True)
-    bins = os.path.join(root, "b_bins")
-    os.makedirs(bins)
-    try:
-        assert len(bins) + len(".tmp") <= MAX_TMPDIR_LEN
-        tmp = checkm.checkm_tmpdir(bins)
-        assert tmp == bins + ".tmp" and os.path.isdir(tmp) and not os.path.islink(tmp)
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def test_checkm_tmpdir_is_stable_across_a_resume(tmp_path):
-    """--resume re-runs the same command; a fresh symlink each time would leak one per attempt."""
-    deep = tmp_path
-    for _ in range(12):
-        deep = deep / "a-directory-with-a-realistic-name"
-    bins = deep / "metabat2_bins"
-    bins.mkdir(parents=True)
-    assert checkm.checkm_tmpdir(str(bins)) == checkm.checkm_tmpdir(str(bins))

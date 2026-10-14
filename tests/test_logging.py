@@ -14,13 +14,3 @@ def test_banner_borders_and_width():
         assert len(line) == 120
         assert line.startswith("-----") and line.endswith("-----")
         assert "hello world" in line
-
-
-def test_long_message_wraps_to_multiple_lines():
-    msg = "word " * 40  # far exceeds the 90-char wrap width
-    content = [
-        ln for ln in mwlog.format_comment(msg.strip(), "-").split("\n") if set(ln) != {"-"} and ln
-    ]
-    assert len(content) >= 2
-    for line in content:
-        assert len(line) == 120

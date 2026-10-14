@@ -21,7 +21,10 @@ MODULES = {
     "assembly": ("metawrap2.modules.assembly", "Metagenomic assembly (metaSPAdes or MEGAHIT)"),
     "kraken2": ("metawrap2.modules.kraken2", "Taxonomy profiling of reads/contigs with KRAKEN2"),
     "blobology": ("metawrap2.modules.blobology", "GC-vs-abundance blobplots of contigs and bins"),
-    "binning": ("metawrap2.modules.binning", "Initial binning (metaBAT2, MaxBin2, CONCOCT)"),
+    "binning": (
+        "metawrap2.modules.binning",
+        "Initial binning (metaBAT2, MaxBin2, CONCOCT, SemiBin2, VAMB, COMEBin)",
+    ),
     "coverage": (
         "metawrap2.modules.coverage",
         "One cross-sample depth table for a cohort, split per assembly",
@@ -40,7 +43,57 @@ MODULES = {
         "Collapse several samples' bins into one non-redundant catalogue",
     ),
     "classify_bins": ("metawrap2.modules.classify_bins", "Assign taxonomy to genomic bins"),
-    "annotate_bins": ("metawrap2.modules.annotate_bins", "Functional annotation of draft genomes"),
+    "annotate": (
+        "metawrap2.modules.annotate",
+        "Call genes once over bins or an assembly, and annotate them",
+    ),
+    "diff_abundance": (
+        "metawrap2.modules.diff_abundance",
+        "Differential abundance between sample groups, by ANCOM-BC",
+    ),
+    "catalogue": (
+        "metawrap2.modules.catalogue",
+        "Collapse genes from many samples into one non-redundant catalogue",
+    ),
+    "quantify_function": (
+        "metawrap2.modules.quantify_function",
+        "Sample-level gene and pathway abundance from per-genome annotation",
+    ),
+    "viruses": (
+        "metawrap2.modules.viruses",
+        "Recover viral contigs, estimate completeness, group into vOTUs",
+    ),
+    "amr": (
+        "metawrap2.modules.amr",
+        "Resistance and virulence genes with their genomic context",
+    ),
+    "appraise": (
+        "metawrap2.modules.appraise",
+        "What share of each sample's community the bins represent, per cell",
+    ),
+    "pangenome": (
+        "metawrap2.modules.pangenome",
+        "A pangenome per species in a cohort, from dereplication's clusters",
+    ),
+    "phylogeny": (
+        "metawrap2.modules.phylogeny",
+        "A tree from a marker or core-gene alignment, with support values",
+    ),
+    "strains": (
+        "metawrap2.modules.strains",
+        "Within-population variation and strain sharing between samples",
+    ),
+    "nonpareil": (
+        "metawrap2.modules.nonpareil",
+        "Diversity coverage per sample, and whether samples are comparable",
+    ),
+    "pathways": (
+        "metawrap2.modules.pathways",
+        "KEGG module completeness and the functional hierarchy, per genome and per sample",
+    ),
+    # Kept as a name because it is in published scripts. It is the Prokka/Bakta wrapper, which
+    # `annotate` replaces; see that module's docstring for what it could not answer.
+    "annotate_bins": ("metawrap2.modules.annotate_bins", "Deprecated: use `annotate`"),
 }
 
 # Non-module utility subcommands.
@@ -120,12 +173,15 @@ def help_message() -> str:
         "",
         "  Modules:",
     ]
+    # The name column fits the longest name: a fixed width of 16 ran `quantify_function` straight
+    # into its own description.
+    width = max(len(name) for name in list(MODULES) + list(UTILITIES)) + 2
     for name, (_path, desc) in MODULES.items():
-        lines.append("\t%-16s%s" % (name, desc))
+        lines.append("\t%-*s%s" % (width, name, desc))
     lines.append("")
     lines.append("  Utilities:")
     for name, (_path, desc) in UTILITIES.items():
-        lines.append("\t%-16s%s" % (name, desc))
+        lines.append("\t%-*s%s" % (width, name, desc))
     lines += [
         "",
         "  Global options (before the module name):",

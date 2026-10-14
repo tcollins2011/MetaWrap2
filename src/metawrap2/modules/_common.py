@@ -872,6 +872,7 @@ def align_read_sets(
     env: Optional[str] = None,
     single_end: bool = False,
     interleaved: bool = False,
+    long_read_type: Optional[str] = None,
 ) -> List[str]:
     """Map each read set in *reads* to *reference*, leaving one sorted BAM per sample in *out_dir*.
 
@@ -886,9 +887,36 @@ def align_read_sets(
 
     """
     spec = _aligners.ALIGNERS[aligner]
+    if long_read_type:
+        # Long reads need minimap2's platform preset rather than `sr`: mapping a 12 kb nanopore
+        # read with the short-read preset finds a seed and stops, so coverage comes out low and
+        # uneven and the binner reads that as a different organism. The preset comes from
+        # metawrap2.longreads, which is also where Flye's and SemiBin2's names for the same
+        # platform live.
+        from .. import longreads as _long
+
+        if aligner != "minimap2":
+            raise ValueError(
+                "long reads need --aligner minimap2: bwa and bwa-mem2 have no long-read mode, and "
+                "mapping long reads with them produces coverage nothing downstream should read"
+            )
+        preset = _long.resolve(long_read_type).minimap2_preset
+        spec = dict(spec)
+        spec["single"] = spec["single"].replace("-ax sr", "-ax %s" % preset)
+        spec["paired"] = spec["single"]
+        spec["interleaved"] = spec["single"]
     index = _aligners.index_path(reference, aligner)
+    index_cmd = spec["index_cmd"]
+    if long_read_type and aligner == "minimap2":
+        # The index carries the preset's k-mer and window size, so an `sr` index read by a
+        # `map-ont` mapping run is a silent mismatch rather than an error.
+        from .. import longreads as _long
+
+        index_cmd = index_cmd.replace(
+            "-x sr", "-x %s" % _long.resolve(long_read_type).minimap2_preset
+        )
     run(
-        spec["index_cmd"].format(assembly=reference, index=index),
+        index_cmd.format(assembly=reference, index=index),
         env=env,
         tool="%s index" % aligner,
     )

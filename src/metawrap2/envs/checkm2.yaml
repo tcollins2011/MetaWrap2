@@ -9,4 +9,7 @@ channels:
   - conda-forge
   - bioconda
 dependencies:
-  - checkm2 >=1.0.2
+  # >=1.1.0, not >=1.0.2: in 1.0.2 and earlier the per-genome score depends on what else was in the
+  # batch, so the same bin scores differently depending on the company it kept. Every quality number
+  # this pipeline reports comes from here, which makes that floor the wrong one to allow.
+  - checkm2 >=1.1.0

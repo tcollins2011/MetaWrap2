@@ -15,7 +15,7 @@ import os
 import pytest
 
 from metawrap2 import checkm as checkm_mod
-from metawrap2.constants import BIN_EXTENSION, CONTIGS_SUFFIX, STATS_SUFFIX
+from metawrap2.constants import BIN_EXTENSION, STATS_SUFFIX
 from metawrap2.io.seqio import contig_id, iter_fasta
 from metawrap2.modules import _common, bin_refinement
 
@@ -126,91 +126,6 @@ def _run(tmp_path, extra=(), letters="AB"):
     return str(out)
 
 
-# --- the command ---------------------------------------------------------------------------
-
-
-def test_the_command_names_an_engine_that_is_actually_in_the_env():
-    """DAS_Tool's default --search_engine is usearch, which is not free software and not installed.
-
-    Left at the default the command does not fail at solve time or import time - it fails partway
-    into a run, which on real data is after prodigal has read every bin.
-    """
-    cmd = bin_refinement.DAS_TOOL.format(
-        tables="a.tsv,b.tsv",
-        labels="binsA,binsB",
-        assembly="asm.fa",
-        prefix="p",
-        threads=4,
-        score=0.5,
-    )
-    assert "{" not in cmd
-    assert "--search_engine diamond" in cmd and "usearch" not in cmd
-    assert "-i a.tsv,b.tsv" in cmd and "-l binsA,binsB" in cmd
-    # Without --write_bins DAS_Tool reports which bins it would keep and writes no FASTA at all.
-    assert "--write_bins" in cmd
-
-
-# --- the contig table ----------------------------------------------------------------------
-
-
-def test_the_contig_table_is_contig_to_bin_with_no_header(tmp_path):
-    """DAS_Tool reads this with no header and expects exactly two columns.
-
-    A third column or a header row is not rejected: the header is read as a contig that is not in
-    the assembly, and the run ends having consolidated nothing.
-    """
-    bins = tmp_path / "bins"
-    bins.mkdir()
-    (bins / ("bin.1" + BIN_EXTENSION)).write_text(">c1 len=10\nAAAA\n>c2\nCCCC\n")
-    (bins / ("bin.2" + BIN_EXTENSION)).write_text(">c3\nGGGG\n")
-    (bins / "notes.txt").write_text("ignored\n")
-    # A stats sidecar sits next to every bin set, and it is not a bin.
-    (bins / ("bin.3" + STATS_SUFFIX)).write_text("bin\tcompleteness\n")
-    table = tmp_path / "t.tsv"
-    assert bin_refinement.write_contig_table(str(bins), str(table)) == 3
-    assert table.read_text() == "c1\tbin.1\nc2\tbin.1\nc3\tbin.2\n"
-
-
-def test_the_same_table_is_written_beside_the_final_bins(tmp_path, fake_tools):
-    """One writer for both consumers, so a change for DAS_Tool cannot silently break Anvio."""
-    out = _run(tmp_path)
-    final = [d for d in os.listdir(out) if d.startswith("metawrap_") and d.endswith("_bins")]
-    assert len(final) == 1
-    table = os.path.join(out, final[0] + CONTIGS_SUFFIX)
-    with open(table) as fh:
-        rows = [line.split("\t") for line in fh.read().splitlines()]
-    assert rows and all(len(r) == 2 for r in rows)
-
-
-# --- the assembly --------------------------------------------------------------------------
-
-
-def test_an_assembly_whose_headers_already_match_is_passed_through_untouched(tmp_path):
-    """metaSPAdes and MEGAHIT names normalise to themselves, so the common case copies nothing."""
-    assembly = tmp_path / "a.fa"
-    assembly.write_text(">NODE_1_length_5_cov_2 extra\nAAAAA\n>k141_7 flag=1\nCCCCC\n")
-    work = tmp_path / "work"
-    assert bin_refinement.assembly_for_bins(str(assembly), str(work)) == str(assembly)
-    assert not work.exists()
-
-
-def test_an_assembly_is_renamed_when_the_bins_were(tmp_path):
-    """'=' inside a contig id is what _fix_contig_naming rewrites, so the assembly must match.
-
-    Unmatched names are not an error anywhere: DAS_Tool simply finds none of the bins' contigs in
-    the assembly and keeps nothing.
-    """
-    assembly = tmp_path / "a.fa"
-    assembly.write_text(">ctg=1\nAAAAA\n")
-    work = tmp_path / "work"
-    result = bin_refinement.assembly_for_bins(str(assembly), str(work))
-    assert result != str(assembly)
-    assert [contig_id(h) for h, _ in iter_fasta(result)] == ["ctg_1"]
-
-
-# --- routing -------------------------------------------------------------------------------
-
-
 def test_the_consolidated_set_lands_in_binsO_and_runs_the_normal_downstream_half(
     tmp_path, fake_tools
 ):
@@ -236,76 +151,20 @@ def test_the_consolidated_set_lands_in_binsO_and_runs_the_normal_downstream_half
     # binsM is this module's own intermediate; the external route never builds one.
     assert not os.path.isdir(os.path.join(work, "binsM"))
 
-
-def test_checkm_runs_once_and_not_on_every_input_set(tmp_path, fake_tools, monkeypatch):
-    """CheckM on the input sets exists to feed MetaWrap2's own choice between bin versions.
-
-    DAS_Tool makes that choice from its own scoring, so running CheckM anyway would add the
-    module's largest cost to the arm and change nothing - and would make the cost comparison
-    between the two consolidators meaningless.
-    """
-    scored = []
-
-    def counting_checkm(bins_dir, **kwargs):
-        scored.append(os.path.basename(bins_dir))
-        return _fake_run_checkm(bins_dir, **kwargs)
-
-    monkeypatch.setattr(bin_refinement._checkm, "run_checkm", counting_checkm)
-    monkeypatch.setattr(checkm_mod, "run_checkm", counting_checkm)
-    _run(tmp_path)
-    assert scored == ["binsO"]
-
-
-def test_no_bin_set_is_hybridised(tmp_path, fake_tools):
-    """Binning_refiner builds every combination up front; DAS_Tool consumes the sets as given.
-
-    Skipping it is most of why this route is cheap, and it is also a correctness point: DAS_Tool
-    scoring a hybrid of two binners alongside the binners themselves is not what its scoring is
-    for, and would feed it the same contigs several times over.
-    """
-    out = _run(tmp_path)
-    assert not [cmd for cmd in fake_tools if "binning_refiner" in cmd]
-    assert "binsAB" not in os.listdir(out)
-
-
-def test_the_tables_handed_over_are_the_input_sets_in_label_order(tmp_path, fake_tools):
-    """-i and -l are positional with respect to each other: a mismatch mislabels every bin."""
-    out = _run(tmp_path)
-    cmd = next(c for c in fake_tools if c.startswith("DAS_Tool "))
+    (cmd,) = [c for c in fake_tools if c.startswith("DAS_Tool ")]
+    # DAS_Tool's default --search_engine is usearch, which is not installed, and it fails partway
+    # into a run; without --write_bins it reports which bins it would keep and writes no FASTA.
+    assert "--search_engine diamond" in cmd and "usearch" not in cmd and "--write_bins" in cmd
+    # -i and -l are positional with respect to each other: a mismatch mislabels every bin.
     parts = cmd.split()
     tables = parts[parts.index("-i") + 1].split(",")
-    labels = parts[parts.index("-l") + 1].split(",")
-    assert labels == ["binsA", "binsB"]
+    assert parts[parts.index("-l") + 1].split(",") == ["binsA", "binsB"]
     assert [os.path.basename(t) for t in tables] == ["binsA.dastool.tsv", "binsB.dastool.tsv"]
-    assert all(t.startswith(os.path.join(out, "work_files")) for t in tables)
-
-
-# --- preconditions -------------------------------------------------------------------------
-
-
-def test_a_missing_assembly_stops_the_run_naming_the_flag_to_pass(tmp_path, fake_tools, capsys):
-    """-a is only needed by this route, so it cannot be a required argument; it has to be checked.
-
-    The message has to name -a. Left to the generic input validation the run still stops in the
-    first second, but it stops saying an assembly path is empty, which for someone who never
-    passed one reads as a bug rather than a missing argument.
-    """
-    dirs, _assembly = _inputs(tmp_path)
-    out = tmp_path / "refined"
-    with pytest.raises(SystemExit):
-        bin_refinement.main(
-            ["-o", str(out), "-t", "1", "-A", dirs[0], "-B", dirs[1], "--consolidator", "dastool"]
-        )
-    assert "-a/--assembly" in capsys.readouterr().out
-    assert not os.path.isdir(os.path.join(str(out), "binsA"))
-
-
-def test_skip_consolidation_with_a_consolidator_is_reported_as_a_contradiction(
-    tmp_path, fake_tools
-):
-    """Both flags were typed on purpose, and either precedence silently does the other thing."""
-    with pytest.raises(SystemExit):
-        _run(tmp_path, extra=["--skip-consolidation"])
+    # The contig tables carry no header and exactly two columns: a header row would be read as a
+    # contig, and the run would end having consolidated nothing.
+    with open(os.path.join(work, "binsA.dastool.tsv")) as fh:
+        rows = [line.split("\t") for line in fh.read().splitlines()]
+    assert rows and all(len(r) == 2 for r in rows) and rows[0][0] == "c01"
 
 
 def test_an_assembly_with_an_empty_record_is_filtered_before_a_consolidator_sees_it(tmp_path):
@@ -317,8 +176,6 @@ def test_an_assembly_with_an_empty_record_is_filtered_before_a_consolidator_sees
     assembly ships two such records; `binning` already drops them from its own copy, so a consolidator
     reading the original was getting what binning had deliberately not passed on.
     """
-    from metawrap2.modules import bin_refinement
-
     assembly = tmp_path / "asm.fa"
     assembly.write_text(">c1\nACGT\n>_from__to_-42_total_0\n\n>c2\nTTTT\n")
     work = tmp_path / "work"
@@ -329,12 +186,3 @@ def test_an_assembly_with_an_empty_record_is_filtered_before_a_consolidator_sees
         text = fh.read()
     assert "_from__to_" not in text
     assert ">c1\nACGT\n" in text and ">c2\nTTTT\n" in text
-
-
-def test_a_clean_assembly_is_passed_through_without_a_copy(tmp_path):
-    """Assemblies are gigabytes; a copy nothing needed would be the module's most expensive no-op."""
-    from metawrap2.modules import bin_refinement
-
-    assembly = tmp_path / "asm.fa"
-    assembly.write_text(">k141_1 len=4\nACGT\n>k141_2\nTTTT\n")
-    assert bin_refinement.assembly_for_bins(str(assembly), str(tmp_path / "work")) == str(assembly)

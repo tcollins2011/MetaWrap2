@@ -152,6 +152,69 @@ def abundance_truth_files(dataset: Dataset, data_dir: str) -> Dict[str, str]:
     return truth
 
 
+def _narrowing_label(path: str, layout: str) -> str:
+    """The *sample* a read file belongs to, for deciding which files to prepare.
+
+    Not :func:`_sample_label`, and the difference is the mate suffix. That function labels a file,
+    which is what a results row and an abundance-truth join need; this one has to label a sample,
+    because a paired dataset has two files per sample and narrowing on the file label selects one
+    sample's two mates when asked for two samples.
+
+    The suffix is stripped only for a paired layout. An interleaved dataset has one file per sample
+    and CAMI2's labels are ``sample_0``, ``sample_1``, ``sample_2`` - stripping a trailing ``_1``
+    there would merge two different samples into one.
+    """
+    label = _sample_label(path)
+    if layout == "interleaved":
+        return label
+    for suffix in ("_R1", "_R2", "_r1", "_r2", "_1", "_2", ".1", ".2"):
+        if label.endswith(suffix):
+            return label[: -len(suffix)]
+    return label
+
+
+def _narrow_candidates(
+    candidates: Sequence[str],
+    wanted: Sequence[str],
+    max_samples: int,
+    say: Callable[[str], None],
+    layout: str = "interleaved",
+) -> List[str]:
+    """The read files worth preparing, given the sample selection.
+
+    Named samples that are absent are *not* an error here: :func:`select_samples` reports those
+    against the full list of what the dataset has, and duplicating the check would report it
+    against a list this function has already shortened.
+    """
+    if not wanted and max_samples <= 0:
+        return list(candidates)
+    # Paths per sample, not one path per sample. A paired dataset has two files under one label, so
+    # keying a dict on the label keeps whichever came last - every mate file was silently dropped,
+    # and the pairing downstream then read one file per sample and mislabelled the lot: a
+    # three-sample run narrowed to two reported one. Grouping keeps both mates of every sample kept.
+    by_sample: Dict[str, List[str]] = {}
+    for path in candidates:
+        by_sample.setdefault(_narrowing_label(path, layout), []).append(path)
+    order = sorted(by_sample)
+    if wanted:
+        order = [name for name in order if name in set(wanted)]
+    if max_samples > 0:
+        order = order[:max_samples]
+    if not order:
+        return list(candidates)
+    skipped = len(by_sample) - len(order)
+    if skipped > 0:
+        say(
+            "  preparing reads for %d of %d samples (%s); the rest are not part of this run"
+            % (len(order), len(by_sample), ", ".join(order))
+        )
+    kept = set(order)
+    # Original order, so the files are prepared in the order they were found rather than in label
+    # order - the downstream pairing matches mates by name and does not care, but a stable order
+    # keeps a dry run's printed plan comparable between runs.
+    return [path for path in candidates if _narrowing_label(path, layout) in kept]
+
+
 def prepare_reads(
     dataset: Dataset,
     data_dir: str,
@@ -159,8 +222,16 @@ def prepare_reads(
     *,
     dry_run: bool = False,
     say: Callable[[str], None] = print,
+    wanted: Sequence[str] = (),
+    max_samples: int = 0,
 ) -> List[Sequence[str]]:
     """Locate the dataset's reads and, if interleaved, split them once into *work_dir*.
+
+    *wanted* and *max_samples* are the same narrowing :func:`select_samples` applies, passed in
+    here so the splitting is narrowed too. Without that, a comparison asked for three samples
+    deinterleaved all ten first: 190 GB written and an hour spent to use 57 GB of it, on a
+    filesystem the harness otherwise guards with a disk preflight. The selection still happens in
+    one place - this only decides which files are worth writing.
 
     Splitting is cached: the second variant of a comparison finds the pairs already there. That is
     not just a speed-up - deinterleaving twice would put the second variant's reads on a colder
@@ -180,6 +251,9 @@ def prepare_reads(
     candidates = read_candidates(dataset, source)
     if not candidates:
         raise RunnerError("Found no FASTQ under %s for %s." % (source, dataset.name))
+    candidates = _narrow_candidates(
+        candidates, wanted, max_samples, say, layout=dataset.reads_layout
+    )
 
     if dataset.reads_layout == "interleaved":
         split_dir = os.path.join(work_dir, "reads")
@@ -247,8 +321,14 @@ def gather_inputs(
     bins_from: Optional[str] = None,
     dry_run: bool = False,
     say: Callable[[str], None] = print,
+    wanted: Sequence[str] = (),
+    max_samples: int = 0,
 ) -> Inputs:
-    """Everything *comparison* needs to run over *dataset*, or a clear error saying what is absent."""
+    """Everything *comparison* needs to run over *dataset*, or a clear error saying what is absent.
+
+    *wanted* and *max_samples* are passed through to :func:`prepare_reads` so that preparing the
+    reads costs what the run costs rather than what the dataset holds.
+    """
     if comparison.module not in SUPPORTED_MODULES:
         raise RunnerError(
             "The benchmark runner cannot feed the %r module yet. It knows how to run:\n%s"
@@ -257,7 +337,15 @@ def gather_inputs(
                 "\n".join("  %-16s %s" % (k, v) for k, v in sorted(SUPPORTED_MODULES.items())),
             )
         )
-    pairs = prepare_reads(dataset, data_dir, work_dir, dry_run=dry_run, say=say)
+    pairs = prepare_reads(
+        dataset,
+        data_dir,
+        work_dir,
+        dry_run=dry_run,
+        say=say,
+        wanted=wanted,
+        max_samples=max_samples,
+    )
 
     resolved_assembly = assembly
     # bin_refinement needs it too, for the same reason the command builder passes it: DAS Tool reads
@@ -713,7 +801,12 @@ def run_comparison(
         bins_from=bins_from,
         dry_run=dry_run,
         say=say,
+        wanted=samples,
+        max_samples=max_samples,
     )
+    # Still narrowed here, not only in gather_inputs: that one decides which files to write, this
+    # one is the single place that decides which samples the comparison measured, and it is what
+    # errors on a sample name the dataset does not have.
     inputs = select_samples(inputs, samples=samples, max_samples=max_samples)
     measured_samples = [str(pair[0]) for pair in inputs.pairs]
     if comparison.module == "assembly":

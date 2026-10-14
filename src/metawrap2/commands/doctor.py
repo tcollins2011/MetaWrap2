@@ -22,9 +22,11 @@ from ..command import _run_flags
 from ..config import (
     MODULE_ENVS,
     MODULE_TOOLS,
-    OPTIONAL_ENVS_BY_MODULE,
     OPTIONAL_TOOLS_BY_MODULE,
     conda_env_exists,
+    explain_unknown_name,
+    legacy_module_for,
+    resolve_env_name,
 )
 
 # Signatures in a tool's output that mean it's installed but broken (not just "exits nonzero
@@ -145,7 +147,14 @@ def _tools_for(module: str, env: str) -> List[str]:
 def _check_module(module: str) -> dict:
     # An opt-in env is named after its yaml, so `doctor bin_refinement-gunc` (and the verification
     # install-env runs after building one) lands here with a name MODULE_ENVS does not hold.
-    env = MODULE_ENVS.get(module) or OPTIONAL_ENVS_BY_MODULE.get(module, "metawrap2-%s" % module)
+    # config.resolve_env_name, not a fallback to "metawrap2-<whatever was typed>". That fallback is
+    # why `doctor bin_refinement-checkm2` used to invent metawrap2-bin_refinement-checkm2 and report
+    # it MISSING - an environment that never existed, presented as one that failed to install.
+    # No "metawrap2-<whatever was typed>" fallback. That fallback is why this command used to
+    # invent an environment for an unknown name and report it MISSING; main() refuses such names
+    # before reaching here, and anything that still gets through should be visibly wrong rather
+    # than plausibly wrong.
+    env = resolve_env_name(module) or "<unknown: %s>" % module
     if not conda_env_exists(env):
         return {
             "module": module,
@@ -389,6 +398,22 @@ def main(argv: List[str]) -> int:
     args = ap.parse_args(argv)
 
     modules = args.modules or sorted(MODULE_ENVS)
+    unknown = [name for name in modules if resolve_env_name(name) is None]
+    if unknown:
+        for name in unknown:
+            for line in explain_unknown_name(name):
+                print(line)
+        return 1
+    # A 2.0.x name is <module>-<tool>; report on the module it came from, which has a tool list, in
+    # place of the bare environment, which does not and therefore reports "0/0 tools OK".
+    for name in modules:
+        module = legacy_module_for(name)
+        if module:
+            print(
+                "'%s' was an environment name in MetaWrap2 2.0.x; reporting on the '%s' module, "
+                "which is where that tool lives now." % (name, module)
+            )
+    modules = [legacy_module_for(name) or name for name in modules]
     results = [_check_module(m) for m in modules]
 
     print("\nMetaWrap2 module status")

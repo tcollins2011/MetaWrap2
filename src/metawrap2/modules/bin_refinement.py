@@ -20,6 +20,7 @@ COMMANDS block below and the tunable numbers in the CONSTANTS block.
 from __future__ import annotations
 
 import argparse
+import csv
 import itertools
 import os
 import shlex
@@ -28,6 +29,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .. import checkm as _checkm
 from .. import gunc as _gunc
+from .. import recovery as _recovery
 from .. import refinement as _refinement
 from ..cliformat import bounded_float, make_parser, percent
 from ..config import MODULE_ENVS, load_settings
@@ -38,6 +40,7 @@ from ..constants import (
     MAX_BIN_SIZE,
     MIN_BIN_SIZE,
     STATS_SUFFIX,
+    TSV_SUFFIX,
     bin_filename,
     is_refined_bins_dirname,
     is_unbinned_name,
@@ -232,7 +235,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="how to turn the bin sets into one set: 'metawrap' (default) hybridises every "
         "combination and scores each with CheckM; 'dastool' scores the input bins on "
         "single-copy genes and aggregates in one pass, which needs -a and the "
-        "metawrap2-bin_refinement-dastool env",
+        "metawrap2-binqc env, which `metawrap2 install-env bin_refinement` creates",
     )
     p.add_argument(
         "-a",
@@ -1226,6 +1229,25 @@ def main(argv: List[str]) -> int:
                 ckpt.done("gunc")
         elif args.run_gunc:
             comm("skipping GUNC (already done; --resume)")
+
+        # What the bin set does not say about itself. Both cheap, and both change what a reader
+        # concludes rather than changing a bin - see metawrap2.recovery.
+        if not dry_run() and args.assembly and os.path.isdir(final_bins):
+            recovery = _recovery.measure(args.assembly, final_bins)
+            table = os.path.join(args.output, "recovery" + TSV_SUFFIX)
+            with open(table, "w", newline="") as fh:
+                writer = csv.DictWriter(
+                    fh,
+                    fieldnames=_recovery.RECOVERY_COLUMNS,
+                    delimiter="\t",
+                    lineterminator="\n",
+                )
+                writer.writeheader()
+                writer.writerow(_recovery.recovery_row(recovery))
+            comm(recovery.describe())
+            comm(_recovery.UNBINNED_CAVEAT)
+            comm("-> %s" % table)
+        comm(_recovery.CHIMERISM_CAVEAT)
 
         announcement("BIN_REFINEMENT PIPELINE FINISHED SUCCESSFULLY!")
     finally:

@@ -9,3 +9,14 @@ channels:
 dependencies:
   - prokka >=1.14
   - bakta >=1.9
+  # CAZyme families (`annotate --cazy`). It lives here rather than in its own env because it reads
+  # the proteins this module has already called - the alternative is dbCAN calling its own genes,
+  # and two gene sets over one genome cannot be joined. It solves with prokka and bakta unchanged;
+  # its 7.4 GB database is a separate, explicit download (`metawrap2 install-db dbcan`).
+  - dbcan >=5.2
+  # Biosynthetic gene clusters (`annotate --bgc`). GECCO rather than antiSMASH: it is a CRF over
+  # Pyrodigal genes and PyHMMER domains - the two libraries this package already uses in-process -
+  # needs no database at all, and runs in minutes per genome against antiSMASH's tens of minutes
+  # and ~10 GB install. antiSMASH is still the tool to reach for when a cluster is the result
+  # rather than a count; this is what makes counting clusters across 200 MAGs affordable.
+  - gecco >=0.10

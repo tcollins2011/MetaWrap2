@@ -4,15 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metawrap2"
-version = "2.1.0"
-description = "MetaWrap2 - a flexible, Python-native pipeline for genome-resolved metagenomic data analysis"
+version = "2.1.2"
+description = "MetaWrap2: a benchmarked pipeline for genome-resolved metagenomics, from reads to MAGs and their functions"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
     { name = "Gherman Uritskiy" },
 ]
-keywords = ["metagenomics", "bioinformatics", "binning", "MAG", "assembly", "pipeline"]
+keywords = [
+    "metagenomics", "bioinformatics", "pipeline", "metagenome-assembled genomes", "MAG", "binning",
+    "bin refinement", "metagenomic assembly", "functional annotation", "KEGG", "antimicrobial resistance",
+    "viral metagenomics", "strain", "pangenome", "long reads",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -23,6 +27,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
@@ -40,9 +45,22 @@ dependencies = [
     # progress bars for MetaWrap2's own long loops (metawrap2.progress degrades
     # gracefully if it is absent, but it is small and always wanted)
     "tqdm>=4.60",
+    # Gene calling and HMM search run in the host interpreter, not a conda env: `annotate` calls
+    # genes with pyrodigal and scores KOfam/Pfam profiles with pyhmmer. Both were imported and
+    # never declared, so a plain `pip install` gave an `annotate` that could not start - it only
+    # worked where someone had installed them by hand.
+    "pyrodigal>=3.0",
+    "pyhmmer>=0.10",
 ]
 
 [project.optional-dependencies]
+# Writing feature tables as BIOM 2.1, so they can be read by QIIME 2, phyloseq, scikit-bio and
+# MicrobiomeAnalyst without a user writing a converter first. Optional because it pulls h5py, and
+# every table is also written as a TSV.
+biom = ["biom-format>=2.1.16", "h5py>=3.0"]
+# ANCOM-BC for differential abundance. scikit-bio ships it natively as of 0.7.1, which is the only
+# reason this pipeline has a statistics step at all - every other implementation is an R package.
+stats = ["scikit-bio>=0.7.1"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

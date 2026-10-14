@@ -22,7 +22,14 @@ from typing import List, Optional, Tuple
 
 from ..cliformat import make_parser
 from ..command import run, runner
-from ..config import ALL_MODULE_ENVS, MODULE_ENVS, OPTIONAL_ENVS_BY_MODULE, conda_env_exists
+from ..config import (
+    LEGACY_ENV_ALIASES,
+    MODULE_ENVS,
+    conda_env_exists,
+    explain_unknown_name,
+    known_envs,
+    resolve_env_name,
+)
 
 # Env creation is dominated by solving and downloading, both of which are per-env
 # independent, so building several at once is close to a linear speedup. Default is modest
@@ -65,25 +72,28 @@ def _env_yaml(env: str) -> str:
     return os.path.join(envs_dir(), "%s.yaml" % base)
 
 
-def _env_for(name: str) -> str:
-    """Name the conda env *name* installs into, whether *name* is a module or an environment.
+def _env_for(name: str) -> Optional[str]:
+    """config.resolve_env_name, kept as a name because tests and callers here use it.
 
-    Three things a user can reasonably type, all of which have to work because all three appear in
-    the docs:
-
-    * a module - ``binning`` -> ``metawrap2-bins``.
-    * an opt-in env's own name - ``learned`` -> ``metawrap2-learned``.
-    * a shared env's own name - ``bins`` -> ``metawrap2-bins``. This is the one that is neither a
-      module nor an opt-in env, and without the last line it resolved to the bare word ``bins``, so
-      `install-env bins --lock` reported "bins does not exist yet" about an env that did.
+    Deliberately a one-line delegation rather than its own logic. This file had its own copy, and
+    `check` and `doctor` each had another; all three disagreed, in three different ways.
     """
-    direct = MODULE_ENVS.get(name) or OPTIONAL_ENVS_BY_MODULE.get(name)
-    if direct:
-        return direct
-    prefixed = "metawrap2-%s" % name
-    if prefixed in ALL_MODULE_ENVS:
-        return prefixed
-    return name
+    return resolve_env_name(name)
+
+
+def _resolve_or_explain(name: str) -> Optional[str]:
+    """_env_for, but printing what to type instead when the name is not one."""
+    env = _env_for(name)
+    if env:
+        if name in LEGACY_ENV_ALIASES:
+            print(
+                "'%s' was an environment name in MetaWrap2 2.0.x. Environments are now grouped by "
+                "workflow, so it is part of '%s' - installing that." % (name, env)
+            )
+        return env
+    for line in explain_unknown_name(name):
+        print(line)
+    return None
 
 
 def ensure_mamba() -> bool:
@@ -165,19 +175,8 @@ def write_lockfile(module: str, env: str, plat: Optional[str] = None) -> Optiona
     return path
 
 
-def create_from_lock(module: str, env: str, plat: Optional[str] = None) -> bool:
-    """Create an env from its committed lockfile instead of solving the yaml."""
-    path = lock_path(module, plat)
-    if not os.path.isfile(path):
-        return False
-    manager = shutil.which("conda") or shutil.which("mamba") or shutil.which("micromamba")
-    if not manager:
-        return False
-    return run([manager, "create", "-y", "-n", env, "--file", path], tool="conda", check=False) == 0
-
-
 def _create_one(
-    module: str, env: str, yaml: str, force: bool, log_dir: str
+    module: str, env: str, yaml: str, force: bool, log_dir: str, lock: Optional[str] = None
 ) -> Tuple[str, bool, str]:
     """Create one env, capturing its output to a log file. Returns (module, ok, log path).
 
@@ -189,7 +188,11 @@ def _create_one(
     # is micromamba's `create`, which rejects the flag outright ("The following argument was not
     # expected: --force"), so --force failed every rebuild instead of doing one. Only reached when
     # the user asked for a rebuild of an env MetaWrap2 itself built.
-    steps = [["mamba", "env", "create", "-y", "-f", yaml]]
+    if lock:
+        # An explicit lockfile names every package build, so this is an install, not a solve.
+        steps = [["mamba", "create", "-y", "-n", env, "--file", lock]]
+    else:
+        steps = [["mamba", "env", "create", "-y", "-f", yaml]]
     if force:
         steps.insert(0, ["mamba", "env", "remove", "-y", "-n", env])
     rc = 0
@@ -209,7 +212,12 @@ def main(argv: List[str]) -> int:
         description="Create the per-module conda environments, several at a time.",
     )
     ap.add_argument("modules", nargs="*", help="modules whose envs to create")
-    ap.add_argument("--all", action="store_true", help="create envs for every module")
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="create every environment, including the opt-in ones (checkm2, gtdbtk, the learned "
+        "binners). Several are large",
+    )
     ap.add_argument("--no-test", action="store_true", help="don't verify envs after creating")
     ap.add_argument(
         "--force",
@@ -251,7 +259,15 @@ def main(argv: List[str]) -> int:
     # By env name, not by module name: several modules share an env now, so iterating MODULE_ENVS
     # would ask mamba to build metawrap2-reads four times. The names are interchangeable here -
     # _module_env falls through to the name itself for anything that is not a module.
-    modules = [e[len("metawrap2-") :] for e in ALL_MODULE_ENVS] if args.all else args.modules
+    # --all means every environment, including the opt-in ones. It used to mean every *module* env,
+    # so `install-env --all` left checkm2, gtdbtk and the learned binners uninstalled - and the
+    # learned env holds SemiBin2, which the shipped default binning tier needs. A flag called --all
+    # that silently skips four environments is the kind of thing a user only discovers when a run
+    # fails halfway.
+    if args.all:
+        modules = [env.removeprefix("metawrap2-") for env in sorted(known_envs())]
+    else:
+        modules = args.modules
     if not modules:
         ap.error("specify one or more modules, or --all")
 
@@ -259,12 +275,17 @@ def main(argv: List[str]) -> int:
         # Locking reads existing environments; it does not need mamba bootstrapped.
         rc = 0
         for module in modules:
-            env = _env_for(module)
+            env = _resolve_or_explain(module)
+            if env is None:
+                rc = 1
+                continue
             if not conda_env_exists(env):
                 print("%s does not exist yet; create it before locking it." % env)
                 rc = 1
                 continue
-            path = write_lockfile(module, env)
+            # Named after the environment, not the name typed: `--lock binning` and `--lock bins`
+            # describe one environment and must write one file, the one --from-lock reads.
+            path = write_lockfile(env.removeprefix("metawrap2-"), env)
             if path:
                 print("wrote %s" % path)
             else:
@@ -279,7 +300,10 @@ def main(argv: List[str]) -> int:
     todo = []
     queued_envs = set()
     for module in modules:
-        env = _env_for(module)
+        env = _resolve_or_explain(module)
+        if env is None:
+            rc = 1
+            continue
         yaml = _env_yaml(env)
         if not os.path.isfile(yaml):
             print("No env file for module '%s' (%s); skipping." % (module, yaml))
@@ -293,8 +317,30 @@ def main(argv: List[str]) -> int:
         if conda_env_exists(env) and not force:
             print("%s already exists; skipping (use --force to recreate)." % env)
             continue
-        todo.append((module, env, yaml))
+        lock = None
+        if args.from_lock:
+            candidate = lock_path(env.removeprefix("metawrap2-"))
+            if os.path.isfile(candidate):
+                lock = candidate
+            else:
+                print(
+                    "No %s lockfile for %s; solving %s instead, so this one is not an exact rebuild."
+                    % (lock_platform(), env, os.path.basename(yaml))
+                )
+        todo.append((module, env, yaml, lock))
         queued_envs.add(env)
+
+    if todo and runner.dry_run:
+        # The global --dry-run promises "print the commands without running them", and this command
+        # used to ignore it: a dry run solved and built every environment it named.
+        for _module, env, yaml, lock in todo:
+            if force:
+                print("[dry-run] mamba env remove -y -n %s" % env)
+            if lock:
+                print("[dry-run] mamba create -y -n %s --file %s" % (env, lock))
+            else:
+                print("[dry-run] mamba env create -y -f %s" % yaml)
+        return rc
 
     if not todo:
         print("Nothing to create.")
@@ -306,14 +352,15 @@ def main(argv: List[str]) -> int:
             "Creating %d environment(s) with %d worker(s). Logs: %s\n"
             % (len(todo), workers, log_dir)
         )
-        for module, env, _yaml in todo:
+        for module, env, _yaml, _lock in todo:
             print("  queued  %s  (%s)" % (env, module))
         print()
 
         done = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_create_one, m, e, y, force, log_dir): (m, e) for m, e, y in todo
+                pool.submit(_create_one, m, e, y, force, log_dir, lk): (m, e)
+                for m, e, y, lk in todo
             }
             for future in concurrent.futures.as_completed(futures):
                 module, env = futures[future]
@@ -329,9 +376,24 @@ def main(argv: List[str]) -> int:
                     rc = 1
 
     if not args.no_test:
-        from .doctor import main as test_main
+        # Only the names that resolved. Passing an unresolved one through made `doctor` invent a
+        # module row for it - "nonsense  metawrap2-nonsense  MISSING  conda env not created" -
+        # which reads as an environment that failed to install rather than a name that does not
+        # exist, and was the confusing half of a user's bug report.
+        # The *resolved* env's own base name, not what the user typed. doctor resolves a module or
+        # an env name, and a 2.0.x alias is neither - passing "bin_refinement-checkm2" through made
+        # it report MISSING for an environment that had just been confirmed present, and the
+        # command exited 1 on a successful install.
+        verifiable = []
+        for name in modules:
+            env = _env_for(name)
+            if not env:
+                continue
+            verifiable.append(name if name in MODULE_ENVS else env.removeprefix("metawrap2-"))
+        if verifiable:
+            from .doctor import main as test_main
 
-        print("\nVerifying the environment(s)...")
-        if test_main(list(modules) + ["--tools-only"]) != 0:
-            rc = 1
+            print("\nVerifying the environment(s)...")
+            if test_main(verifiable + ["--tools-only"]) != 0:
+                rc = 1
     return rc

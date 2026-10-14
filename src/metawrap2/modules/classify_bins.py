@@ -42,6 +42,7 @@ from ._common import (
     start_run,
     threads_arg,
     validate_inputs,
+    warning,
 )
 
 CONDA_ENV = MODULE_ENVS["classify_bins"]
@@ -97,8 +98,9 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--gtdbtk",
         action="store_true",
-        help="classify with GTDB-Tk against GTDB instead of MEGABLAST+taxator-tk "
-        "(needs the metawrap2-classify_bins-gtdbtk env and GTDBTK_DATA_PATH)",
+        help="classify with GTDB-Tk against GTDB instead of MEGABLAST+taxator-tk. Preferred: "
+        "taxator-tk has had no upstream release since 2015, and GTDB taxonomy is what the MAG "
+        "literature uses. Needs `metawrap2 install-env gtdbtk` and GTDBTK_DATA_PATH (~110 GB)",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -157,7 +159,7 @@ def _classify_with_gtdbtk(args, settings, ckpt) -> None:
             env=env,
             tool="gtdbtk",
             hint="GTDB-Tk needs its reference data; set GTDBTK_DATA_PATH in the "
-            "metawrap2-classify_bins-gtdbtk env (gtdbtk download-db.sh).",
+            "metawrap2-gtdbtk env (gtdbtk download-db.sh).",
         )
         ckpt.done("gtdbtk")
     else:
@@ -224,6 +226,24 @@ def main(argv: List[str]) -> int:
             _classify_with_gtdbtk(args, settings, ckpt)
             announcement("BIN CLASSIFICATION PIPELINE FINISHED SUCCESSFULLY!!!")
             return 0
+
+        # The default path, and it is the deprecated one. Said once per run rather than left in the
+        # help, because a user who never reads --help still needs to know that the taxonomy they are
+        # about to get comes from a tool with no upstream maintainer.
+        #
+        # The default has not been flipped to --gtdbtk, which would be the obvious fix, for two
+        # reasons. Flipping it turns a working install into a failing one for everyone without
+        # GTDB's reference data, and this project only moves a default on a measurement committed to
+        # benchmarks/results/ - which would need both NCBI nt and GTDB R2xx present at once to
+        # produce. Neither is a reason the default is right; both are reasons it has not moved yet.
+        warning(
+            "the MEGABLAST + taxator-tk path is deprecated: taxator-tk has had no upstream release "
+            "since 2015. It still runs and its output is unchanged, but --gtdbtk is the maintained "
+            "route and gives GTDB taxonomy, which is what the MAG literature uses.\n"
+            "Database cost either way: this path needs NCBI nt (BLASTDB, hundreds of GB) and a "
+            "taxdump; --gtdbtk needs GTDB reference data (~110 GB) and classify_wf wants a lot of "
+            "RAM. Neither is the cheap option."
+        )
 
         blastdb = settings.db("BLASTDB")
         taxdump = settings.db("TAXDUMP")

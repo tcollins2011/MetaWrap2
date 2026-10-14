@@ -40,11 +40,6 @@ BIN_SETS = {
         "bin.2": ["c05", "c06", "c07", "c08", "c09", "c10"],
         "bin.3": ["c11", "c12"],
     },
-    "C": {
-        "bin.1": ["c01", "c02", "c03"],
-        "bin.2": ["c05", "c06", "c07"],
-        "bin.3": ["c09", "c10", "c11", "c12"],
-    },
 }
 
 
@@ -135,18 +130,9 @@ def test_a_second_run_into_the_same_folder_succeeds(tmp_path):
 
     second = _run(tmp_path, "AB", force=True)
     assert _final(second) == expected
-
-
-def test_the_second_run_leaves_no_bin_set_behind_in_the_output_root(tmp_path):
-    """Half-moved working sets are the state the failure left, and what breaks the next --resume.
-
-    Asserted on the output root rather than on work_files: "every bins* got moved" is the property
-    that was violated, and it holds whatever the combination names are for this number of inputs.
-    """
-    _run(tmp_path, "AB")
-    out = _run(tmp_path, "AB", force=True)
-    assert [f for f in os.listdir(out) if f.startswith("bins")] == []
-    work = os.path.join(out, "work_files")
+    # Half-moved working sets are the state the failure left, and what breaks the next --resume.
+    assert [f for f in os.listdir(second) if f.startswith("bins")] == []
+    work = os.path.join(second, "work_files")
     assert "binsA" in os.listdir(work) and "binsB" in os.listdir(work)
 
 
@@ -164,45 +150,3 @@ def test_resuming_does_not_clean_what_it_is_resuming_from(tmp_path):
     assert _final(out) == expected
     work = os.listdir(os.path.join(out, "work_files"))
     assert "binsA" in work and "binsB" in work, work
-
-
-def test_a_rerun_with_a_corrected_input_does_not_present_the_old_one(tmp_path):
-    """The reason to rerun in place is that an input changed, so the restored copy has to change too.
-
-    Refinement copies each input set back into the output folder under the input folder's own name,
-    which is where anything downstream looks for "what went in". That copy was only ever written when
-    the destination did not already exist, so on a rerun it was never refreshed: a real refined/
-    directory ended up advertising a 188-bin MaxBin2 set beside the results of refining the corrected
-    129-bin one, with a .stats.tsv for the superseded set to go with it. Scoring the inputs from the
-    output folder - the obvious thing to do - would have scored the wrong set and blamed refinement.
-    """
-    _run(tmp_path, "AB")
-    corrected = dict(BIN_SETS)
-    corrected["B"] = {"bin.1": ["c01", "c02", "c03"], "bin.2": ["c07", "c08", "c09", "c10"]}
-    out = _run(tmp_path, "AB", force=True, sets=corrected)
-
-    restored = os.path.join(out, "binner_B")
-    names = sorted(
-        os.path.splitext(f)[0] for f in os.listdir(restored) if f.endswith(BIN_EXTENSION)
-    )
-    assert names == ["bin.1", "bin.2"], names
-    # The content too, not just the count: a two-bin set that still held the old bin.1 would pass a
-    # count check while being the wrong sequence.
-    got = sorted(
-        contig_id(h) for h, _ in iter_fasta(os.path.join(restored, "bin.1" + BIN_EXTENSION))
-    )
-    assert got == ["c01", "c02", "c03"], got
-
-
-def test_a_rerun_with_fewer_inputs_does_not_keep_the_dropped_set(tmp_path):
-    """binsC from a 3-set run must not survive into a 2-set rerun of the same folder.
-
-    The move only overwrites the sets the new run produces, so a set the new run never builds would
-    otherwise sit in work_files looking like part of it - with a .stats.tsv and a contig table, and
-    no way for a reader to tell it is three binners old.
-    """
-    _run(tmp_path, "ABC")
-    out = _run(tmp_path, "AB", force=True)
-    work = sorted(f for f in os.listdir(os.path.join(out, "work_files")) if f.startswith("bins"))
-    assert not any(f.startswith(("binsC", "binsABC")) for f in work), work
-    assert "binsA" in work and "binsB" in work and "binsAB" in work

@@ -28,8 +28,3 @@ def test_command_templates_format_cleanly():
     tk = classify_bins.TAXKNIFE.format(taxdump="/tax", binned="b.txt", output="c.tab")
     assert "{" not in tk and "grep -v 'Could not'" in tk
     assert "TAXATORTK_TAXONOMY_NCBI=/tax" in tk
-
-
-def _raw_line(qseqid, staxids):
-    cols = [qseqid, "1", "100", "500", "s1", staxids, "10", "110", "200", "0.001", "95", "100"]
-    return "\t".join(cols)

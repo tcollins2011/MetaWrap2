@@ -1,0 +1,6 @@
+#soft_core=0.95
+#duplication_margin=0.05
+Genome_name	Contigs	Genes	Fragmented_genes	Families	Families_with_fragments	Families_in_multicopy	Soft_core_families	Soft_core_genes	Exact_core_families	Exact_core_genes	Persistent_genes	Persistent_fragmented_genes	Persistent_families	Persistent_families_with_fragments	Persistent_families_in_multicopy	Shell_genes	Shell_fragmented_genes	Shell_families	Shell_families_with_fragments	Shell_families_in_multicopy	Cloud_genes	Cloud_fragmented_genes	Cloud_families	Cloud_families_with_fragments	Cloud_families_in_multicopy	Completeness	Contamination	Fragmentation	RGPs	Spots	Modules
+metawrap_50_10_bins__bin_012_3	77	4347	41	4297	32	47	24	25	24	25	1036	4	1031	3	3	3311	37	3266	29	44	0	0	0	0	0	68.32	0.07	0.74	Not computed	Not computed	Not computed
+metawrap_50_10_bins__bin_017	688	2394	485	2274	386	112	24	27	24	27	1558	306	1465	233	87	836	179	809	153	25	0	0	0	0	0	97.08	5.14	16.97	Not computed	Not computed	Not computed
+metawrap_50_10_bins__bin_020	1324	2901	161	2857	136	41	24	24	24	24	43	18	43	18	0	399	134	368	109	28	2459	9	2446	9	13	2.85	0.0	4.76	Not computed	Not computed	Not computed

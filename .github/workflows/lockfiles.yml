@@ -2,24 +2,30 @@ name: Lockfiles
 
 # A committed lockfile that no longer resolves is worse than no lockfile: it promises
 # reproducibility and delivers a failed solve, at the moment someone is trying to reproduce a
-# result. Nothing in the normal CI run catches that, because creating a conda environment is far
-# too slow to do on every push - so it is checked here, on a schedule, and on demand.
+# result. Creating a conda environment is far too slow for every push, so it is checked here,
+# monthly and on demand.
 #
-# Two jobs:
-#   verify   - actually create environments from the committed lockfiles. This is the one that
-#              matters: it is the only check that the files do what they claim.
-#   refresh  - re-solve the environment yamls and open a PR if the resulting lockfiles differ,
-#              so drift arrives as a reviewable diff rather than as a surprise months later.
+#   envs     - list every environment from src/metawrap2/envs/*.yaml, so a new env is covered the
+#              day its yaml lands.
+#   verify   - create each environment that has a lockfile, from that lockfile.
+#   refresh  - re-solve each yaml on its own runner and write its lockfile. One env per job keeps
+#              each runner's disk well clear of the limit; one runner building all of them would not.
+#   publish  - collect the new lockfiles and, if any changed, push them to chore/refresh-lockfiles.
+#
+# The run fails only when something is broken: a yaml that will not solve, or a lockfile that will
+# not install. Drift is not a failure. It goes to a branch and into the run summary, and a pull
+# request is opened too if the repository lets Actions open one (Settings > Actions > General >
+# "Allow GitHub Actions to create and approve pull requests"). Without that setting, the old PR
+# step failed the whole run every week after every solve had succeeded.
 
 on:
   schedule:
-    # Weekly, early Monday. Often enough that drift is a small diff; rarely enough that it is
-    # not noise, and that the conda channels are not hammered.
-    - cron: "17 4 * * 1"
+    # First Monday of the month, early. A month of drift is still a small diff.
+    - cron: "17 4 1-7 * 1"
   workflow_dispatch:
     inputs:
       envs:
-        description: "Environments to check (space-separated, or 'all')"
+        description: "Environments to refresh (space-separated), or 'all'"
         default: "all"
   pull_request:
     # A PR that edits a lockfile or an environment spec must prove the result still resolves.
@@ -27,108 +33,122 @@ on:
       - "src/metawrap2/envs/**"
 
 jobs:
+  envs:
+    name: List the environments
+    runs-on: ubuntu-latest
+    outputs:
+      all: ${{ steps.list.outputs.all }}
+      locked: ${{ steps.list.outputs.locked }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        shell: bash
+        run: |
+          wanted="${{ github.event.inputs.envs }}"
+          all=$(ls src/metawrap2/envs/*.yaml | xargs -n1 basename | sed 's/\.yaml$//')
+          if [ -n "$wanted" ] && [ "$wanted" != "all" ]; then all="$wanted"; fi
+          locked=$(for e in $all; do if [ -f "src/metawrap2/envs/locks/$e.linux-64.lock" ]; then echo "$e"; fi; done)
+          to_json() { printf '%s\n' "$@" | grep . | jq -R . | jq -cs .; }
+          echo "all=$(to_json $all)" >> "$GITHUB_OUTPUT"
+          echo "locked=$(to_json $locked)" >> "$GITHUB_OUTPUT"
+          echo "Environments: $(echo $all)"
+          echo "With a lockfile: $(echo $locked)"
+
   verify:
-    name: Create envs from the committed lockfiles
+    name: Install from lockfile (${{ matrix.conda_env }})
+    needs: envs
+    if: needs.envs.outputs.locked != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Named by environment, not by module - several modules share one env, and the lockfiles
-        # are per env. These cover the shapes that actually break: a large bioconda solve (bins),
-        # CheckM1's pinned Python tooling (binqc), a JVM dependency (reads), and the smallest env
-        # as a control (annotate). The full set would take hours.
-        conda_env: [bins, binqc, reads, annotate]
+        conda_env: ${{ fromJSON(needs.envs.outputs.locked) }}
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Install micromamba
-        uses: mamba-org/setup-micromamba@v2
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
         with:
           micromamba-version: latest
           init-shell: bash
-
       - name: Create the environment from its lockfile
         shell: bash -el {0}
         run: |
-          lock="src/metawrap2/envs/locks/${{ matrix.conda_env }}.linux-64.lock"
-          if [ ! -f "$lock" ]; then
-            echo "::error::$lock is missing. Generate it with: metawrap2 install-env ${{ matrix.conda_env }} --lock"
-            exit 1
-          fi
-          micromamba create -y -n "lockcheck" --file "$lock"
-
-      - name: Report what it produced
-        shell: bash -el {0}
-        run: |
+          micromamba create -y -n lockcheck --file "src/metawrap2/envs/locks/${{ matrix.conda_env }}.linux-64.lock"
           micromamba list -n lockcheck | tail -n +4 | wc -l | xargs echo "packages installed:"
 
   refresh:
-    name: Re-solve the yamls and open a PR if the locks drifted
-    # Only on the schedule or a manual run: on a PR the point is to verify, not to rewrite.
+    name: Re-solve (${{ matrix.conda_env }})
+    # On a PR the point is to verify, not to rewrite.
     if: github.event_name != 'pull_request'
+    needs: envs
     runs-on: ubuntu-latest
-    # bash -el so the conda base environment (with mamba) is active in every run step.
+    strategy:
+      fail-fast: false
+      matrix:
+        conda_env: ${{ fromJSON(needs.envs.outputs.all) }}
     defaults:
       run:
         shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      # Miniforge ships conda + mamba, which is what `metawrap2 install-env` drives.
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: "3.12"
+      - run: pip install -e .
+      # Two steps because --lock only writes a lockfile for an environment that already exists.
+      - name: Solve the yaml
+        run: metawrap2 install-env ${{ matrix.conda_env }} -t 1 --force --no-test
+      - name: Write its lockfile
+        run: metawrap2 install-env ${{ matrix.conda_env }} --lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lock-${{ matrix.conda_env }}
+          path: src/metawrap2/envs/locks/${{ matrix.conda_env }}.linux-64.lock
+          if-no-files-found: error
+
+  publish:
+    name: Publish the refreshed lockfiles
+    needs: refresh
+    # Publish whatever solved, even if one env failed: that failure is already reported by its own
+    # job, and holding back the rest would only make next month's diff bigger.
+    if: always() && github.event_name != 'pull_request' && needs.refresh.result != 'skipped'
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      # Miniforge ships conda + mamba, which is what `metawrap2 install-env` drives to solve the
-      # environments. (setup-micromamba only provides micromamba, so the solve step could not run.)
-      - name: Set up Miniforge (conda + mamba)
-        uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          miniforge-version: latest
-          python-version: "3.12"
-
-      - name: Install MetaWrap2
-        run: pip install -e .
-
-      # Two steps on purpose: `--lock` only writes lockfiles for environments that already
-      # exist, so the environments have to be solved first, then locked.
-      - name: Re-solve the environments from the yamls
+          pattern: lock-*
+          path: new-locks
+          merge-multiple: true
+      - name: Push to a branch if anything changed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          envs="${{ github.event.inputs.envs }}"
-          [ -z "$envs" ] && envs="all"
-          if [ "$envs" = "all" ]; then
-            metawrap2 install-env --all -t 4 --force --no-test
-          else
-            metawrap2 install-env $envs -t 4 --force --no-test
+          if ls new-locks/*.lock > /dev/null 2>&1; then cp new-locks/*.lock src/metawrap2/envs/locks/; fi
+          git add src/metawrap2/envs/locks/
+          if git diff --cached --quiet; then
+            echo "No lockfile changed." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-
-      - name: Re-lock from the solved environments
-        run: |
-          envs="${{ github.event.inputs.envs }}"
-          [ -z "$envs" ] && envs="all"
-          if [ "$envs" = "all" ]; then
-            metawrap2 install-env --all --lock
+          changed=$(git diff --cached --name-only | xargs -n1 basename | tr '\n' ' ')
+          branch=chore/refresh-lockfiles
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "chore: refresh conda lockfiles" -m "Changed: $changed"
+          git push -f origin "HEAD:$branch"
+          body="Monthly re-solve of the conda environments. Changed: $changed. Worth checking: a change in the Python version, and any major version bump in a wrapped tool, since that can change results and not only packaging. The verify job on this PR installs every new lockfile."
+          if gh pr view "$branch" > /dev/null 2>&1; then
+            echo "Updated the open lockfile PR." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif gh pr create --head "$branch" --title "chore: refresh conda lockfiles" --body "$body"; then
+            echo "Opened a lockfile PR." | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            metawrap2 install-env $envs --lock
+            # Not a failure: the lockfiles are on the branch, ready to review and merge.
+            msg="Lockfiles changed ($changed) and are on branch $branch. This repository does not let Actions open pull requests, so open one from that branch."
+            echo "::notice::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      - name: Open a PR if anything changed
-        uses: peter-evans/create-pull-request@v7
-        with:
-          branch: chore/refresh-lockfiles
-          title: "chore: refresh conda lockfiles"
-          commit-message: "chore: refresh conda lockfiles"
-          add-paths: src/metawrap2/envs/locks/*.lock
-          body: |
-            Automated weekly re-solve of the per-module conda environments.
-
-            Every changed line is a package build that moved. Worth a look at:
-
-            * anything where the **Python** version changed - that is the usual cause of a
-              module that suddenly cannot import something;
-            * a **major** version bump in one of the wrapped bioinformatics tools, since that
-              can change results, not just packaging.
-
-            The `verify` job on this PR creates environments from the new lockfiles, so a merge
-            means they resolve. It does not mean the tools still produce the same output - that
-            is what the golden tests and a real run are for.

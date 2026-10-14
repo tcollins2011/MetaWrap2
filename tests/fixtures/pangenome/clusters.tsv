@@ -1,0 +1,9 @@
+cluster	genome	source	representative	ani_to_representative	quality_score	size_bp
+cluster_0001	metawrap_50_10_bins__bin_001	metawrap_50_10_bins	no	99.95	86.87	1977051
+cluster_0001	metawrap_50_10_bins__bin_010_3	metawrap_50_10_bins	yes	100.00	96.13	1933911
+cluster_0003	metawrap_50_10_bins__bin_003	metawrap_50_10_bins	no	99.93	87.33	4216264
+cluster_0003	metawrap_50_10_bins__bin_010_2	metawrap_50_10_bins	no	99.95	86.80	4054855
+cluster_0003	metawrap_50_10_bins__bin_009_3	metawrap_50_10_bins	yes	100.00	89.56	4109202
+cluster_0027	metawrap_50_10_bins__bin_017	metawrap_50_10_bins	no	96.46	56.32	2872122
+cluster_0027	metawrap_50_10_bins__bin_020	metawrap_50_10_bins	no	97.74	15.61	2884942
+cluster_0027	metawrap_50_10_bins__bin_012_3	metawrap_50_10_bins	yes	100.00	96.89	5376286

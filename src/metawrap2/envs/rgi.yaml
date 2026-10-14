@@ -1,0 +1,23 @@
+# RGI, the second resistance backend, in its own environment.
+#
+# Separate from metawrap2-amr for the reason CheckM2 is separate from CheckM1: the solver forces it.
+# RGI pins an older dependency set than AMRFinderPlus and hAMRonization resolve to, and asking for
+# all three in one environment produces either a conflict or a downgrade of the default backend to
+# satisfy the opt-in one.
+#
+# Why have a second backend at all, given AMRFinderPlus is the default: the two disagree, and which
+# genes they disagree about is the useful part. RGI models resistance three ways - homolog, variant
+# (point mutations against a wild-type) and overexpression - and carries CARD's ontology, so its
+# calls come with an ARO term already. AMRFinderPlus curates a per-gene threshold and covers
+# virulence and stress in the same run. hAMRonization makes the two tables one schema and argNorm
+# makes the gene names comparable, which is what makes running both additive rather than confusing.
+#
+# CARD's data is a separate download and is never fetched implicitly: `metawrap2 install-db card`.
+# An ARG call is only as datable as its database, and CARD is versioned (4.0.2 at the time of
+# writing) with a new release every few months.
+name: metawrap2-rgi
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - rgi >=6.0

@@ -52,22 +52,14 @@ def study(tmp_path):
     return root
 
 
-# --- the table -----------------------------------------------------------------------------
-
-
-def test_the_table_lists_every_step_with_its_status(study, capsys):
-    assert status_cmd.main([str(study)]) == 0
-    out = capsys.readouterr().out
-    for name in ("assembly", "binning", "kraken2", "quant_bins"):
-        assert name in out
-    assert "FAILED" in out
-    assert "3 of 4 step(s) completed" in out
+# --- the table ----------------------------------------------------------------------------
 
 
 def test_intact_steps_would_be_skipped_and_broken_ones_redone(study, capsys):
     """The resume column must be the decision --resume makes, with the same reason attached."""
-    status_cmd.main([str(study)])
+    assert status_cmd.main([str(study)]) == 0
     out = capsys.readouterr().out
+    assert "3 of 4 step(s) completed" in out
     rows = {line.split()[0]: line for line in out.splitlines() if line.startswith("  ")}
     assert "would skip" in rows["assembly"]
     assert "would skip" in rows["binning"]
@@ -76,12 +68,7 @@ def test_intact_steps_would_be_skipped_and_broken_ones_redone(study, capsys):
     assert "would re-run" in rows["quant_bins"]
     assert "last attempt failed" in rows["quant_bins"]
 
-
-# --- the audit -----------------------------------------------------------------------------
-
-
-def test_audit_reports_a_missing_output_and_exits_nonzero(study, capsys):
-    """A step reported success and its output is gone: that is a real finding, so exit 1."""
+    # A step reported success and its output is gone: that is a real finding, so --audit exits 1.
     assert status_cmd.main([str(study), "--audit"]) == 1
     out = capsys.readouterr().out
     assert "MISSING" in out and "kraken.out" in out

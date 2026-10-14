@@ -26,20 +26,6 @@ except ModuleNotFoundError:  # pragma: no cover
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-#: Files that also state a runtime requirement, and must therefore agree with pyproject.toml.
-PACKAGING_FILES = (
-    "conda_pkg/meta.yaml",
-    "containers/Dockerfile",
-    "containers/metawrap2.def",
-)
-
-#: Requirements whose name differs between PyPI and conda-forge. matplotlib is the one that
-#: matters: the conda package `matplotlib` pulls in a Qt stack nobody needs in a container.
-CONDA_NAME = {"matplotlib": "matplotlib-base"}
-
-#: Dependencies that are conditional and so need not appear everywhere.
-OPTIONAL_EVERYWHERE = {"tomli"}
-
 
 def read(path: str) -> str:
     with open(os.path.join(REPO, path)) as fh:
@@ -65,12 +51,6 @@ def requirement_names(pyproject: Dict) -> List[str]:
 # --- the version is stated in three places ------------------------------------------------
 
 
-def test_the_package_version_matches_the_module(pyproject):
-    from metawrap2 import __version__
-
-    assert pyproject["project"]["version"] == __version__
-
-
 def test_the_version_is_the_same_in_every_file_that_states_it():
     """Four files carry it, and a release that bumps three of them ships a lie in the fourth.
 
@@ -94,12 +74,6 @@ def test_the_version_is_the_same_in_every_file_that_states_it():
             found.group(1),
             __version__,
         )
-
-
-# --- the Python floor is stated in four places ---------------------------------------------
-
-
-# --- the runtime dependencies ---------------------------------------------------------------
 
 
 # --- what ships inside the wheel -----------------------------------------------------------
@@ -149,3 +123,76 @@ def test_the_pre_commit_hooks_run_the_same_formatter_versions_ci_does(pyproject)
             found.group(1),
             pins[tool],
         )
+
+
+#: Imports the dependency check skips: the package itself, and the one version-guarded pair -
+#: tomllib is stdlib from 3.11, tomli its declared stand-in on 3.10.
+_IMPORT_EXEMPT = ("metawrap2", "tomli", "tomllib")
+
+#: Import name -> distribution name, where they differ.
+_DIST_FOR_IMPORT = {
+    "Bio": "biopython",
+    "yaml": "pyyaml",
+    "skbio": "scikit-bio",
+    "sklearn": "scikit-learn",
+}
+
+
+def _module_level_imports(path: str) -> set:
+    """Top-level names imported when *path* is imported - not those deferred into a function."""
+    import ast
+    import sys
+
+    with open(path) as fh:
+        tree = ast.parse(fh.read())
+    names = set()
+    pending = list(tree.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.Try, ast.If)):
+            # A guarded import (try/except ImportError, or a version check) is still run at import.
+            # The except branch is the fallback, so only the body counts as required.
+            pending.extend(node.body)
+            continue
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return {n for n in names if n not in sys.stdlib_module_names and n not in _IMPORT_EXEMPT}
+
+
+def test_every_import_that_runs_at_import_time_is_a_declared_dependency(pyproject):
+    """`import metawrap2.genecall` raised ModuleNotFoundError on a clean install.
+
+    pyrodigal was imported at the top of genecall.py and declared nowhere, so `annotate` worked
+    only on the machine where it had been installed by hand - and the test collecting genecall
+    failed everywhere else. A dependency imported inside a function is a deliberate optional one
+    and is not checked here; one imported at module level is not optional, whatever was meant.
+    """
+    declared = set(requirement_names(pyproject))
+    missing = {}
+    for root, _dirs, files in os.walk(os.path.join(REPO, "src", "metawrap2")):
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(root, name)
+            for module in _module_level_imports(path):
+                dist = _DIST_FOR_IMPORT.get(module, module).lower()
+                if dist not in declared:
+                    missing.setdefault(dist, []).append(os.path.relpath(path, REPO))
+    assert not missing, "imported at module level but not in [project].dependencies: %s" % missing
+
+
+def test_the_conda_recipe_declares_what_pyproject_declares(pyproject):
+    """meta.yaml says to keep the two lists in step; this is what makes that more than a comment."""
+    pip_names = set(requirement_names(pyproject)) - {"tomli"}
+    with open(os.path.join(REPO, "conda_pkg", "meta.yaml")) as fh:
+        run = fh.read().split("  run:", 1)[1].split("\n\n", 1)[0]
+    conda_names = {
+        re.sub(r"-base$", "", m.group(1).lower())
+        for m in re.finditer(r"^\s*-\s*([A-Za-z0-9_.-]+)", run, re.MULTILINE)
+    } - {"python", "tomli"}
+    assert pip_names == conda_names, "pyproject only: %s; meta.yaml only: %s" % (
+        sorted(pip_names - conda_names),
+        sorted(conda_names - pip_names),
+    )

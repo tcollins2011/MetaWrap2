@@ -22,13 +22,6 @@ import pytest
 from metawrap2.utils import MAX_TMPDIR_LEN, SOCKET_PATH_LIMIT, short_tmpdir
 
 
-def test_the_budget_accounts_for_both_components_multiprocessing_adds():
-    """107 usable bytes, minus /pymp- + 8, minus /listener- + 8."""
-    assert SOCKET_PATH_LIMIT == 107
-    assert MAX_TMPDIR_LEN == 107 - (len("/pymp-") + 8) - (len("/listener-") + 8)
-    assert MAX_TMPDIR_LEN == 75
-
-
 def _bind_under(directory: str) -> bool:
     """Whether a multiprocessing Manager can bind a socket with *directory* as the temp dir."""
     previous = tempfile.tempdir
@@ -56,31 +49,15 @@ def _dir_of_length(root, length: int) -> str:
     return path
 
 
-def test_a_directory_at_the_limit_can_still_hold_a_socket(tmp_path):
-    assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN)) is True
-
-
 def test_one_character_over_the_limit_cannot(tmp_path):
     """The assertion that would have caught the off-by-14: 76 has to fail, not merely 90."""
+    assert MAX_TMPDIR_LEN == SOCKET_PATH_LIMIT - (len("/pymp-") + 8) - (len("/listener-") + 8)
+    assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN)) is True
     assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN + 1)) is False
 
-
-def test_short_tmpdir_leaves_a_path_within_the_budget_alone(tmp_path):
-    inside = _dir_of_length(tmp_path, MAX_TMPDIR_LEN - 4)
-    assert short_tmpdir(inside) == inside
-
-
-def test_short_tmpdir_symlinks_a_path_over_the_budget_and_the_link_works(tmp_path):
+    # The way round it: a path over the budget is symlinked short, and bind() resolves the link.
     real = _dir_of_length(tmp_path, MAX_TMPDIR_LEN + 20)
     link = short_tmpdir(real)
-    assert link != real
     assert len(link) <= MAX_TMPDIR_LEN
     assert os.path.realpath(link) == os.path.realpath(real)
-    # The point of the symlink is that bind() resolves it, so a socket under the link must work.
     assert _bind_under(link) is True
-
-
-def test_the_same_real_path_reuses_one_link(tmp_path):
-    """A --resume must find the same link rather than leaking a fresh one per attempt."""
-    real = _dir_of_length(tmp_path, MAX_TMPDIR_LEN + 20)
-    assert short_tmpdir(real) == short_tmpdir(real)

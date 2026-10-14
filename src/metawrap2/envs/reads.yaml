@@ -30,3 +30,15 @@ dependencies:
   - bwa-mem2 >=2.2
   - minimap2 >=2.24
   - samtools >=1.15
+  # Diversity coverage (`metawrap2 nonpareil`). It is here rather than in its own env because it
+  # reads a read file and nothing else, like the rest of this env, and because one more install
+  # command is a worse trade than the ~300 MB of r-base that bioconda's build pulls in: the
+  # package is built against R, which ships its model-fitting code. MetaWrap2 does not use that
+  # R code - metawrap2.nonpareil fits the model in Python - but the R package is a useful
+  # cross-check and the test suite's expected values came from it.
+  - nonpareil >=3.5.4
+  # metaFlye, for `assembly --long-reads`. Here rather than in its own environment because this is
+  # where `assembly` runs: a long-read assembly should not need a second install command, and Flye
+  # solves into this set without moving anything (it takes the py311 build the quast pin already
+  # forces). Racon is not here - see the note on polishing in metawrap2.longreads.
+  - flye >=2.9

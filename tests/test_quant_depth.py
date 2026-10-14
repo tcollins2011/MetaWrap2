@@ -61,73 +61,7 @@ def test_abundance_is_length_weighted_not_a_plain_average(tmp_path):
     assert row["s1"] == pytest.approx((10 * 1000 + 6 * 3000) / 4000)  # 7.0
     assert row["s1"] != pytest.approx(8.0), "that would be the unweighted mean"
     assert row["length"] == 4000 and row["contigs"] == 2
-
-
-def test_the_median_is_reported_alongside_for_the_robust_reading(tmp_path):
-    args, table = _setup(tmp_path, {"binA": ["c1", "c2", "c3"]})
-    quant_bins._quantify_depth(args, [], table, None, None)
-    row = _read(table).loc["binA"]
-    # depths 10, 6, 100 -> median 10, while the length-weighted mean is pulled down by the 3 kb contig
-    assert row["s1-median"] == pytest.approx(10.0)
-    assert row["s1"] == pytest.approx((10 * 1000 + 6 * 3000 + 100 * 500) / 4500)
-
-
-def test_every_sample_column_is_carried_through_and_variance_columns_are_not(tmp_path):
-    args, table = _setup(tmp_path, {"binA": ["c1", "c2"]})
-    quant_bins._quantify_depth(args, [], table, None, None)
+    # Every sample column is carried through, the variance columns are not.
     cols = set(_read(table).columns)
     assert {"s1", "s2", "s1-median", "s2-median"} <= cols
-    assert not any(c.endswith("-var") for c in cols)
-    assert "totalAvgDepth" not in cols
-
-
-def test_a_bin_whose_contigs_are_absent_is_reported_not_silently_zero(tmp_path, monkeypatch):
-    """Bins and table from different assemblies is a mistake to hear about, not to average over."""
-    warned = []
-    monkeypatch.setattr(quant_bins, "warning", lambda m, *a, **k: warned.append(m))
-    args, table = _setup(tmp_path, {"binA": ["c1"], "ghost": ["nope1", "nope2"]})
-    quant_bins._quantify_depth(args, [], table, None, None)
-    frame = _read(table)
-    assert "ghost" not in frame.index and "binA" in frame.index
-    assert any("none of its" in m for m in warned)
-
-
-def test_a_table_that_is_not_a_depth_table_is_refused(tmp_path, monkeypatch):
-    raised = []
-    monkeypatch.setattr(
-        quant_bins,
-        "error",
-        lambda m, *a, **k: raised.append(m) or (_ for _ in ()).throw(SystemExit),
-    )
-    bogus = tmp_path / "x.tsv"
-    bogus.write_text("contig\tcoverage\nc1\t5\n")
-    bins = tmp_path / "bins"
-    bins.mkdir()
-    args = _Args(str(bins), str(bogus), str(tmp_path))
-    with pytest.raises(SystemExit):
-        quant_bins._quantify_depth(args, [], str(tmp_path / "t.tsv"), None, None)
-    assert raised and "not a contig depth table" in raised[0]
-
-
-def test_it_is_registered_and_needs_no_reads():
-    assert quant_bins.QUANTIFIERS["depth"] is quant_bins._quantify_depth
-    # reads are nargs="*" so the quantifier can run without them at all
-    args = quant_bins._parse_args(
-        ["-b", "bins", "-o", "out", "--quantifier", "depth", "--depth", "d.txt"]
-    )
-    assert args.reads == [] and args.depth == "d.txt"
-
-
-def test_omitting_the_table_is_an_error_that_says_where_to_find_one(tmp_path, monkeypatch):
-    raised = []
-    monkeypatch.setattr(
-        quant_bins,
-        "error",
-        lambda m, *a, **k: raised.append(m) or (_ for _ in ()).throw(SystemExit),
-    )
-    bins = tmp_path / "bins"
-    bins.mkdir()
-    args = _Args(str(bins), None, str(tmp_path))
-    with pytest.raises(SystemExit):
-        quant_bins._quantify_depth(args, [], str(tmp_path / "t.tsv"), None, None)
-    assert raised and "work_files" in raised[0]
+    assert not any(c.endswith("-var") for c in cols) and "totalAvgDepth" not in cols

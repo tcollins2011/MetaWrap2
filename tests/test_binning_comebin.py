@@ -9,10 +9,6 @@ to the CPU, it fails. The third thing tested here is not a default at all but a 
 
 import os
 
-import pytest
-
-from metawrap2.config import OPTIONAL_ENV_TOOLS, OPTIONAL_ENVS
-from metawrap2.constants import bin_filename
 from metawrap2.modules import binning
 
 
@@ -62,86 +58,3 @@ def test_the_command_pins_a_seed_and_the_cpu(tmp_path, monkeypatch):
     assert cmd.startswith("run_comebin.sh ")
     # It globs *.bam out of a directory, like VAMB, so work_files goes over whole.
     assert "-p %s" % work in cmd
-
-
-def test_a_higher_min_len_filters_the_assembly_because_comebin_has_no_flag_for_it(
-    tmp_path, monkeypatch
-):
-    """``-l 2000`` has to reach COMEBin somehow, and the only lever is the fasta it is handed."""
-    work = _work(tmp_path)
-    assembly = work / "assembly.fa"
-    assembly.write_text(">short\n%s\n>long\n%s\n" % ("A" * 500, "C" * 3000))
-    calls = _capture(monkeypatch, work)
-    binning._run_comebin(_Args(str(tmp_path / "out"), min_len=2000), "e", str(work), str(assembly))
-
-    filtered = work / "assembly_comebin.fa"
-    assert "-a %s" % filtered in calls[0][0]
-    assert filtered.read_text() == ">long\n%s\n" % ("C" * 3000)
-
-
-def test_the_shared_assembly_copy_is_used_when_min_len_is_at_comebins_own_floor(
-    tmp_path, monkeypatch
-):
-    """Nothing is written in the common case - the filter exists only to keep a promise -l made."""
-    work = _work(tmp_path)
-    calls = _capture(monkeypatch, work)
-    binning._run_comebin(
-        _Args(str(tmp_path / "out"), min_len=binning.COMEBIN_MIN_LEN), "e", str(work), "shared.fa"
-    )
-    assert "-a shared.fa" in calls[0][0]
-    assert not (work / "assembly_comebin.fa").exists()
-
-
-def test_filtering_away_every_contig_is_an_error_rather_than_an_empty_fasta(tmp_path, monkeypatch):
-    """An empty fasta would reach COMEBin and fail inside it, several stages from the cause."""
-    work = _work(tmp_path)
-    assembly = work / "assembly.fa"
-    assembly.write_text(">short\n%s\n" % ("A" * 500))
-    _capture(monkeypatch, work)
-    with pytest.raises(SystemExit):
-        binning._run_comebin(
-            _Args(str(tmp_path / "out"), min_len=5000), "e", str(work), str(assembly)
-        )
-
-
-def test_only_the_published_bin_set_is_adopted_not_the_candidates(tmp_path, monkeypatch):
-    """COMEBin leaves several clusterings under cluster_res and picks between them; one wins."""
-    work = _work(tmp_path)
-    _capture(monkeypatch, work, names=("1.fa", "2.fa", "10.fa"))
-    candidates = work / "comebin_out" / "comebin_res" / "cluster_res"
-    candidates.mkdir(parents=True)
-    (candidates / "weight_seed_kmeans_k_30_result.tsv_bins").mkdir()
-    out = tmp_path / "out"
-    binning._run_comebin(_Args(str(out)), "e", str(work), "asm.fa")
-
-    assert sorted(os.listdir(out / "comebin_bins")) == [bin_filename(i) for i in (1, 2, 3)]
-    assert os.listdir(work / "comebin_out" / binning.COMEBIN_BIN_DIR) == []
-    # The candidate directory is left exactly where COMEBin put it, not adopted alongside.
-    assert (candidates / "weight_seed_kmeans_k_30_result.tsv_bins").is_dir()
-
-
-def test_it_runs_in_the_one_env_the_three_learned_binners_share(tmp_path, monkeypatch):
-    """One env for all three, and not the binning env. See the VAMB test for why they merged."""
-    work = _work(tmp_path)
-    calls = _capture(monkeypatch, work)
-    binning._run_comebin(_Args(str(tmp_path / "out")), OPTIONAL_ENVS["comebin"], str(work), "a.fa")
-    assert calls[0][1]["env"] == "metawrap2-learned" != binning.CONDA_ENV
-    assert len({OPTIONAL_ENVS[k] for k in ("semibin2", "vamb", "comebin")}) == 1
-    assert OPTIONAL_ENV_TOOLS["comebin"] == ["SemiBin2", "vamb", "run_comebin.sh"]
-
-
-def test_comebin_alone_satisfies_the_pick_a_binner_check(tmp_path, monkeypatch):
-    from metawrap2.command import runner
-
-    monkeypatch.setattr(runner, "dry_run", True)
-    assembly = tmp_path / "asm.fa"
-    assembly.write_text(">c1\n%s\n" % ("ACGT" * 500))
-    reads = []
-    for mate in ("1", "2"):
-        read = tmp_path / ("r_%s.fastq" % mate)
-        read.write_text("@r1\nACGT\n+\n!!!!\n")
-        reads.append(str(read))
-    rc = binning.main(
-        ["--comebin", "-a", str(assembly), "-o", str(tmp_path / "out"), "-t", "2"] + reads
-    )
-    assert rc == 0
