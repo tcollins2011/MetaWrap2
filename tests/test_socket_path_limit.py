@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import sys
 import tempfile
 
 import pytest
@@ -53,7 +54,11 @@ def test_one_character_over_the_limit_cannot(tmp_path):
     """The assertion that would have caught the off-by-14: 76 has to fail, not merely 90."""
     assert MAX_TMPDIR_LEN == SOCKET_PATH_LIMIT - (len("/pymp-") + 8) - (len("/listener-") + 8)
     assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN)) is True
-    assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN + 1)) is False
+    if sys.version_info < (3, 14):
+        # Python 3.14's multiprocessing falls back to a short temp directory by itself, so the
+        # failure only reproduces before it. The limit still matters: CheckM1 and SemiBin2 run in
+        # their own environments, on older Pythons.
+        assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN + 1)) is False
 
     # The way round it: a path over the budget is symlinked short, and bind() resolves the link.
     real = _dir_of_length(tmp_path, MAX_TMPDIR_LEN + 20)
