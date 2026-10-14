@@ -39,13 +39,6 @@ repos:
         entry: bash -c 'if find . -path ./.git -prune -o \( -name "*.sh" -o -name "*.pl" -o -name "*.R" \) -print | grep .; then exit 1; fi'
         language: system
         pass_filenames: false
-      # Advisory: prints the writing habits the docs were edited to remove, never fails.
-      - id: prose-check
-        name: prose habits in docs (advisory)
-        entry: python dev/check_prose.py
-        language: system
-        files: '(\.md|CHANGELOG)$'
-        verbose: true
 
       # --- the pre-push gate -------------------------------------------------------------
       # These run once per push, not per commit, because they are slower and are about the

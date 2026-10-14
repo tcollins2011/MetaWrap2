@@ -22,3 +22,6 @@ site/
 
 # Benchmark datasets: tens of GB, fetched with `metawrap2 benchmark fetch`
 benchmarks/data/
+
+# Local development helpers, not shipped
+dev/

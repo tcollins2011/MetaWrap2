@@ -76,8 +76,7 @@ shows the old output next to the new.
 - The hook and CI use the same tool versions, pinned in `pyproject.toml`'s dev extras and in
   `.pre-commit-config.yaml`. A test fails if the two disagree, so bump both together.
 - Documentation is written plainly: present tense, one reason where a choice is surprising, and
-  no paired "X rather than Y" unless a reader would otherwise do the wrong thing. The commit hook
-  runs `dev/check_prose.py` on changed docs and prints the habits it finds; it never blocks.
+  no paired "X rather than Y" unless a reader would otherwise do the wrong thing.
 - Every module-level import must be a declared dependency, in both `pyproject.toml` and
   `conda_pkg/meta.yaml`. A test checks this too. An optional dependency is imported inside the
   function that needs it.
