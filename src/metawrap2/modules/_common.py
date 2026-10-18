@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import os
 import re
+import resource
 import shutil
 import sys
-from typing import List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from .. import __version__
 from .. import aligners as _aligners
@@ -22,6 +23,7 @@ from .. import limits as _limits
 from .. import logging as _log
 from .. import runlock as _runlock
 from .. import scratch as _scratch
+from .. import usage as _usage
 from .. import validate as _validate
 from ..checkpoint import make_checkpoint
 from ..command import ToolError, run, runner  # re-exported for modules
@@ -39,6 +41,31 @@ _active_lock: Optional[_runlock.RunLock] = None
 #: The disk high-water monitor for the current run, held here for the same reason as the lock.
 _active_disk_monitor: Optional[_limits.DiskMonitor] = None
 
+#: The GPU memory sampler for the current run, held here for the same reason again.
+#:
+#: Needed on this path as well as in ``usage.run_measured``: a standalone module measures itself
+#: from the inside, and ``rusage`` has no GPU figure to reconstruct one from. Without this, the
+#: three binners that can train on a GPU reported peak VRAM under ``run`` and nothing when invoked
+#: directly - which is how the docs tell people to invoke them.
+_active_gpu_watcher: Optional[_usage.GpuWatcher] = None
+
+#: Environment variable the ``run`` driver sets for every step it starts, so a module can tell a
+#: step of a study from a run of its own.
+#:
+#: It decides who prints the cost line. The driver already measures each step from outside with
+#: ``os.wait4`` and prints ``finished <step> (Ns wall, ...)``; a module that printed its own line
+#: as well would put two figures for the same step - measured from outside and from inside, so
+#: never identical - in the same log, which is worse than the one missing line this fixes. Unset
+#: means nobody else is measuring, which is the standalone case.
+DRIVEN_BY_RUN_ENV = "METAWRAP2_IN_STUDY"
+
+#: The run whose cost has already been reported. ``finish_run`` is not called exactly once per
+#: run on every path: pathways calls it before an early ``return 0`` that is inside the ``try``
+#: whose ``finally`` calls it again. The cost line is a number a user will quote, so printing it
+#: twice - with two different figures, since the second measurement is later - would only raise
+#: the question of which one is real.
+_cost_reported_for: Optional[str] = None
+
 # Banner logging (same look as the original comm/announcement/warning/error).
 comm = _log.comm
 announcement = _log.announcement
@@ -46,6 +73,7 @@ warning = _log.warning
 error = _log.error
 
 __all__ = [
+    "DRIVEN_BY_RUN_ENV",
     "ToolError",
     "absolutize_paths",
     "announcement",
@@ -79,6 +107,7 @@ __all__ = [
     "resolve_memory_gb",
     "resolve_threads",
     "run",
+    "self_usage",
     "start_run",
     "threads_arg",
     "validate_inputs",
@@ -274,6 +303,15 @@ def start_run(
                 except OSError:
                     pass
         _cmd.set_run_logs(stdout_log, stderr_log)
+        # Where to watch this run while it is still running. The failure paths all name a log
+        # file, and so does `run` when a step fails - but a step that is merely slow named
+        # nothing at all, so a user four hours into an assembly had to guess that this file
+        # existed. Said once, here, at the point the log is opened.
+        comm(
+            "Live log of this run: %s - MetaWrap2's messages and every line of every tool, as "
+            "it happens. The raw tool streams are beside it in run.stdout and run.stderr."
+            % os.path.join(output, _log.RUN_LOG_NAME)
+        )
     _warn_odd_paths(inputs + ([output] if output else []))
 
     if output and not _cmd.runner.dry_run:
@@ -286,6 +324,18 @@ def start_run(
     # filesystem at hour five, and that is the case this catches.
     if output and not _cmd.runner.dry_run:
         _start_disk_monitor(module, settings, output, budget)
+
+    # Sample GPU memory for the same reason and over the same window: the peak is transient, and a
+    # card either holds the model or the step dies in the allocator. Costs one nvidia-smi call every
+    # five seconds, and only on a machine that has a driver at all.
+    # Cleared first, so a second run in the same process cannot inherit the first one's peak -
+    # which is exactly what a test suite, and `pathways` calling finish_run twice, would do.
+    # Skipped under `run`: the driver already samples this step from outside with its own watcher,
+    # and two samplers on one process is two nvidia-smi calls for one number.
+    global _active_gpu_watcher
+    _active_gpu_watcher = None
+    if not _cmd.runner.dry_run and not os.environ.get(DRIVEN_BY_RUN_ENV) and _usage.has_gpu():
+        _active_gpu_watcher = _usage.GpuWatcher(os.getpid()).start()
 
     # A durable, machine-wide record of the run, outside any output directory. Written at the
     # start so an interrupted or killed run still leaves a trace; finish_run appends the outcome.
@@ -346,6 +396,37 @@ def _outcome_from_context() -> str:
     return _history.FAILED
 
 
+def self_usage(rec: RunRecorder) -> Dict[str, Any]:
+    """What this process has cost so far, in the shape :func:`metawrap2.usage.summarise` reads.
+
+    The ``run`` driver's numbers for a step come from ``os.wait4`` on the step's own process,
+    which reports the sum of the CPU times and the *maximum* peak RSS over that process and
+    every descendant it reaped. A standalone module is that same process, so the same figures
+    are reconstructed from the inside: RUSAGE_SELF plus RUSAGE_CHILDREN, summed for CPU time and
+    maximised for peak RSS - which is a high-water mark, so adding the two would double-count a
+    peak that only one of them ever reached.
+
+    Nothing here invents a second measurement: the kilobyte/byte conversion and the wording both
+    come from :mod:`metawrap2.usage`, so the standalone line and the driver's line cannot drift
+    into disagreeing about the same run.
+    """
+    me = resource.getrusage(resource.RUSAGE_SELF)
+    kids = resource.getrusage(resource.RUSAGE_CHILDREN)
+    measured: Dict[str, Any] = {
+        "wall_seconds": round(rec.elapsed(), 1),
+        "peak_rss_bytes": max(_usage.self_peak_rss_bytes(), _usage.maxrss_bytes(kids.ru_maxrss)),
+        "user_seconds": round(me.ru_utime + kids.ru_utime, 1),
+        "system_seconds": round(me.ru_stime + kids.ru_stime, 1),
+    }
+    # Only when something of this run's was actually on a GPU, so a CPU run on a machine with a
+    # card reports no VRAM rather than zero VRAM.
+    watcher = _active_gpu_watcher
+    if watcher is not None and watcher.peak_mib:
+        measured["peak_gpu_memory_bytes"] = watcher.peak_mib * _usage.MIB
+        measured["gpu_devices"] = len(watcher.devices)
+    return measured
+
+
 def finish_run(
     rec: RunRecorder,
     output_dir: str,
@@ -367,6 +448,21 @@ def finish_run(
     try:
         rec.finalize(output_dir, input_paths=inputs, capture_versions=not _cmd.runner.dry_run)
     finally:
+        # The cost of the run, for a module run on its own. Under `run` every step gets this
+        # line and it is the one users single out as the most useful in the output - it is how
+        # "24 threads granted, 1.0 core busy" is ever noticed - but a module invoked directly got
+        # nothing, and the docs push single-module use. `history` keeps the duration, which is
+        # not the same as reading it when the run ends. Before configure_run_log(None), so the
+        # line is in metawrap2.log as well as on screen; and printed whatever the outcome,
+        # because the cost of a run that failed at hour four is exactly what the user wants.
+        global _cost_reported_for
+        # Stopped before the line is composed, not after: the sampler holds the peak already, and
+        # leaving the thread running would keep sampling a process that has finished its work.
+        if _active_gpu_watcher is not None:
+            _active_gpu_watcher.stop()
+        if not os.environ.get(DRIVEN_BY_RUN_ENV) and _cost_reported_for != rec.run_id:
+            _cost_reported_for = rec.run_id
+            comm("%s used %s" % (rec.module, _usage.summarise(self_usage(rec))))
         if not _cmd.runner.dry_run:
             _history.record(
                 rec.module,

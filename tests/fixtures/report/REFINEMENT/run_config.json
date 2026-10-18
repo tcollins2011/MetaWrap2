@@ -1,0 +1,29 @@
+{
+  "run_id": "20260101T120000-abcd1234",
+  "metawrap2_version": "2.1.2",
+  "module": "bin_refinement",
+  "command_line": [
+    "metawrap2",
+    "bin_refinement",
+    "-o",
+    "REFINEMENT"
+  ],
+  "started": "2026-01-01T12:00:00",
+  "finished": "2026-01-01T12:41:00",
+  "duration_seconds": 2460.0,
+  "parameters": {
+    "completeness": 70.0,
+    "contamination": 10.0,
+    "threads": 8,
+    "gunc": true
+  },
+  "conda_env": "metawrap2-bin_refinement",
+  "tool_versions": {
+    "checkm2": "CheckM2 v1.0.2",
+    "gunc": "GUNC 1.0.6"
+  },
+  "databases": {
+    "CHECKM2DB": "/dbs/checkm2/uniref100.KO.1.dmnd",
+    "GUNC_DB": "/dbs/gunc/gunc_db_progenomes2.1.dmnd"
+  }
+}

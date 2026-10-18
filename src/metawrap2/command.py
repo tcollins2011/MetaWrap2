@@ -343,7 +343,7 @@ class CommandRunner:
                 t.join()
         except KeyboardInterrupt:
             # Everything from Popen onwards, not just the wait: an interrupt arriving while the
-            # output pumps were being started left the tool running with all 96 threads it had
+            # output pumps were being started left the tool running with all the threads it had
             # been granted, orphaned by the run that was exiting - and the next thing the user
             # started then competed with it for the machine.
             if proc is not None:

@@ -1,11 +1,14 @@
 # Planned features
 
-What is not built yet. Items leave this list when they ship; what each release added is in
-[docs/releases/](docs/releases/). Two detailed plans cover parts of this list with versions,
+Features not yet built. Items are removed when they ship; what each release added is in
+[docs/releases/](docs/releases/). Two detailed plans cover parts of this list, with versions,
 licences and citations checked:
 [functional annotation, pathways, AMR and abundance](docs/plan_functional_annotation.md) and
 [the other modules](docs/plan_other_modules.md). Where they disagree with this page, follow the
 plans.
+
+[docs/plan_2.1.3.md](docs/plan_2.1.3.md) proposes the next release, with costs, the measurements
+behind each item and the decisions needed.
 
 Each item has a size tag:
 
@@ -13,13 +16,13 @@ Each item has a size tag:
 - `[moderate]`: a new module or an alternative method within the current structure.
 - `[major]`: architecture, new data types, or scaling; more than one release.
 
-> Citations give author, journal and year from memory rather than a literature search. Check the
+> Citations give author, journal and year from memory, without a literature search. Check the
 > exact reference and current version before citing this page.
 
 ## Principles
 
-- New tools arrive behind a flag. A default changes only on a measurement committed to
-  `benchmarks/results/`, and the change is stated in the release notes and the migration table.
+- New tools are added behind a flag. A default changes only after a recorded benchmark
+  measurement, and the change is listed in the release notes and the migration table.
 - New capability is a new module, or a command block in an existing one.
 - Every tool gets a pinned conda environment with a committed lockfile, a database fingerprint, and
   a line in the run provenance.
@@ -32,14 +35,13 @@ Each item has a size tag:
 
 ## Open from 2.1.2
 
-These are started or decided, with a named blocker.
+Started or decided, each with a named blocker.
 
-- `[low]` **MIMAG quality tags** in `.stats.tsv`, from completeness, contamination and rRNA/tRNA
-  presence. Nearly free: `annotate --bakta` already runs tRNAscan-SE, Aragorn and Infernal, so the
-  counts are a parse of existing output. Halted on the maintainer's instruction; resumes only on
-  request.
+- `[done in 2.1.3]` **MIMAG quality tags** in `.stats.tsv` (`mimag_tag`, `mimag_rrna`,
+  `mimag_trnas`), from completeness, contamination and rRNA/tRNA presence, with
+  `high_quality_unverified_rrna` kept distinct from a measured absence.
 - `[low]` **GTDB-Tk as the `classify_bins` default**, retiring taxator-tk. taxator-tk is deprecated
-  with a warning; switching the default needs a measurement first.
+  with a warning. Switching the default needs a measurement first.
 - `[moderate]` **PlasMAAG**, plasmid-aware binning on the assembly graph (*Nat Biotechnol* 2026).
   Blocked: `assembly` deletes the graph, and PlasMAAG is not on bioconda.
 - `[moderate]` **VFDB virulence calls** in `amr`. Needs a measured comparison arm before it ships.
@@ -48,7 +50,7 @@ These are started or decided, with a named blocker.
 ## Read QC
 
 - `[low]` **Host removal against T2T-CHM13** (Nurk et al., *Science* 2022), which removes more human
-  reads than hg38. `hostile` does this with masking of microbial-homologous regions (Constantinides
+  reads than hg38. `hostile` does this and masks microbial-homologous regions (Constantinides
   et al., *Bioinformatics* 2023). An alternative to bmtagger.
 - `[low]` **Long-read QC**: NanoPlot for read statistics, chopper or filtlong for filtering (De
   Coster et al., *Bioinformatics* 2018/2023).
@@ -74,8 +76,8 @@ These are started or decided, with a named blocker.
 
 ## Taxonomic profiling
 
-- `[low]` **Bracken** to re-estimate Kraken2 abundances at a chosen rank (Lu et al., *PeerJ CS*
-  2017).
+- `[done in 2.1.3]` **Bracken** re-estimates Kraken2 abundances at a chosen rank
+  (`kraken2 --bracken`; Lu et al., *PeerJ CS* 2017).
 - `[moderate]` **Read-level profilers**: MetaPhlAn 4 (Blanco-Míguez et al., *Nat Biotechnol* 2023),
   mOTUs (Ruscheweyh et al., *Microbiome* 2022), ganon (Piro et al., *Bioinformatics* 2020).
 
@@ -105,9 +107,9 @@ These are started or decided, with a named blocker.
 
 - `[low]` **Record which strategy built a catalogue** (per-sample or co-assembly) in the cohort
   summary, since the two are not comparable.
-- `[moderate]` **Settle per-sample versus co-assembly at scale.** On three samples they tie on clean
-  MAGs. The deciding experiment is about twenty samples, where co-assembly is expected to run out
-  of memory.
+- `[moderate]` **Compare per-sample assembly and co-assembly at scale.** On three samples they give
+  the same number of clean MAGs. The comparison needs about twenty samples, where co-assembly is
+  expected to run out of memory.
 - `[moderate]` **Community structure**: beta diversity and ordination of taxonomic and functional
   profiles, with MIxS sample metadata.
 
@@ -125,7 +127,7 @@ These are started or decided, with a named blocker.
   cannot annotate.
 - `[major]` **DNA language models** for binning and contig classification. Benchmark before
   adopting.
-- `[major]` **Learned bin refinement** to improve on the current consolidation.
+- `[major]` **Learned bin refinement** as an alternative to the current consolidation.
 
 ## New data types
 

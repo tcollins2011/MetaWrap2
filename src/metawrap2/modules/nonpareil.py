@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Dict, List, Optional, Tuple
+from collections import Counter
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .. import nonpareil as _np
 from ..cliformat import make_parser
@@ -191,12 +192,37 @@ def _sample_name(path: str) -> str:
     for extension in (".gz", ".bz2"):
         name = name.removesuffix(extension)
     name = os.path.splitext(name)[0]
-    # Longest first. read_qc writes `<sample>_final_pure_reads_1.fastq`, and stripping "_1" from
-    # that leaves `gut_final_pure_reads` as the sample name - which joins against nothing.
+    # Longest first, so a file written as `<sample>_final_pure_reads_1.fastq` does not lose only
+    # its "_1" and come back as `gut_final_pure_reads`, which joins against nothing.
     for suffix in sorted(READ_SUFFIXES, key=len, reverse=True):
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return name
+
+
+def sample_names(paths: Sequence[str]) -> List[str]:
+    """One label per read file, falling back to the parent directory when basenames collide.
+
+    `read_qc` writes `<out>/<sample>/final_pure_reads_1.fastq`, so a cohort's read files all share
+    one basename and the sample identity lives in the directory. That made the composition this
+    project documents - `nonpareil -r READ_QC/*/final_pure_reads_1.fastq` - fail every time, with a
+    correct and unhelpful message about two files reducing to one name: the two modules could not be
+    chained the way the docs chain them.
+
+    The directory is what the user meant. `READ_QC/ERR011347/final_pure_reads_1.fastq` is
+    ERR011347, and only the colliding names are rewritten, so a cohort whose files *are* named per
+    sample keeps the names it chose. A collision that survives the fallback is still an error: two
+    rows with one label cannot be told apart, and guessing a third time would be inventing a name.
+    """
+    names = [_sample_name(path) for path in paths]
+    counts = Counter(names)
+    for index, (name, path) in enumerate(zip(names, paths)):
+        if counts[name] < 2:
+            continue
+        parent = os.path.basename(os.path.dirname(os.path.abspath(path)))
+        if parent:
+            names[index] = parent
+    return names
 
 
 def _infer_format(path: str, given: Optional[str]) -> str:
@@ -335,13 +361,15 @@ def main(argv: List[str]) -> int:
         ensure_dir(workdir)
         env = env_for("nonpareil", settings)
 
-        samples: List[Tuple[str, str]] = [(_sample_name(p), p) for p in args.reads]
-        duplicates = {n for n, _ in samples if [x for x, _ in samples].count(n) > 1}
+        labels = sample_names(args.reads)
+        samples: List[Tuple[str, str]] = list(zip(labels, args.reads))
+        duplicates = {name for name, count in Counter(labels).items() if count > 1}
         if duplicates:
             error(
-                "two read files reduce to the same sample name (%s). Rename them: the name is a "
-                "row label, and two rows with one label cannot be told apart"
-                % ", ".join(sorted(duplicates))
+                "two read files reduce to the same sample name (%s), and their parent directories "
+                "do not tell them apart either. Rename them, or put each sample's reads in its own "
+                "directory: the name is a row label, and two rows with one label cannot be told "
+                "apart" % ", ".join(sorted(duplicates))
             )
 
         if dry_run():

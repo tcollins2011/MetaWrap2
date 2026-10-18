@@ -1,0 +1,36 @@
+{
+  "summary": {
+    "fastp_version": "0.24.0",
+    "sequencing": "paired end (75 cycles + 75 cycles)",
+    "before_filtering": {
+      "total_reads": 25242208,
+      "total_bases": 1893165600,
+      "q20_bases": 1575103102,
+      "q30_bases": 1298742011,
+      "q20_rate": 0.831959,
+      "q30_rate": 0.685998,
+      "read1_mean_length": 75,
+      "read2_mean_length": 75,
+      "gc_content": 0.471203
+    },
+    "after_filtering": {
+      "total_reads": 10486282,
+      "total_bases": 786471150,
+      "q20_bases": 762118944,
+      "q30_bases": 701233518,
+      "q20_rate": 0.969036,
+      "q30_rate": 0.891621,
+      "read1_mean_length": 75,
+      "read2_mean_length": 75,
+      "gc_content": 0.468811
+    }
+  },
+  "filtering_result": {
+    "passed_filter_reads": 10486282,
+    "low_quality_reads": 14755926,
+    "too_many_N_reads": 0,
+    "too_short_reads": 0,
+    "too_long_reads": 0
+  },
+  "command": "fastp -i ERR011347_1.fastq -I ERR011347_2.fastq -o trimmed_1.fastq -O trimmed_2.fastq -w 16 -j fastp.json -h fastp.html"
+}

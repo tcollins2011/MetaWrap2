@@ -31,6 +31,11 @@ MAX_BIN_SIZE = 20_000_000  # 20 Mb
 # other tools recognise it and a reader can tell at a glance. These are defined once so every
 # module and helper agrees, rather than each hardcoding a suffix of its own.
 STATS_SUFFIX = ".stats.tsv"  # per-bin completeness/contamination table (was ".stats")
+
+#: Columns :mod:`metawrap2.mimag` appends to a ``.stats.tsv``, after the frozen header and never
+#: reordered. Declared here so a reader of the table has one place to look for its full shape, and
+#: so the append order cannot drift between the writer and whatever consumes it.
+MIMAG_STATS_COLUMNS = ("mimag_tag", "mimag_rrna", "mimag_trnas")
 CONTIGS_SUFFIX = ".contigs.tsv"  # contig -> bin membership table (was ".contigs")
 TSV_SUFFIX = ".tsv"  # anything else tab-separated (was ".tab"/".tax")
 

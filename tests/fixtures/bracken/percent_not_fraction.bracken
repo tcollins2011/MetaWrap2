@@ -1,0 +1,4 @@
+name	taxonomy_id	taxonomy_lvl	kraken_assigned_reads	added_reads	new_est_reads	fraction_total_reads
+Streptococcus pneumoniae	1313	S	150	151	301	31.68400
+Streptococcus mutans	1309	S	100	148	248	26.10500
+Escherichia coli	562	S	250	150	400	42.10500

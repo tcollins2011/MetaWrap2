@@ -1,0 +1,23 @@
+##gff-version 3
+##feature-ontology https://github.com/The-Sequence-Ontology/SO-Ontologies
+contig_1	Infernal	rRNA	3000	3115	.	+	0	ID=JKHDLC_00300;Name=5S ribosomal RNA;product=5S ribosomal RNA;locus_tag=JKHDLC_00300
+contig_1	Infernal	rRNA	3615	5153	.	+	0	ID=JKHDLC_00361;Name=16S ribosomal RNA;product=16S ribosomal RNA;locus_tag=JKHDLC_00361
+contig_1	Infernal	rRNA	5653	8549	.	+	0	ID=JKHDLC_00565;Name=23S ribosomal RNA;product=23S ribosomal RNA;locus_tag=JKHDLC_00565
+contig_1	tRNAscan-SE	tRNA	9049	9124	.	+	0	ID=JKHDLC_00904;Name=tRNA-Ala;product=tRNA-Ala(nnn);locus_tag=JKHDLC_00904
+contig_1	tRNAscan-SE	tRNA	9249	9324	.	+	0	ID=JKHDLC_00924;Name=tRNA-Arg;product=tRNA-Arg(nnn);locus_tag=JKHDLC_00924
+contig_1	tRNAscan-SE	tRNA	9449	9524	.	+	0	ID=JKHDLC_00944;Name=tRNA-Asn;product=tRNA-Asn(nnn);locus_tag=JKHDLC_00944
+contig_1	tRNAscan-SE	tRNA	9649	9724	.	+	0	ID=JKHDLC_00964;Name=tRNA-Asp;product=tRNA-Asp(nnn);locus_tag=JKHDLC_00964
+contig_1	tRNAscan-SE	tRNA	9849	9924	.	+	0	ID=JKHDLC_00984;Name=tRNA-Cys;product=tRNA-Cys(nnn);locus_tag=JKHDLC_00984
+contig_1	tRNAscan-SE	tRNA	10049	10124	.	+	0	ID=JKHDLC_01004;Name=tRNA-Gln;product=tRNA-Gln(nnn);locus_tag=JKHDLC_01004
+contig_1	tRNAscan-SE	tRNA	10249	10324	.	+	0	ID=JKHDLC_01024;Name=tRNA-Glu;product=tRNA-Glu(nnn);locus_tag=JKHDLC_01024
+contig_1	tRNAscan-SE	tRNA	10449	10524	.	+	0	ID=JKHDLC_01044;Name=tRNA-Gly;product=tRNA-Gly(nnn);locus_tag=JKHDLC_01044
+contig_1	tRNAscan-SE	tRNA	10649	10724	.	+	0	ID=JKHDLC_01064;Name=tRNA-His;product=tRNA-His(nnn);locus_tag=JKHDLC_01064
+contig_1	tRNAscan-SE	tRNA	10849	10924	.	+	0	ID=JKHDLC_01084;Name=tRNA-Ile;product=tRNA-Ile(nnn);locus_tag=JKHDLC_01084
+contig_1	tRNAscan-SE	tRNA	11049	11124	.	+	0	ID=JKHDLC_01104;Name=tRNA-Leu;product=tRNA-Leu(nnn);locus_tag=JKHDLC_01104
+contig_1	tRNAscan-SE	tRNA	11249	11324	.	+	0	ID=JKHDLC_01124;Name=tRNA-Lys;product=tRNA-Lys(nnn);locus_tag=JKHDLC_01124
+contig_1	tRNAscan-SE	tRNA	11449	11524	.	+	0	ID=JKHDLC_01144;Name=tRNA-Met;product=tRNA-Met(nnn);locus_tag=JKHDLC_01144
+contig_1	tRNAscan-SE	tRNA	11649	11724	.	+	0	ID=JKHDLC_01164;Name=tRNA-Phe;product=tRNA-Phe(nnn);locus_tag=JKHDLC_01164
+contig_1	tRNAscan-SE	tRNA	11849	11924	.	+	0	ID=JKHDLC_01184;Name=tRNA-Pro;product=tRNA-Pro(nnn);locus_tag=JKHDLC_01184
+contig_1	tRNAscan-SE	tRNA	12049	12124	.	+	0	ID=JKHDLC_01204;Name=tRNA-Ser;product=tRNA-Ser(nnn);locus_tag=JKHDLC_01204
+contig_1	tRNAscan-SE	tRNA	12249	12324	.	+	0	ID=JKHDLC_01224;Name=tRNA-Thr;product=tRNA-Thr(nnn);locus_tag=JKHDLC_01224
+contig_1	tRNAscan-SE	tRNA	12449	12524	.	+	0	ID=JKHDLC_01244;Name=tRNA-Trp;product=tRNA-Trp(nnn);locus_tag=JKHDLC_01244

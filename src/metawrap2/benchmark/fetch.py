@@ -129,6 +129,12 @@ def plan(dataset: Dataset, dest: str, *, hash_it: bool = False) -> FetchPlan:
     *hash_it* is off by default because hashing 95 GB to answer "what do I still need" is a poor
     trade; the size check catches truncation, and :func:`fetch` hashes everything it downloads.
     Pass it to re-verify an existing copy in full.
+
+    An archive that is present *and* verified still counts as needed when its contents are not on
+    disk. That is not hypothetical: a fetch interrupted after downloading and before extracting
+    left three verified archives and one extracted sample, and the next run said the dataset was
+    "complete". A benchmark then runs on one sample while reporting three - which is the kind of
+    wrong number this project exists to avoid, and it has no error anywhere in it.
     """
     result = FetchPlan(dataset=dataset, dest=dest)
     for remote in list(dataset.files) + list(dataset.gold_standard):
@@ -138,11 +144,38 @@ def plan(dataset: Dataset, dest: str, *, hash_it: bool = False) -> FetchPlan:
         else:
             path = _landing_path(dataset, remote, dest)
             reason = verify(path, remote, hash_it=hash_it)
+            if not reason and remote.is_archive and not _is_extracted(dataset, remote, dest):
+                reason = "downloaded but not extracted"
         if reason:
             result.needed.append((remote, reason))
         else:
             result.present.append(remote)
     return result
+
+
+def _is_extracted(dataset: Dataset, remote: object, dest: str) -> bool:
+    """Has *remote*'s sample been unpacked under ``dest/extracted``?
+
+    Matched on the sample number rather than on a member list, because the archive's own directory
+    is timestamp-prefixed (``2017.12.04_18.56.22_sample_17``) and the keep list means the extracted
+    tree is deliberately a subset of what the archive holds. A directory whose name ends in
+    ``_sample_<n>`` and holds at least one file is the honest test available without opening the
+    archive, which is the whole point of not opening it.
+    """
+    sample = getattr(remote, "sample", None)
+    if sample is None:
+        return True
+    extracted = os.path.join(dest, "extracted")
+    if not os.path.isdir(extracted):
+        return False
+    suffix = "_sample_%s" % sample
+    for name in os.listdir(extracted):
+        if not name.endswith(suffix):
+            continue
+        for _parent, _dirs, files in os.walk(os.path.join(extracted, name)):
+            if files:
+                return True
+    return False
 
 
 def disk_verdict(plan_: FetchPlan, budget: Optional[_limits.Budget] = None) -> Tuple[bool, str]:
@@ -291,6 +324,17 @@ def fetch(
     for remote, _reason in current.needed:
         path = _landing_path(dataset, remote, dest)
         say("\n%s (%s)" % (remote.path, _limits.human(remote.size)))
+        if _reason == "downloaded but not extracted":
+            # Already here and already verified; the only thing missing is the unpacking. Saying so
+            # matters because the alternative - re-downloading 10 GB that is on disk - is what the
+            # old "present and verified" shortcut was trying to avoid in the first place.
+            say("  already downloaded and verified; extracting")
+            members, written = extract(path, extracted, dataset.keep)
+            say("  extracted %d file(s), %s" % (members, _limits.human(written)))
+            if not keep_archives:
+                os.remove(path)
+                say("  removed the archive (pass --keep-archives to keep it)")
+            continue
         problem = _download(dataset.url_for(remote), path)
         if problem:
             failures.append("%s: %s" % (remote.path, problem))

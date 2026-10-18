@@ -1,0 +1,4 @@
+genome	contig	start	end	strand	element_symbol	element_type	class	subclass	tool
+bin_001	NODE_1	10755	11654	+	cepA	AMR	BETA-LACTAM	CEPHALOSPORIN	amrfinderplus
+bin_001	NODE_2	2201	2980	-	aph(3')-III	AMR	AMINOGLYCOSIDE	KANAMYCIN	amrfinderplus
+bin.2	NODE_5	500	1300	+	tet(Q)	AMR	TETRACYCLINE	TETRACYCLINE	amrfinderplus

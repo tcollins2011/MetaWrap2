@@ -1,0 +1,12 @@
+{
+  "summary": {
+    "before_filtering": {
+      "total_reads": 5000,
+      "total_bases": 750000
+    },
+    "after_filtering": {
+      "total_reads": 4500,
+      "total_bases": 648000
+    }
+  }
+}

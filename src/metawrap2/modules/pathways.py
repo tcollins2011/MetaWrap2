@@ -27,6 +27,7 @@ from typing import Dict, List, Tuple
 from .. import depth as _depth
 from .. import hierarchy as _hierarchy
 from .. import kegg as _kegg
+from .. import sunburst as _sunburst
 from ..cliformat import make_parser
 from ..config import MODULE_ENVS, load_settings
 from ..constants import TSV_SUFFIX
@@ -131,6 +132,13 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=MIN_COMPLETENESS,
         metavar="FRACTION",
         help="omit modules below this pathwise completeness (default: %(default)s, keep all)",
+    )
+    p.add_argument(
+        "--brite-db",
+        metavar="DIR",
+        help="directory (or file) holding the BRITE ko00001 projection `install-db kegg` writes "
+        "(default: KEGG_BRITE from metawrap2.toml). Without it, module completeness is written "
+        "and the hierarchy and Krona plots are skipped",
     )
     p.add_argument(
         "--skip-krona",
@@ -375,6 +383,15 @@ def _draw_krona(
                     "ktImportText failed for %s %s; the input TSV is kept at %s"
                     % (unit, name, text)
                 )
+            # A static twin of the same wheel, from the same input file. Krona writes only
+            # interactive HTML, so without this a run's functional hierarchy cannot appear in a
+            # report, a release note or a message - there is no image on disk anywhere.
+            try:
+                _sunburst.draw_from_krona_text(
+                    text, title="%s %s (%s)" % (unit.replace("_", " "), name, suffix)
+                )
+            except Exception as problem:  # noqa: BLE001 - a picture must not fail the analysis
+                warning("could not draw the static wheel for %s %s: %s" % (unit, name, problem))
 
 
 def main(argv: List[str]) -> int:
@@ -424,11 +441,16 @@ def main(argv: List[str]) -> int:
         else:
             comm("skipping module completeness (already done; --resume)")
 
-        brite = settings.db("KEGG_BRITE")
+        # The flag wins over the config key, as every other database flag in this pipeline does:
+        # a user pointing at a specific snapshot is making a statement about which hierarchy their
+        # percentages are over, and the hierarchy is revised, so that statement has to be honoured
+        # and recorded rather than silently overridden by whatever the config holds.
+        brite = args.brite_db or settings.db("KEGG_BRITE")
         if not brite or not os.path.isfile(_hierarchy.hierarchy_path(brite)):
             warning(
-                "Skipping the functional hierarchy and Krona plots: KEGG_BRITE is not set. "
-                "Install it with `metawrap2 install-db kegg`. Module completeness is written."
+                "Skipping the functional hierarchy and Krona plots: no BRITE hierarchy. Install it "
+                "with `metawrap2 install-db kegg`, set KEGG_BRITE in metawrap2.toml, or pass "
+                "--brite-db. Module completeness is written."
             )
             announcement("PATHWAYS PIPELINE SUCCESSFULLY FINISHED!!!")
             finish_run(rec, args.output)

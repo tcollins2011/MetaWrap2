@@ -14,8 +14,10 @@ import os
 import shutil
 from typing import Dict, List, Optional, Tuple
 
+from . import mimag as _mimag
 from .command import run
 from .constants import BIN_EXTENSION, STATS_SUFFIX
+from .logging import comm
 from .utils import MAX_TMPDIR_LEN, short_tmpdir
 
 STATS_HEADER = ["bin", "completeness", "contamination", "GC", "lineage", "N50", "size"]
@@ -33,6 +35,7 @@ __all__ = [
     "run_checkm2",
     "summarize",
     "summarize_checkm2",
+    "tag_mimag",
     "write_stats",
 ]
 
@@ -72,6 +75,34 @@ def write_stats(rows: List[List[str]], out_path: str, binner: Optional[str] = No
     with open(out_path, "w") as fh:
         fh.write("\t".join(header) + "\n")
         fh.writelines("\t".join(row) + "\n" for row in rows_sorted)
+
+
+def tag_mimag(stats_path: str, evidence_dir: Optional[str] = None) -> List[_mimag.Assessment]:
+    """Append MIMAG quality columns to a ``.stats.tsv`` written here. Returns one row's verdict each.
+
+    The checkm-side entry point for :func:`metawrap2.mimag.annotate_stats`, so a caller that already
+    imports this module to produce the table does not need a second import to tag it, and so the
+    append sits next to :data:`STATS_HEADER` - the contract the new columns have to come after.
+
+    Not called from :func:`run_checkm` or :func:`write_stats`, deliberately. ``write_stats`` output
+    is pinned byte for byte by a golden test (seven columns, three rows), and
+    :func:`run_checkm_cached` reads a staged table back and re-feeds its rows into ``write_stats``,
+    so appending inside either would either break that contract or write a table whose rows are
+    three cells wider than its header. Tagging is therefore a pass over the finished file, the same
+    shape as :func:`metawrap2.gunc.annotate_stats`, and the caller says when the file is finished.
+
+    *evidence_dir* is an ``annotate`` output directory to look for Bakta/Infernal/tRNAscan-SE output
+    in. With none, or with none found, bins that clear 90/5 are tagged
+    ``high_quality_unverified_rrna``: nothing has searched them for a 16S, and that is not the same
+    as a search that found none.
+    """
+    names: List[str] = []
+    if os.path.isfile(stats_path):
+        with open(stats_path) as fh:
+            fh.readline()  # header; column 0 is the bin name by STATS_HEADER contract
+            names = [line.split("\t")[0] for line in fh if line.strip()]
+    evidence = _mimag.collect_evidence(evidence_dir, names) if evidence_dir else {}
+    return _mimag.annotate_stats(stats_path, evidence)
 
 
 def count_bins(bins_dir: str, extension: str = BIN_EXTENSION) -> int:
@@ -249,6 +280,56 @@ def checkm_tmpdir(bins_dir: str) -> str:
     return short_tmpdir(bins_dir + ".tmp")
 
 
+def _checkm1(
+    bins_dir: str,
+    checkm_out: str,
+    tmp: str,
+    threads: int,
+    mem_gb: int,
+    env: Optional[str],
+    quick: bool,
+    log_path: Optional[str],
+    pplacer: Optional[int],
+    reduced: bool = False,
+) -> None:
+    """One ``checkm lineage_wf`` invocation. *pplacer* overrides the computed thread count.
+
+    Split out so the retries in :func:`run_checkm` run the same command with one thing changed,
+    rather than a second copy of it that could drift from this one. *reduced* adds CheckM's own
+    ``--reduced_tree``, which is also what ``quick`` asks for.
+    """
+    placer = pplacer if pplacer is not None else pplacer_threads(threads, mem_gb)
+    cmd = (
+        f"checkm lineage_wf -x {BIN_EXTENSION.lstrip('.')} {bins_dir} {checkm_out} "
+        f"-t {threads} --tmpdir {tmp} --pplacer_threads {placer}"
+    )
+    if quick or reduced:
+        cmd += " --reduced_tree"
+    run(
+        cmd,
+        env=env,
+        tool="checkm",
+        log_path=log_path,
+        hint="CheckM needs substantial RAM (CheckM1 pplacer ~40GB/thread); try --quick or --checkm2.",
+        extra_env=checkm1_data_env(),
+        # The retry is the error handling: a non-zero exit here must come back rather than end the
+        # run, or the single-thread attempt never happens.
+        check=pplacer is not None,
+    )
+
+
+def _clear_checkm_attempt(bins_dir: str, checkm_out: str, tmp: str) -> str:
+    """Remove what a crashed CheckM left, and return a fresh tmpdir to retry in.
+
+    Both directories, not just the output: pplacer resumes from what it finds in the tmpdir, so
+    leaving a crashed run's half-written tree in place is how a retry reproduces the crash it is
+    retrying.
+    """
+    shutil.rmtree(checkm_out, ignore_errors=True)
+    shutil.rmtree(tmp, ignore_errors=True)
+    return checkm_tmpdir(bins_dir)
+
+
 def run_checkm(
     bins_dir: str,
     *,
@@ -273,17 +354,7 @@ def run_checkm(
         )
     checkm_out = bins_dir + ".checkm"
     tmp = checkm_tmpdir(bins_dir)
-    cmd = f"checkm lineage_wf -x {BIN_EXTENSION.lstrip('.')} {bins_dir} {checkm_out} -t {threads} --tmpdir {tmp} --pplacer_threads {pplacer_threads(threads, mem_gb)}"
-    if quick:
-        cmd += " --reduced_tree"
-    run(
-        cmd,
-        env=env,
-        tool="checkm",
-        log_path=log_path,
-        hint="CheckM needs substantial RAM (CheckM1 pplacer ~40GB/thread); try --quick or --checkm2.",
-        extra_env=checkm1_data_env(),
-    )
+    _checkm1(bins_dir, checkm_out, tmp, threads, mem_gb, env, quick, log_path, pplacer=None)
 
     stats_path = bins_dir + STATS_SUFFIX
     from .command import runner as _runner
@@ -293,6 +364,52 @@ def run_checkm(
         # the caller keep printing the rest of the pipeline under --dry-run.
         return stats_path
     ext = os.path.join(checkm_out, "storage", "bin_stats_ext.tsv")
+    if not os.path.isfile(ext) or os.path.getsize(ext) == 0:
+        # One retry on a single pplacer thread before giving up. pplacer's parallel tree placement
+        # dies as `Dune__exe__Multiprocessing.Child_error` - an OCaml child crash with no cause
+        # given - and it is not reproducible: on three CAMI2 skin samples, three of six refinement
+        # steps crashed this way at seven pplacer threads and the other three, over the same kind
+        # of bin set, finished. CheckM is 100% of what this step costs, so losing an hour of it to
+        # a crash that one thread survives is worth the retry being slower.
+        comm(
+            "CheckM produced no marker statistics (pplacer's parallel placement can die without "
+            "reporting a cause); retrying once on a single pplacer thread, which is slower"
+        )
+        tmp = _clear_checkm_attempt(bins_dir, checkm_out, tmp)
+        _checkm1(bins_dir, checkm_out, tmp, threads, mem_gb, env, quick, log_path, pplacer=1)
+
+    if (not os.path.isfile(ext) or os.path.getsize(ext) == 0) and not quick:
+        # Second fallback, because the first one is not always the right diagnosis. Isolated here:
+        # one 2,022-residue alignment out of 40 killed pplacer on its own, at one thread, three
+        # times out of three, with no unusual character in it and nothing degenerate about its
+        # length - and the same sequence placed fine against CheckM's *reduced* reference tree.
+        # pplacer is an unmaintained OCaml tool whose failure says only
+        # `Multiprocessing.Child_error`, so the sequence cannot be fixed from here; the reference
+        # tree can be changed.
+        #
+        # This is CheckM's own documented low-memory mode, not an invention, but it is not free:
+        # a reduced tree can choose a different lineage-specific marker set, so completeness and
+        # contamination for this bin set are not identical to a full-tree run. Said out loud
+        # because a mixed comparison is the kind of thing that has to be visible.
+        comm(
+            "CheckM still produced nothing on a single pplacer thread. Falling back to "
+            "--reduced_tree, which places against CheckM's reduced reference tree: this bin set's "
+            "completeness and contamination are then not strictly comparable with a full-tree run, "
+            "and the flag is recorded in run_commands.txt"
+        )
+        tmp = _clear_checkm_attempt(bins_dir, checkm_out, tmp)
+        _checkm1(
+            bins_dir,
+            checkm_out,
+            tmp,
+            threads,
+            mem_gb,
+            env,
+            quick,
+            log_path,
+            pplacer=1,
+            reduced=True,
+        )
     if not os.path.isfile(ext) or os.path.getsize(ext) == 0:
         raise RuntimeError("CheckM did not produce %s" % ext)
     write_stats(summarize(ext, binner=binner), stats_path, binner=binner)
@@ -307,8 +424,7 @@ def run_checkm(
 #: Sizes outside which a bin cannot be a >=70% complete, <=10% contaminated genome, so there is no
 #: point asking CheckM about it.
 #:
-#: Calibrated against the 17,616 bins in this project's benchmarks that *do* have CheckM2 scores, by
-#: bench_work/prefilter_calib.py. Of the 4,002 that pass 70/10 the smallest is 0.99 Mb and the largest
+#: Calibrated against the 17,616 bins in this project's benchmarks that *do* have CheckM2 scores. Of the 4,002 that pass 70/10 the smallest is 0.99 Mb and the largest
 #: 6.66 Mb, so both bounds sit clear of the real distribution: together they skip 1.4% of bins and lose
 #: **none** of the passing ones.
 #:

@@ -91,8 +91,55 @@ def _elapsed(started: float) -> str:
     return "%.1fh" % (seconds / 3600)
 
 
+#: quickstart always has the same three steps. They are numbered against this rather than against
+#: the steps that happen to run, because what runs is not known when step 1 prints: with
+#: ``--databases`` unset and a terminal attached, whether step 2 happens is decided by a question
+#: asked after step 1 has finished.
+TOTAL_STEPS = 3
+
+
 def _step(number: int, title: str) -> None:
-    announcement("STEP %d/3: %s" % (number, title))
+    announcement("STEP %d/%d: %s" % (number, TOTAL_STEPS, title))
+
+
+def _skipped_step(number: int, title: str, why: str) -> None:
+    """Announce a step that is not going to run, and why.
+
+    A skipped step used to print nothing, so `--databases none` showed "STEP 1/3" then "STEP 3/3"
+    and `--skip-envs` began the whole command at "STEP 3/3". Numbering that skips is a numbering a
+    user has to reverse-engineer, and the obvious reading - that step 2 failed silently - is wrong.
+    """
+    announcement("STEP %d/%d: %s (skipped: %s)" % (number, TOTAL_STEPS, title, why))
+
+
+def _unique_envs(names: Sequence[str]) -> List[str]:
+    """The distinct conda environments *names* resolve to, in first-seen order.
+
+    Several modules share one environment - metawrap2-reads serves five of them - so counting the
+    names given is counting modules, not installs. A full install said "creating 23 conda
+    environment(s)" and then built 11, which misstates the slowest part of the install by a factor
+    of two in the one message a user uses to decide whether to wait.
+    """
+    from ..config import resolve_env_name
+
+    envs: List[str] = []
+    for name in names:
+        env = resolve_env_name(name) or name
+        if env not in envs:
+            envs.append(env)
+    return envs
+
+
+def _print_modules_without_envs() -> None:
+    """Kept as a no-op: `doctor` now reports every module, including those with no conda env.
+
+    This used to name the two modules missing from a 22-row table against `metawrap2 -h`'s 24. The
+    table lists all 24 now - a module with no environment shows its real dependency instead, which
+    is what the sentence was standing in for - so there is nothing left to explain. Left in place
+    rather than deleted because `quickstart` calls it at the end of a successful install and a
+    future dependency kind (a system library, say) would belong here.
+    """
+    return
 
 
 def _explain_failure(step: str, command: str) -> None:
@@ -140,6 +187,61 @@ def _print_database_guidance(names: Sequence[str], jobs: int) -> None:
     )
 
 
+def _print_database_status(config: Optional[str]) -> bool:
+    """Print what each known database key is set to and whether it is there. True if none is broken.
+
+    This is what `--skip-envs` reports instead of the environment table. `--skip-envs` is
+    documented as "databases only", and it used to print the ENVIRONMENT status table - every
+    module MISSING, because environment creation had just been skipped on purpose - and exit 1.
+    Reporting the half of the install the user explicitly asked about is the whole point of the
+    flag.
+
+    "Configured but missing" and "not configured" are different states needing different actions,
+    so they are printed differently rather than both appearing as a path with a cross next to it.
+    """
+    from ..config import check_databases, load_settings
+
+    rows = check_databases(load_settings(config))
+    configured = [(key, value, present) for key, value, present, _used in rows if value]
+    unset = [key for key, value, _present, _used in rows if not value]
+
+    print("\nMetaWrap2 database status")
+    print("  " + "-" * 70)
+    for key, value, present in configured:
+        print("  %-22s %-38s [%s]" % (key, value, "ok" if present else "MISSING"))
+    if not configured:
+        print("  nothing configured yet.")
+    if unset:
+        print("  not set (%d): %s" % (len(unset), ", ".join(unset)))
+    print("  " + "-" * 70)
+
+    broken = [key for key, _value, present in configured if not present]
+    if broken:
+        warning(
+            "These database paths are in your config but are not on disk: %s\n"
+            "Either the path is wrong or the download did not finish. `metawrap2 install-db "
+            "<name>` fetches one and rewrites its path for you." % ", ".join(broken)
+        )
+    return not broken
+
+
+def _announce_non_interactive_default(names: Sequence[str], jobs: int) -> None:
+    """Say out loud that an unattended run is downloading nothing, and what to pass instead.
+
+    The non-blocking behaviour is correct and stays: under `sbatch` or in CI there is nobody to
+    answer a prompt, and a multi-hundred-gigabyte download must never start because a script was
+    not watching. What was missing is the sentence saying so - without it, a user who asked for
+    `--skip-envs` in a batch job got a run that touched no database and never said why.
+    """
+    # The command goes on a line of its own: mixed into the prose it wraps mid-command, and a
+    # command a user has to rejoin from two lines is a command they will mistype.
+    comm(
+        "No --databases given and stdin is not a terminal; downloading nothing.\n"
+        "Pass --databases small or --databases full to fetch them here, or run this later:\n"
+        "%s" % _database_command(names, jobs, True)
+    )
+
+
 def _ask_about_databases(names: Sequence[str], jobs: int) -> str:
     """Offer to install databases, but only when a person is there to answer.
 
@@ -148,6 +250,7 @@ def _ask_about_databases(names: Sequence[str], jobs: int) -> str:
     watching to say no.
     """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _announce_non_interactive_default(names, jobs)
         return "none"
     _print_database_guidance(names, jobs)
     print("  Download databases now?")
@@ -178,12 +281,20 @@ def _print_next_steps(threads: int, small: bool) -> None:
         )
 
 
-def _run_install_env(modules: Sequence[str], threads: int, from_lock: bool) -> int:
+def _run_install_env(
+    modules: Sequence[str], threads: int, from_lock: bool, log_dir: Optional[str] = None
+) -> int:
     from .install_env import main as install_env_main
 
     argv: List[str] = list(modules) + ["-t", str(threads)]
     if from_lock:
         argv.append("--from-lock")
+    if log_dir:
+        # install-env writes each env's solver output to a log and only prints the path on
+        # failure, so an install that succeeded with warnings left no retrievable record unless
+        # the logs went somewhere the user chose. `install-env --log-dir` already did this;
+        # quickstart simply had no way to ask for it.
+        argv += ["--log-dir", log_dir]
     # --no-test because the final doctor step verifies everything anyway; testing each env as it
     # is built and then again at the end doubles the slowest part for no extra information.
     argv.append("--no-test")
@@ -219,7 +330,9 @@ def _run_doctor(modules: Sequence[str], config: Optional[str], databases: bool) 
 def main(argv: List[str]) -> int:
     ap = make_parser(
         prog="metawrap2 quickstart",
-        description="Install everything MetaWrap2 needs and verify it, in one command.",
+        description="Build MetaWrap2's conda environments, optionally fetch databases, and verify both "
+        "- in one command. It does not install MetaWrap2's own Python extras: `diff_abundance` "
+        "needs `pip install 'metawrap2[stats]'`, and `doctor` says so if it is missing.",
         epilog="Every step is an ordinary metawrap2 command; run them separately if you prefer.",
     )
     ap.add_argument(
@@ -248,7 +361,10 @@ def main(argv: List[str]) -> int:
         "'none' skips them. Omit it and nothing is downloaded without asking you first",
     )
     ap.add_argument(
-        "--skip-envs", action="store_true", help="skip environment creation (databases only)"
+        "--skip-envs",
+        action="store_true",
+        help="databases only: skip environment creation, and report database status at the end "
+        "instead of module status",
     )
     ap.add_argument("--db-dir", help="where to install databases (default ~/metawrap2_dbs)")
     ap.add_argument(
@@ -263,6 +379,11 @@ def main(argv: List[str]) -> int:
         help="build environments from the committed lockfiles rather than by solving the yamls",
     )
     ap.add_argument("--config", help="config file to write database paths into")
+    ap.add_argument(
+        "--log-dir",
+        help="keep the per-environment build logs here (default: a temp directory). Worth "
+        "setting: an install that succeeded with warnings otherwise leaves no record",
+    )
     args = ap.parse_args(argv)
 
     if args.modules:
@@ -277,7 +398,11 @@ def main(argv: List[str]) -> int:
     elif args.binning_only:
         modules = list(BINNING_PATH)
     else:
-        modules = sorted(MODULE_ENVS)
+        # No module list at all: `doctor` then reports every module the CLI has, which is what a
+        # user comparing this table against `metawrap2 -h` expects. Passing the environment names
+        # held the table at 22 of 24 rows, and the two it dropped were the ones with no conda
+        # environment - including the one whose Python extra can actually be missing.
+        modules = []
 
     # Only the genome-recovery path has a short database list; a full install needs all of them.
     db_names = list(BINNING_DATABASES) if (args.binning_only or args.modules) else ["--all"]
@@ -302,10 +427,24 @@ def main(argv: List[str]) -> int:
     if "binning" in modules:
         envs_to_build += _default_tier_envs()
 
-    if not args.skip_envs:
-        _step(1, "creating %d conda environment(s)" % len(envs_to_build))
-        comm("This is the slow part. Existing environments are skipped, so a retry is cheap.")
-        if _run_install_env(envs_to_build, args.threads, args.from_lock) != 0:
+    if args.skip_envs:
+        _skipped_step(1, "conda environments", "--skip-envs")
+    else:
+        unique = _unique_envs(envs_to_build)
+        _step(1, "creating %d conda environment(s)" % len(unique))
+        comm(
+            "This is the slow part, and a quiet one: each environment's solver output goes to its\n"
+            "own log, so the lines below are the only progress there is. Eleven environments\n"
+            "measured 29 minutes at -t 4, so expect tens of minutes rather than seconds.\n"
+            "Existing environments are skipped, which is what makes a retry cheap."
+        )
+        # Forwarded only when asked for, so with no --log-dir install-env keeps choosing its own
+        # temp directory.
+        if args.log_dir:
+            rc_env = _run_install_env(envs_to_build, args.threads, args.from_lock, args.log_dir)
+        else:
+            rc_env = _run_install_env(envs_to_build, args.threads, args.from_lock)
+        if rc_env != 0:
             _explain_failure(
                 "Environment creation",
                 "metawrap2 install-env %s -t %d" % (" ".join(envs_to_build), args.threads),
@@ -316,7 +455,13 @@ def main(argv: List[str]) -> int:
     if choice is None:
         choice = _ask_about_databases(db_names, args.db_jobs)
 
-    if choice != "none":
+    if choice == "none":
+        _skipped_step(
+            2,
+            "databases",
+            "--databases none" if args.databases == "none" else "no --databases given",
+        )
+    else:
         _step(2, "installing the %s databases" % choice)
         if (
             _run_install_db(db_names, args.db_dir, choice == "small", args.db_jobs, args.config)
@@ -329,10 +474,24 @@ def main(argv: List[str]) -> int:
             )
             return 1
 
+    if args.skip_envs:
+        # `--skip-envs` means "databases only", so the report is about databases. Running the
+        # module check here would report every environment as missing - correctly, since creating
+        # them was skipped on purpose - and exit 1 on a run that did exactly what was asked.
+        _step(3, "checking the databases")
+        healthy = _print_database_status(args.config)
+        announcement("QUICKSTART FINISHED IN %s" % _elapsed(started))
+        if not healthy:
+            return 1
+        if choice == "none":
+            _print_database_guidance(db_names, args.db_jobs)
+        return 0
+
     _step(3, "checking what works")
     # Databases nobody asked for would be reported as missing and make the check look failed, so
     # they are only part of the verdict once they have actually been installed.
     healthy = _run_doctor(modules, args.config, databases=choice != "none") == 0
+    _print_modules_without_envs()
 
     announcement("QUICKSTART FINISHED IN %s" % _elapsed(started))
     if not healthy:

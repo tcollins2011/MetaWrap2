@@ -48,3 +48,30 @@ def test_the_depth_tables_variance_columns_are_not_read_as_samples(tmp_path):
     assert set(depth) == {"s1", "s2"}
     assert depth["s1"]["contig_24"] == 27.7
     assert depth["s2"]["contig_24"] == 12.3
+
+
+# ── pointing at a hierarchy, now that it is not vendored ─────────────────────────────────────
+
+
+def test_the_hierarchy_can_be_given_on_the_command_line():
+    """KEGG's BRITE projection is downloaded rather than shipped, so a run has to be able to say
+    which snapshot its percentages are over.
+
+    Every other database in this pipeline has both a config key and a flag; without one here, the
+    only way to point `pathways` at a hierarchy was to edit metawrap2.toml, and a user with two
+    snapshots had no way to say which one a given run used. A revised hierarchy changes the
+    percentages, so that is a statement about the result and not a convenience.
+    """
+    args = pathways._parse_args(["-o", "out", "-k", "kos.tsv", "--brite-db", "/db/KEGG_BRITE"])
+    assert args.brite_db == "/db/KEGG_BRITE"
+    assert pathways._parse_args(["-o", "out", "-k", "kos.tsv"]).brite_db is None
+
+
+def test_a_missing_hierarchy_names_every_way_of_supplying_one():
+    """The old message named only the config key, which is the hardest of the three to use."""
+    import inspect
+
+    source = inspect.getsource(pathways.main)
+    assert "install-db kegg" in source
+    assert "KEGG_BRITE" in source
+    assert "--brite-db" in source

@@ -134,7 +134,7 @@ learns contig embeddings by self-supervised contrastive training instead of mode
 and coverage directly, and its paper's claim is better MAGs for the same input. It is the only \
 candidate here whose cost is not dominated by a pass over the reads - it reads the same BAMs - so \
 what it has to justify is its training time, which is why it is run alone rather than straight into \
-an ensemble. Pinned to --device cpu: the machine these ran on has several GPUs, and a binner \
+an ensemble. Pinned to --device cpu: a binner \
 chosen on a GPU most users do not have is not a default anyone else can reproduce. The GPU arms below \
 measure what that pinning costs."""
 
@@ -170,7 +170,7 @@ against metabat2_maxbin2 at roughly the same cost, with bin_refinement consolida
 [[binner_set.variants]]
 name = "comebin"
 args = ["--comebin"]
-note = """the third learned binner and the most expensive bet of the three: contrastive learning over six augmented views of the assembly, then several Leiden clusterings scored against single-copy marker genes to pick a winner. That marker-gene selection step is what makes it interesting here - it is doing internally something close to what bin_refinement does across binners - and also what makes its cost hard to predict from the other two, which is why it gets its own arm. Pinned to --device cpu for the reason SemiBin2 is: a default chosen on this machine's L4s is not a default anyone else can reproduce. That pinning turned out to be the dominant cost in this whole comparison - see comebin_gpu."""
+note = """the third learned binner and the most expensive bet of the three: contrastive learning over six augmented views of the assembly, then several Leiden clusterings scored against single-copy marker genes to pick a winner. That marker-gene selection step is what makes it interesting here - it is doing internally something close to what bin_refinement does across binners - and also what makes its cost hard to predict from the other two, which is why it gets its own arm. Pinned to --device cpu for the reason SemiBin2 is: a default chosen on a GPU is not a default anyone else can reproduce. That pinning turned out to be the dominant cost in this whole comparison - see comebin_gpu."""
 
 [[binner_set.variants]]
 name = "metabat2_comebin"
@@ -304,8 +304,7 @@ catalogue-wide bins were. More, smaller bins means more of them sit below the re
 representation GUNC needs.
 
 What this comparison cannot say is whether binning a catalogue beats binning per sample, because \
-both of its arms bin the catalogue. That took the cohort benchmark, and the answer there is no - see \
-bench_work/multisplit/summary.tsv: 29 clean high-quality MAGs against the shipped per-sample path's \
+both of its arms bin the catalogue. That took the cohort benchmark, and the answer there is no: 29 clean high-quality MAGs against the shipped per-sample path's \
 34, for 9.09 cpu-hours against 8.71, on the same assemblies and the same cross-sample depth table. \
 So --binsplit stays a flag rather than becoming the cohort default: it is necessary for anyone who \
 bins a catalogue, and binning a catalogue is not the better route on this data."""

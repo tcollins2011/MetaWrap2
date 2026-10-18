@@ -12,6 +12,12 @@ same registry `binning` and `blobology` use (`metawrap2.aligners`). Its default 
 registry's minimap2, and `HYBRID_ALIGNER` says why: the 5.7x saving was measured on depth agreement,
 which is not the property this stage depends on.
 
+`--keep-graph` puts each assembler's assembly graph at a fixed, named path in the output directory.
+That is the one input a plasmid-aware or graph-aware binner needs and that nothing in this module's
+output named before - the graphs were left inside the assemblers' own directories, under three
+different names, and MEGAHIT writes none at all. It is off by default and deletes nothing either
+way: all it changes is that a graph exists where something else can find it.
+
 This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
 block below, and the tunable numbers/defaults in the CONSTANTS block. Change a flag there
 and it takes effect — no need to follow the orchestration logic underneath.
@@ -24,14 +30,16 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import shutil
-from typing import List
+from typing import Dict, List, Optional
 
 from .. import longreads as _long
 from ..aligners import ALIGNERS, INDEX_SUFFIXES, index_path
 from ..cliformat import make_parser
 from ..config import MODULE_ENVS, load_settings
 from ..constants import TSV_SUFFIX
+from ..limits import human
 from ..pyrun import PY
 from ..scripts import fix_megahit_contig_naming, rm_short_contigs, sort_contigs
 from ._common import (
@@ -48,6 +56,7 @@ from ._common import (
     expect_produced,
     finish_run,
     fs_move,
+    listdir,
     make_checkpoint,
     memory_arg,
     require_file,
@@ -82,6 +91,14 @@ EXTRACT_UNMAPPED = (
 )
 MEGAHIT_LEFTOVERS = "megahit -r {reads} -o {out} -t {threads} -m {mem} --tmp-dir {tmp}"
 MEGAHIT_PAIRED = "megahit -1 {r1} -2 {r2} -o {out} --tmp-dir {tmp} -t {threads} -m {mem} --continue"
+# MEGAHIT is the one assembler here that writes no graph of its own: final.contigs.fa is the
+# assembly, and the de Bruijn graph only exists as the per-k contigs in intermediate_contigs/, which
+# MEGAHIT's own toolkit converts to FASTG. Measured on an oral sample (a 117 MB
+# final.contigs.fa): k141.contigs.fa -> a 235 MB fastg in 1.8 s on one core, so the conversion costs
+# nothing next to the assembly it comes from and is done on demand rather than every run.
+#
+# stdout is the graph, so this is the one command here with a stdout_path rather than an -o.
+MEGAHIT_CONTIG2FASTG = "megahit_toolkit contig2fastg {k} {contigs}"
 QUAST = "quast -t {threads} -o {out} -m {quast_min} {assembly}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 MIN_CONTIG_LEN = 1000  # -l default; contigs shorter than this are dropped
@@ -130,6 +147,27 @@ FLYE = "flye {flag} {reads} --meta --out-dir {out} --threads {threads}"
 #: round; more costs time per round and converges quickly, so this is left at the default and
 #: recorded rather than tuned.
 FLYE_ITERATIONS = 1
+# --keep-graph. The graph each assembler leaves behind, and what the kept one is called.
+#
+# metaSPAdes writes four graphs; this takes assembly_graph_with_scaffolds.gfa, because GFA with the
+# scaffold paths is what the graph-aware binners read (PlasMAAG, GraphMB) and it is the smaller
+# file: 121 MB against 231 MB for assembly_graph.fastg, measured on a gut co-assembly whose
+# final_assembly.fasta is 54 MB. metaFlye's assembly_graph.gfa was 2.3 MB next to a 2.3 MB assembly;
+# its assembly_graph.gv beside it is a 21 KB Graphviz rendering for
+# humans, which no binner reads, so it is not kept.
+#
+# Named per assembler rather than one assembly_graph.*: `-L` with `-1/-2` runs two assemblers in one
+# output directory, and metaSPAdes and metaFlye both call their graph assembly_graph.gfa.
+SPADES_GRAPH = "assembly_graph_with_scaffolds.gfa"
+FLYE_GRAPH = "assembly_graph.gfa"
+MEGAHIT_INTERMEDIATES = "intermediate_contigs"
+KEPT_GRAPHS: Dict[str, str] = {
+    "megahit": "assembly_graph.megahit.fastg",
+    "metaspades": "assembly_graph.metaspades.gfa",
+    "flye": "assembly_graph.flye.gfa",
+}
+#: ``k<k>.contigs.fa`` in MEGAHIT's intermediates - the only files there the FASTG can be built from.
+MEGAHIT_K_CONTIGS = re.compile(r"^k(\d+)\.contigs\.fa$")
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -182,6 +220,17 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=HYBRID_ALIGNER,
         help="aligner used to find the reads metaSPAdes could not place, in the hybrid "
         "(--megahit --metaspades) path only (default %s)" % HYBRID_ALIGNER,
+    )
+    p.add_argument(
+        "--keep-graph",
+        action="store_true",
+        help="keep each assembler's assembly graph as a named file in the output directory, for "
+        "the tools that need a graph rather than contigs (plasmid-aware and graph-aware binners, "
+        "Hi-C placement). metaSPAdes' and metaFlye's GFA are hard-linked, so they cost no extra "
+        "disk (121 MB and 2.3 MB measured). MEGAHIT writes no graph at all, so one is built with "
+        "megahit_toolkit contig2fastg from the intermediate_contigs MEGAHIT leaves behind anyway: "
+        "235 MB and 2 seconds of one core, measured on a 117 MB assembly. Off by default; nothing "
+        "is deleted either way, and --resume --keep-graph adds the graph to a finished assembly",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -367,6 +416,142 @@ def _run_flye(args, env, flye_out, settings):
         comm(_long.HYBRID_CAVEAT)
 
 
+def _link_or_copy(src: str, dest: str) -> None:
+    """Put *src* at *dest* without paying for its bytes twice.
+
+    A hard link rather than a copy: the graphs are not small (121 MB for the metaSPAdes GFA of a
+    54 MB assembly, measured), the flag exists so a user can afford to keep one, and a copy would
+    charge them for it twice. The link also means the graph survives someone clearing the
+    assembler's own directory, which is the half of "keep" that a second path to the same inode
+    gives for free. ``os.link`` fails across filesystems and on some network mounts, which is what
+    the fallback is for - the source has already been checked to exist.
+    """
+    if os.path.lexists(dest):
+        os.remove(dest)
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copyfile(src, dest)
+
+
+def _keep_existing_graph(src: str, dest: str, assembler: str) -> List[str]:
+    """Keep the graph *assembler* already wrote at *src* as *dest*. Returns what was kept."""
+    if dry_run():
+        comm("(dry run) would keep %s's assembly graph as %s" % (assembler, dest))
+        return [dest]
+    if not os.path.isfile(src) or not os.path.getsize(src):
+        # A warning, not an error. The assembly is finished and correct by this point, and the
+        # graph is an optional extra that nothing downstream consumes yet; failing the run here
+        # would throw away hours of assembly over a file the user asked to keep as a convenience.
+        warning(
+            "%s wrote no assembly graph at %s, so there is none to keep. The assembly itself is "
+            "unaffected." % (assembler, src)
+        )
+        return []
+    _link_or_copy(src, dest)
+    comm("%s assembly graph -> %s (%s)" % (assembler, dest, human(os.path.getsize(dest))))
+    return [dest]
+
+
+def _megahit_graph_k(intermediates: str) -> Optional[int]:
+    """The largest k MEGAHIT actually wrote contigs for, or None if it wrote none.
+
+    Not ``options.json``'s ``k_max``: MEGAHIT's auto-k stops as soon as a larger k adds nothing, so
+    the measured TEST leftover assembly ran k21..k59 under a k_max of 141 and converting 141 would
+    have read a file that is not there. The largest k present is the one final.contigs.fa came from.
+    """
+    ks = [
+        int(match.group(1))
+        for match in (MEGAHIT_K_CONTIGS.match(name) for name in listdir(intermediates))
+        if match and os.path.getsize(os.path.join(intermediates, match.group(0)))
+    ]
+    return max(ks) if ks else None
+
+
+def _build_megahit_graph(
+    args: argparse.Namespace, env: Optional[str], megahit_out: str
+) -> List[str]:
+    """Convert MEGAHIT's largest-k contigs into a FASTG. Returns what was kept."""
+    dest = os.path.join(args.output, KEPT_GRAPHS["megahit"])
+    intermediates = os.path.join(megahit_out, MEGAHIT_INTERMEDIATES)
+    k = _megahit_graph_k(intermediates)
+    if k is None and not dry_run():
+        warning(
+            "MEGAHIT left no k*.contigs.fa in %s, so its assembly graph cannot be built (MEGAHIT "
+            "writes no graph itself). The assembly itself is unaffected." % intermediates
+        )
+        return []
+    # Under --dry-run nothing has been assembled, so the k is not knowable yet; print the
+    # placeholder rather than a number that would be wrong (binning._bams shows <sample>.bam for
+    # the same reason).
+    label = "<kmax>" if k is None else str(k)
+    rc = run(
+        MEGAHIT_CONTIG2FASTG.format(
+            k=label, contigs=os.path.join(intermediates, "k%s.contigs.fa" % label)
+        ),
+        env=env,
+        tool="megahit_toolkit contig2fastg",
+        stdout_path=dest,
+        check=False,
+    )
+    if dry_run():
+        comm("(dry run) would build MEGAHIT's assembly graph as %s" % dest)
+        return [dest]
+    # stdout_path creates the file before the tool runs, so an empty one here means the conversion
+    # failed, and an empty graph at the path a downstream tool is told to read is worse than none.
+    if rc != 0 or not os.path.getsize(dest):
+        os.remove(dest)
+        warning(
+            "megahit_toolkit contig2fastg failed on k%s, so no MEGAHIT graph was kept. The "
+            "assembly itself is unaffected." % label
+        )
+        return []
+    comm("MEGAHIT assembly graph (k%s) -> %s (%s)" % (label, dest, human(os.path.getsize(dest))))
+    return [dest]
+
+
+def _keep_graphs(
+    args: argparse.Namespace,
+    env: Optional[str],
+    megahit_out: str,
+    spades_out: str,
+    flye_out: str,
+    do_megahit: bool,
+    do_metaspades: bool,
+    do_flye: bool,
+) -> List[str]:
+    """Put every assembler's graph at a fixed path in the output directory, and say what it cost.
+
+    One stage of its own rather than a tail on each ``_run_*``, so ``--resume --keep-graph`` can
+    add the graphs to an assembly that already finished: metaSPAdes' and metaFlye's graphs are still
+    where they wrote them, and MEGAHIT's intermediates are still there to convert.
+    """
+    announcement("KEEPING THE ASSEMBLY GRAPHS")
+    kept: List[str] = []
+    if do_metaspades:
+        kept += _keep_existing_graph(
+            os.path.join(spades_out, SPADES_GRAPH),
+            os.path.join(args.output, KEPT_GRAPHS["metaspades"]),
+            "metaSPAdes",
+        )
+    if do_flye:
+        kept += _keep_existing_graph(
+            os.path.join(flye_out, FLYE_GRAPH),
+            os.path.join(args.output, KEPT_GRAPHS["flye"]),
+            "metaFlye",
+        )
+    if do_megahit:
+        kept += _build_megahit_graph(args, env, megahit_out)
+    if not kept:
+        warning("--keep-graph was given but no assembler left a graph to keep.")
+    elif not dry_run():
+        comm(
+            "%d assembly graph(s) kept, %s in total"
+            % (len(kept), human(sum(os.path.getsize(p) for p in kept)))
+        )
+    return kept
+
+
 def _format_assembly(
     args, megahit_out, spades_out, do_megahit, do_metaspades, flye_out=None, do_flye=False
 ):
@@ -442,7 +627,7 @@ def main(argv: List[str]) -> int:
     do_flye = bool(args.long_reads)
     do_metaspades = args.metaspades
     # MEGAHIT when nothing was picked, and the benchmark says to keep it that way. On three CAMI2
-    # gut samples co-assembled (benchmarks/results/cami2_gi.tsv, 2026-09-30) metaSPAdes returned a
+    # gut samples co-assembled (2026-09-30) metaSPAdes returned a
     # 38% longer N50 (12.9 kb vs 9.3 kb) for 3.2x the CPU-hours (245 vs 77) and 9.7x the peak RSS
     # (140 GB vs 15 GB), while assembling 14% *fewer* total bases. The contiguity is real and worth
     # having when you can afford it - hence --metaspades - but 140 GB of resident memory is more
@@ -511,6 +696,21 @@ def main(argv: List[str]) -> int:
         if do_megahit and ckpt.todo("megahit"):
             _run_megahit(args, env, megahit_out, spades_out, hybrid, settings)
             ckpt.done("megahit")
+
+        # Nothing here runs, and no marker is written, unless the flag was given: without it this
+        # module touches the assemblers' output exactly as it always has.
+        if args.keep_graph and ckpt.todo("keep_graph"):
+            _keep_graphs(
+                args,
+                env,
+                megahit_out,
+                spades_out,
+                flye_out,
+                do_megahit,
+                do_metaspades,
+                do_flye,
+            )
+            ckpt.done("keep_graph")
 
         if ckpt.todo("format"):
             _format_assembly(

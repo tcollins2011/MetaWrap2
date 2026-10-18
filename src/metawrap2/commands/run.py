@@ -61,6 +61,7 @@ from ..config import load_settings
 from ..io import reads as _reads
 from ..logging import announcement, comm, error, warning
 from ..manifest import COMPLETED, FAILED, INTERRUPTED, MANIFEST_NAME, Manifest
+from ..modules import _common
 from ..modules import binning as _binning
 from ..modules import coverage as _coverage
 from ..modules import dereplicate as _dereplicate
@@ -90,6 +91,14 @@ ALL_STEPS: Tuple[str, ...] = (
 #: depth table across a cohort's assemblies, and `dereplicate` collapses the per-sample bin sets into
 #: one catalogue - a co-assembly has one assembly and one bin set, so neither has anything to do.
 COHORT_ONLY_STEPS = frozenset({"coverage", "dereplicate"})
+
+#: What a cohort does not get when one of those steps is missing from a pinned `steps` list, said
+#: per step rather than as one sentence: dropping `coverage` and dropping `dereplicate` cost
+#: different things, and a user who left one out deliberately still needs to know which.
+COHORT_ONLY_LOSSES: Dict[str, str] = {
+    "coverage": "one depth table across every sample",
+    "dereplicate": "a non-redundant MAG catalogue",
+}
 
 #: The steps run by default: the genome-recovery path. The three that need the largest
 #: databases (kraken2, classify_bins, blobology) are opt-in via `steps`, so a default run
@@ -140,6 +149,26 @@ MEMORY_MODULES = frozenset({"assembly", "binning", "bin_refinement", "reassemble
 #: Per-sample steps; everything else operates on the study as a whole.
 PER_SAMPLE_STEPS = frozenset({"read_qc"})
 
+#: How little of its thread grant a step has to keep busy before the driver suggests a larger -j.
+#: A quarter: above that the step is threading well enough that running more of them at once mostly
+#: moves the contention around, and below it the grant is being held rather than used - read_qc on
+#: the three-sample tutorial cohort measured 1.2-2.0 cores of a large thread grant, because its parts
+#: are serial for reasons no -t can change (bmtagger is single-threaded, FastQC parallelises per
+#: file, fastp stops scaling around 16).
+IDLE_GRANT_FRACTION = 0.25
+
+#: What a study calls the two things it can be. `run` co-assembles every sample's reads into one
+#: assembly and bins that; `cohort` assembles each sample and dereplicates the per-sample bin sets.
+#: The catalogues they produce are not comparable - different genome counts, different redundancy,
+#: different per-genome coverage - and until this was recorded a finished study directory looked the
+#: same either way, so a user who ran both, or who inherited someone else's output, could not tell
+#: which of the two they were holding.
+CO_ASSEMBLY = "co-assembly"
+PER_SAMPLE = "per-sample"
+
+#: Top-level key the strategy is recorded under in the study manifest.
+STRATEGY_KEY = "study"
+
 _STATE_DIR = os.path.join(".metawrap2", "run_steps")
 
 
@@ -187,15 +216,21 @@ class Study:
         return DEFAULT_STEPS if self.coassemble else COHORT_STEPS
 
 
-def resolve_steps(study: Study) -> None:
+def resolve_steps(study: Study, mode_final: bool = True) -> None:
     """Settle *study*'s step list now that its assembly mode is known.
 
     Called again after the command line has had its say, because `--no-coassembly` changes which
     default applies; it is idempotent for a study whose steps were named explicitly.
+
+    *mode_final* is False for the call the sheet reader makes, where the mode is still provisional:
+    a sheet that says nothing about `coassemble` defaults to co-assembling, and dropping its pinned
+    `coverage` there threw the step away - and blamed a co-assembly - before `metawrap2 cohort` had
+    said it was assembling per sample. Only the mode-dependent *default* can be chosen that early;
+    taking steps away is the final mode's decision to make.
     """
     if not study.steps_chosen:
         study.steps = study.default_steps()
-    if study.coassemble:
+    if study.coassemble and mode_final:
         dropped = [s for s in study.steps if s in COHORT_ONLY_STEPS]
         if dropped:
             # Running them would be worse than skipping them: `coverage` would build a catalogue
@@ -210,6 +245,31 @@ def resolve_steps(study: Study) -> None:
                 )
             )
             study.steps = tuple(s for s in study.steps if s not in COHORT_ONLY_STEPS)
+
+
+def warn_if_cohort_steps_pinned(study: Study) -> None:
+    """Say so when a sheet's pinned `steps` turns off the stages a cohort exists for.
+
+    A sheet written for `metawrap2 run` has no reason to list `coverage` or `dereplicate` - they do
+    nothing in a co-assembly - so feeding that same sheet to `cohort`, which is the natural thing
+    since both modes read "a sample sheet", produced a pile of per-sample bins and no catalogue
+    without a word about it. The mirror case, `coassemble = true` under `cohort`, was already
+    overridden out loud; this is the same mistake pointing the other way.
+    """
+    if study.coassemble or not study.steps_chosen:
+        return
+    missing = [step for step in COHORT_ONLY_LOSSES if step not in study.steps]
+    if not missing:
+        return
+    warning(
+        "the sheet pins steps and omits %s, so this cohort will not produce %s. Remove `steps` "
+        "from the sheet to use the cohort defaults (%s)."
+        % (
+            " and ".join(missing),
+            " or ".join(COHORT_ONLY_LOSSES[step] for step in missing),
+            " -> ".join(COHORT_STEPS),
+        )
+    )
 
 
 def _as_option_list(value: object, module: str) -> List[str]:
@@ -293,7 +353,7 @@ def load_sheet(path: str) -> Study:
         module_options=module_options,
         steps_chosen=chosen,
     )
-    resolve_steps(study)
+    resolve_steps(study, mode_final=False)
     return study
 
 
@@ -304,22 +364,35 @@ def study_from_directory(directory: str) -> Study:
     return Study(samples=[Sample(name=name, r1=r1, r2=r2) for name, r1, r2 in pairs])
 
 
+#: The sheet `--example` prints, and the first thing most people run. Two things in it are filled
+#: in rather than written out: the binning tier, taken from the binning module's own default for
+#: the reason `DEFAULT_BINNERS` is derived rather than listed - this sheet used to name
+#: `--metabat2 --maxbin2` and call it the default, which was the `fast` tier, about a quarter fewer
+#: clean MAGs than the default it claimed to be - and `coassemble`, which has to match the command
+#: that printed it, because `metawrap2 cohort --example` is the documented way to start a cohort and
+#: a sheet saying `coassemble = true` made that first run open with an override warning.
 EXAMPLE_SHEET = """\
-# MetaWrap2 sample sheet. Run it with:  metawrap2 run samples.toml -o study/ -t 24
+# MetaWrap2 sample sheet. Run it with:  metawrap2 %(command)s samples.toml -o study/ -t 24
 
 [settings]
 # Co-assemble all samples together (true) or assemble each sample separately (false).
-coassemble = true
-# Which steps to run, in this order. The default omits kraken2/classify_bins/blobology
-# because they need the very large Kraken2 and BLAST databases.
-steps = ["read_qc", "assembly", "binning", "bin_refinement", "reassemble_bins", "quant_bins"]
+# `metawrap2 run` honours this line; `metawrap2 cohort` always assembles each sample separately.
+coassemble = %(coassemble)s
+# No `steps` line on purpose. The defaults are the genome-recovery path, and which steps that
+# means depends on the mode: `metawrap2 cohort` adds the coverage and dereplicate stages that
+# only exist when each sample is assembled on its own, and pinning a list here would switch them
+# off without saying so. Use --steps/--skip to change the plan for one run. kraken2,
+# classify_bins and blobology are opt-in either way, because of the databases they need.
 
-# Extra options passed through to a module, exactly as you would type them. The binners here are
-# the defaults, spelled out so they are easy to change; adding --concoct roughly quadruples what
-# binning costs and is worth it when the catalogue matters more than the clock.
+# Extra options passed through to a module, exactly as you would type them. `binning` names the
+# default tier instead of spelling out its binners, so it still means the default if the tiers
+# change; `metawrap2 binning -h` lists them (--preset fast is cheaper, --preset slow wants a
+# GPU). Naming a binner (--metabat2 --semibin2 --concoct) replaces the tier rather than adding
+# to it. The refinement thresholds are bin_refinement's own, written out because every MAG count
+# this project reports uses them.
 [modules]
-binning = "--metabat2 --maxbin2"
-bin_refinement = "-c 50 -x 10"
+binning = "--preset %(preset)s"
+bin_refinement = "-c 70 -x 10"
 
 [[samples]]
 name = "ERR011347"
@@ -337,6 +410,21 @@ r2 = "RAW_READS/ERR011348_2.fastq.gz"
 # r1 = "RAW_READS/SRR999.fastq.gz"
 # layout = "single"
 """
+
+
+def example_sheet(cohort: bool = False) -> str:
+    """The example sheet as printed for the command that asked for it.
+
+    `metawrap2 cohort --example > samples.toml` followed by `metawrap2 cohort samples.toml` is the
+    README's on-ramp, and it has to be silent: a sheet that co-assembles makes the first command a
+    new user runs open with a warning about overriding a line they never wrote, which is how people
+    learn to read past warnings.
+    """
+    return EXAMPLE_SHEET % {
+        "command": "cohort" if cohort else "run",
+        "coassemble": "false" if cohort else "true",
+        "preset": _binning.DEFAULT_PRESET,
+    }
 
 
 # --- the layout the driver owns -----------------------------------------------------------
@@ -392,6 +480,15 @@ class Layout:
     def coverage_depth(self, sample: str) -> str:
         """The depth-table slice `coverage` writes for one sample, named as that module names it."""
         return os.path.join(self.coverage_dir, _coverage.DEPTH_DIR, "%s.txt" % sample)
+
+    def coverage_bams(self, sample: str) -> str:
+        """Where `coverage --split-bams` leaves one assembly's alignments, one BAM per sample.
+
+        The directory is named for the *assembly* - which in a cohort is one per sample - and holds
+        a BAM for every sample's reads against it. That is what the binners which read alignments
+        rather than a depth table are given.
+        """
+        return os.path.join(self.coverage_dir, _coverage.BAMS_DIR, sample)
 
     @property
     def binning_dir(self) -> str:
@@ -519,6 +616,15 @@ class Step:
         if config:
             argv += ["--config", config]
         return argv
+
+
+def step_log_path(layout: Layout, step: Step) -> str:
+    """Where a step's live output goes. One definition, because it is named in three places.
+
+    The failure banner points at it, the step's opening banner points at it, and the runner writes
+    it; a second spelling would eventually point somewhere the log is not.
+    """
+    return os.path.join(layout.log_dir, "%s.log" % step.name.replace(":", "_"))
 
 
 def _qc_output_reads(layout: Layout, sample: Sample) -> List[str]:
@@ -837,18 +943,36 @@ def _cohort_steps(
     # catalogue of every sample's assembly. N alignments, not N per assembly - which is the only
     # reason multi-sample binning is affordable at cohort scale.
     cohort_coverage = "coverage" in study.steps
+    # Which binners this study runs decides what the coverage stage has to produce. A depth table
+    # serves metaBAT2 and MaxBin2; SemiBin2, VAMB, COMEBin and CONCOCT read the alignments
+    # themselves and are refused `--depth` by name - so a cohort that selects any of them (and the
+    # default pair selects SemiBin2) needs the per-assembly BAMs as well. Without this the default
+    # `cohort` planned `--depth ... --metabat2 --semibin2` and the binning step died on its own
+    # arguments, after paying for assembly and coverage.
+    needs_bams = [b for b in selected_binners(binning_opts) if b in _binning.BAM_BINNERS]
     if cohort_coverage:
         argv: List[str] = []
         for sample in samples:
             argv += ["-a", "%s=%s" % (sample, layout.sample_assembly(sample))]
         argv += ["-o", layout.coverage_dir]
+        outputs = [layout.coverage_depth(s) for s in samples]
+        if needs_bams and "binning" in study.steps:
+            argv += ["--split-bams"]
+            comm(
+                "%s %s the alignments themselves, which no coverage table can stand in for, so "
+                "the coverage stage also splits the catalogue BAMs into one set per assembly"
+                % (
+                    ", ".join("--" + b for b in needs_bams),
+                    "read" if len(needs_bams) > 1 else "reads",
+                )
+            )
         steps.append(
             Step(
                 name="coverage",
                 module="coverage",
                 argv=argv + study.extra("coverage") + all_reads,
                 inputs=[layout.sample_assembly(s) for s in samples] + all_reads,
-                outputs=[layout.coverage_depth(s) for s in samples],
+                outputs=outputs,
             )
         )
 
@@ -860,6 +984,10 @@ def _cohort_steps(
                 # and nothing aligned here at all.
                 argv += ["--depth", layout.coverage_depth(sample)]
                 inputs = [layout.sample_assembly(sample), layout.coverage_depth(sample)]
+                if needs_bams:
+                    # And the alignments themselves for the binners a table cannot serve. Both are
+                    # passed: the table still serves metaBAT2 and MaxBin2 without re-measuring.
+                    argv += ["--bams", layout.coverage_bams(sample)]
             else:
                 # No coverage stage means single-sample coverage, which is a weaker binning and is
                 # what the user asked for by dropping the step.
@@ -1071,6 +1199,36 @@ class StepState:
         self.manifest.finish(step.name, started, status, outputs=step.outputs, log=log, usage=usage)
 
 
+def strategy_record(study: Study) -> Dict[str, Any]:
+    """How this study's catalogue was built: the strategy, the samples, and dereplication.
+
+    Three facts rather than one, because the strategy alone does not describe the catalogue.
+    "per-sample" over forty samples and over two are different objects, and a per-sample study that
+    skipped `dereplicate` never collapsed its per-sample bin sets at all, so its genome count is
+    redundant by construction - the single most misleading number to compare against a co-assembly.
+    """
+    return {
+        "strategy": CO_ASSEMBLY if study.coassemble else PER_SAMPLE,
+        "samples": len(study.samples),
+        "dereplicated": "dereplicate" in study.steps,
+    }
+
+
+def record_strategy(state: StepState, study: Study) -> Dict[str, Any]:
+    """Record the strategy in the study manifest, beside the steps it already describes.
+
+    The manifest is the study's own summary and the only thing the driver writes for the study as a
+    whole, so this extends it rather than adding a second file to keep in step with it; `metawrap2
+    status <study> --json` prints it back. A new top-level key needs no schema bump - an older
+    manifest simply has no `study` block, which is exactly what a study run before this should look
+    like, and every reader goes through `data["steps"]`.
+    """
+    record = strategy_record(study)
+    state.manifest.data[STRATEGY_KEY] = record
+    state.manifest.save()
+    return record
+
+
 # --- the driver ---------------------------------------------------------------------------
 
 
@@ -1175,7 +1333,7 @@ def run_step(
     step may have a diagnosable reason in its log.
     """
     os.makedirs(layout.log_dir, exist_ok=True)
-    log_path = os.path.join(layout.log_dir, "%s.log" % step.name.replace(":", "_"))
+    log_path = step_log_path(layout, step)
     argv = step.command(threads, config, global_flags, memory_gb=memory_gb)
     if dry_run:
         print("[plan] %s" % " ".join(shlex.quote(a) for a in argv))
@@ -1194,7 +1352,15 @@ def run_step(
             # Measured rather than merely timed: the step's real peak memory is the one number
             # that would let the memory budgets and space multipliers be calibrated instead of
             # guessed. See metawrap2.usage.
-            rc, usage = _usage.run_measured(argv, stdout=log, stderr=subprocess.STDOUT)
+            # The driver measures every step here and writes the cost line itself, so the step
+            # is told it is inside a study and does not print a second, separately-derived copy
+            # into the same log. Passed to the child only: setting it in this process would leak
+            # into everything else the interpreter goes on to do.
+            step_env = dict(os.environ)
+            step_env[_common.DRIVEN_BY_RUN_ENV] = "1"
+            rc, usage = _usage.run_measured(
+                argv, stdout=log, stderr=subprocess.STDOUT, env=step_env
+            )
             log.write("\n[metawrap2] %s\n" % _usage.summarise(usage))
         status = COMPLETED if rc == 0 else FAILED
     except KeyboardInterrupt:
@@ -1207,6 +1373,47 @@ def run_step(
         if state is not None:
             state.finish(step, started, status, log=log_path, usage=usage)
     return step, status, log_path
+
+
+def cores_busy(usage: Dict[str, Any]) -> Optional[float]:
+    """How many cores a step really kept busy: CPU seconds over wall seconds.
+
+    The same figure ``metawrap2.usage.summarise`` already prints after every step. None when the
+    platform could not measure CPU time, so nothing advises on a number that does not exist.
+    """
+    if "user_seconds" not in usage:
+        return None
+    wall = float(usage.get("wall_seconds") or 0)
+    if wall <= 0:
+        return None
+    return (float(usage.get("user_seconds", 0)) + float(usage.get("system_seconds", 0))) / wall
+
+
+def parallelism_advice(
+    module: str, busy: float, threads: int, samples: int, workers: int
+) -> Optional[str]:
+    """A ``-j`` suggestion for a per-sample step that left most of its thread grant idle.
+
+    Returns None when there is nothing to say. The measurement is already in hand - the step's own
+    usage record - so this costs nothing and answers the question the numbers raise: read_qc
+    reporting "1.7 cores busy" of a large thread grant, three times in a row at ``-j 1``, means the
+    study took three times the wall clock it needed for the same CPU.
+
+    Advice and not a changed default: raising -j multiplies peak memory as well as occupancy, and
+    this release has measured the cores a step uses but not the memory of running N of them at once.
+    """
+    if busy > threads * IDLE_GRANT_FRACTION:
+        return None
+    # Never suggest more than the grant can still feed at the measured usage, so the suggestion
+    # cannot ask for more cores than the budget has.
+    fits = max(1, int(threads // max(1.0, busy)))
+    suggest = min(samples, fits)
+    if suggest <= workers:
+        return None
+    return (
+        "%s used %.1f of its %d granted cores; with %d sample(s) to run, -j %d would spend the "
+        "same CPU in less wall time." % (module, busy, threads, samples, suggest)
+    )
 
 
 def execute(
@@ -1224,6 +1431,7 @@ def execute(
     """Run the planned steps in order, grouping the parallelisable ones. Returns an exit code."""
     index = 0
     completed = 0
+    advised = False  # whether the -j suggestion has already been made for this run
     while index < len(steps):
         step = steps[index]
         # Gather a run of consecutive steps that share a parallel group.
@@ -1273,6 +1481,14 @@ def execute(
             )
         else:
             announcement("RUNNING %s" % pending[0].name.upper())
+        # Where to look while it runs. The aggregate output is quiet during a four-hour step, and
+        # the per-step log was only ever named in the failure banner - so a user watching a long
+        # step had to guess that LOGS/<step>.log exists. One line, before the wait rather than
+        # after it.
+        if len(pending) == 1:
+            comm("live log: %s" % step_log_path(layout, pending[0]))
+        else:
+            comm("live logs: %s" % os.path.join(layout.log_dir, "<step>.log"))
 
         failures = []
         try:
@@ -1302,6 +1518,17 @@ def execute(
                             if cost
                             else "finished %s" % s.name
                         )
+                        # Once per run, not once per step: the first measured step of a stage says
+                        # everything the rest would, and a budget note repeated per sample reads
+                        # like a fault.
+                        busy = cores_busy(cost) if not advised and len(pending) > 1 else None
+                        if busy is not None:
+                            advice = parallelism_advice(
+                                s.module, busy, per_step_threads, len(pending), workers
+                            )
+                            if advice:
+                                comm(advice)
+                                advised = True
                     else:
                         failures.append((s, log_path))
         except KeyboardInterrupt:
@@ -1470,7 +1697,7 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
     args = ap.parse_args(argv)
 
     if args.example:
-        print(EXAMPLE_SHEET)
+        print(example_sheet(cohort=cohort))
         return 0
     if not args.sheet or not args.output:
         ap.error(
@@ -1505,6 +1732,10 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
     # After the mode is final, not before: --no-coassembly changes which default step list applies,
     # and --skip has to subtract from whichever one won.
     resolve_steps(study)
+    if not args.steps:
+        # Only for a pin that came from the sheet. `--steps` on this command line is already in
+        # front of the user, and repeating it back to them would be noise.
+        warn_if_cohort_steps_pinned(study)
     if args.skip:
         study.steps = tuple(s for s in study.steps if s not in args.skip)
     if not study.steps:
@@ -1570,6 +1801,15 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         % ("co-" if study.coassemble else "per-sample", threads, args.jobs)
     )
     comm("output: %s" % layout.root)
+    strategy = strategy_record(study)
+    comm(
+        "catalogue strategy: %s, %d sample(s), dereplication %s"
+        % (
+            strategy["strategy"],
+            strategy["samples"],
+            "on" if strategy["dereplicated"] else "off",
+        )
+    )
     comm("Resource budget: %s" % budget.describe())
     overrides = _limits.overrides()
     if overrides:
@@ -1579,6 +1819,10 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         )
 
     state = StepState(layout, resume=resume, strict_fingerprints=args.strict_fingerprints)
+    # Written before the first step starts, so a study that fails or is interrupted half way still
+    # says which of the two analyses it was. Not under --dry-run, which writes nothing else either.
+    if not dry_run:
+        record_strategy(state, study)
     return execute(
         steps,
         layout,

@@ -17,17 +17,17 @@ MetaWrap2 keeps one record per run, in the output directory, and one per machine
 
 ### Database fingerprints
 
-A database updated in place keeps its path but not its contents. For each database,
-`run_environment.json` records:
+A database can be updated in place under the same path. For each database, `run_environment.json`
+records:
 
 - which of its defining files are present,
 - their total size,
 - a fingerprint built from their names, sizes and modification times.
 
-The fingerprint changes on rebuild, not on read, so you can find which analyses used a database
-you have since replaced. `metawrap2 doctor` reports the same fingerprints.
+The fingerprint changes when the database is rebuilt, so you can find which analyses used a
+database you have since replaced. `metawrap2 doctor` reports the same fingerprints.
 
-### The exact source tree
+### Source tree
 
 A version such as `2.1.0` can cover many source trees, including locally edited ones. From a git
 checkout, `run_environment.json` also records the commit, branch, `git describe`, and whether the
@@ -36,15 +36,15 @@ is the full description.
 
 ## Lineage propagation
 
-When an input is a MetaWrap2 output directory, its history is merged in (de-duplicated across
-several inputs). Provenance carries across chained runs (QC → assembly → binning → bin_refinement →
-reassembly), so a final `provenance.txt` traces back to the raw reads.
+When an input is a MetaWrap2 output directory, its history is merged in, de-duplicated across
+inputs. Provenance carries across chained runs (QC → assembly → binning → bin_refinement →
+reassembly), so the final `provenance.txt` traces back to the raw reads.
 
-## Per machine, for as long as MetaWrap2 is installed
+## Per machine
 
 Every module invocation appends a line to `~/.metawrap2/history.jsonl` (or `$METAWRAP2_HISTORY`).
-The file survives deleting outputs, is never pruned, and is greppable. A failed history write does
-not stop the run.
+The file is kept when outputs are deleted and is never pruned. A failed history write does not stop
+the run.
 
 ```bash
 metawrap2 history                     # the 20 most recent runs
@@ -54,21 +54,19 @@ metawrap2 history --stats             # runs and time spent, per module
 metawrap2 history --diff RUN RUN      # what differed between two runs
 ```
 
-Each run writes a `started` entry and then its outcome, so a killed run still leaves a trace.
+Each run writes a `started` entry and then its outcome, so a killed run still has an entry.
 
 ## Verified resume
 
 `--resume` reads the run manifest (`manifest.json`): each step's command, duration, outcome, and
-fingerprinted inputs and outputs. A step is skipped only if:
+fingerprinted inputs and outputs. A step is skipped if:
 
 - it completed,
 - its outputs are all still present and non-empty, and
 - none of its inputs has changed.
 
-A step whose outputs were deleted, or whose inputs changed, is re-run.
-
-Fingerprints hash the size plus the first and last megabyte, so a 100 GB library checks as fast
-as a small one. `--strict-fingerprints` hashes whole files.
+Fingerprints hash the file size plus the first and last megabyte, so checking a 100 GB library
+takes as long as a small one. `--strict-fingerprints` hashes whole files.
 
 ```bash
 metawrap2 status study/                  # per step: status, duration, and what --resume would do
@@ -77,7 +75,7 @@ metawrap2 status study/ --audit          # is every recorded output still presen
 ```
 
 The `--resume` column uses the same check as `--resume`. The audit also runs at the end of every
-run, flagging steps that reported success but produced nothing.
+run and flags steps that reported success but produced no output.
 
 ## Reproducing a run
 
@@ -89,11 +87,17 @@ run, flagging steps that reported success but produced nothing.
 - `metawrap2 --dry-run <module> ...` prints and records the commands without executing them.
 - `metawrap2 --resume <module> -o <dir> ...` continues a run, re-running anything it cannot verify.
 
-## What each step cost
+## Per-step resource use
 
 Steps are reaped with `os.wait4`, so the manifest records each step's peak memory, CPU time and
 wall time. `metawrap2 calibrate <study>...` compares them with the built-in disk and memory
 estimates.
 
-Caveat: the output-to-input ratio is a lower bound on the disk multiplier, because scratch is
-deleted when a step finishes and its peak is not recorded. Peak memory is exact.
+A step that used a GPU also records `peak_gpu_memory_bytes` and `gpu_devices`: the most VRAM a single
+device held for the step's own processes, sampled every 5 seconds while it ran, since `rusage` does not
+see GPU memory. Other jobs on the same card are not counted, and devices are not summed, so the
+figure says whether the step fits on one card. A step that used no GPU records neither key.
+
+The output-to-input ratio is a lower bound on the disk multiplier, because scratch is deleted when
+a step finishes and its peak size is not recorded. Peak memory is exact; peak VRAM is a 5-second
+sample, so a shorter spike can be missed.

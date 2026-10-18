@@ -1,0 +1,29 @@
+SUMMARISING RUN PARAMETERS
+==========================
+Input filename: ERR011347_1.fastq
+Trimming mode: paired-end
+Trim Galore version: 0.6.10
+Cutadapt version: 4.6
+Quality Phred score cutoff: 20
+Adapter sequence: 'AGATCGGAAGAGC' (Illumina TruSeq, Sanger iPCR; auto-detected)
+Minimum required adapter overlap (stringency): 1 bp
+Minimum required sequence length for both reads before a sequence pair gets removed: 20 bp
+
+=== Summary ===
+
+Total reads processed:              12,621,104
+Reads with adapters:                 1,012,884 (8.0%)
+Reads written (passing filters):    12,621,104 (100.0%)
+
+Total basepairs processed:       946,582,800 bp
+Quality-trimmed:                 503,117,441 bp (53.2%)
+Total written (filtered):        441,002,117 bp (46.6%)
+
+RUN STATISTICS FOR INPUT FILE: ERR011347_1.fastq
+=================================================
+12621104 sequences processed in total
+Sequences removed because they became shorter than the length cutoff of 20 bp:	291044 (2.3%)
+
+Total number of sequences analysed for the length cutoff of 20 bp: 12621104
+
+Number of sequence pairs removed because at least one read was shorter than the length cutoff (20 bp): 584125 (4.63%)

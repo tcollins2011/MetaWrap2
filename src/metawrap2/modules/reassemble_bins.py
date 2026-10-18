@@ -16,7 +16,7 @@ import argparse
 import concurrent.futures
 import os
 import shutil
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from .. import checkm as _checkm
 from ..cliformat import bounded_float, bounded_int, make_parser, percent
@@ -116,6 +116,14 @@ DEFAULT_MAX_COVERAGE = 50.0
 #: Seed for the thinning. Fixed, so a re-run recruits and keeps the same reads: a subsample that
 #: changed between runs would make reassembly irreproducible for the same reason an unseeded binner is.
 SUBSAMPLE_SEED = 1337
+#: Marks the third candidate: the original bin, copied in beside its two reassemblies so that one
+#: CheckM pass scores all three. ``choose_best_bin`` reads this suffix back off the stats row as the
+#: candidate's style, and the summary counts it, so the three places agree on one spelling.
+ORIG_SUFFIX = ".orig"
+#: The two read-recruitment cut-offs every bin is reassembled at.
+REASSEMBLY_STYLES = ("strict", "permissive")
+#: Every candidate style, so the summary can report a zero rather than omit a style nothing won.
+STYLES = REASSEMBLY_STYLES + (ORIG_SUFFIX.lstrip("."),)
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -326,7 +334,7 @@ def _raise_open_file_limit() -> None:
 
 
 def _prepare_original_bins(args, original_bins: str) -> None:
-    """Populate *original_bins* with clean .fa bin files (handles the MDMcleaner layout)."""
+    """Populate *original_bins* with clean bin files, named BIN_EXTENSION (MDMcleaner layout too)."""
     if dry_run():
         return
     shutil.rmtree(original_bins, ignore_errors=True)
@@ -473,7 +481,7 @@ def _clean_previous_run(out: str) -> None:
     The finished layout puts the chosen bins in ``reassembled_bins`` and everything they were chosen
     from in ``work_files``, and the reassembly step adds to ``reassembled_bins`` rather than replacing
     it. So without this, a second run's candidate pool contained the first run's promoted winners -
-    including its ``.orig.fa`` copies of bins that may since have changed - and "the best version of
+    including its ``.orig`` copies of bins that may since have changed - and "the best version of
     each bin" was chosen across two runs. Nothing about the output would have said so.
 
     Callers gate this on ``--force``: ``--resume`` reaches the same already-existing folder and means
@@ -488,6 +496,62 @@ def _clean_previous_run(out: str) -> None:
                 shutil.rmtree(path, ignore_errors=True)
             else:
                 os.remove(path)
+
+
+def _stage_original_candidates(original_bins: str, reassembled: str) -> int:
+    """Copy every original bin in beside its reassemblies as the ``.orig`` candidate. Returns how many.
+
+    The candidate name has to end in :data:`BIN_EXTENSION`, because one CheckM run scores the whole
+    directory and it is invoked ``-x fasta`` (see :func:`metawrap2.checkm.run_checkm`). This copied to
+    a hardcoded ``.orig.fa`` - a leftover from the project's ``.fa`` -> ``.fasta`` rename - so CheckM
+    never saw the originals, ``choose_best_bin`` could only ever return a reassembly, and
+    ``original_bins.stats.tsv`` came out header-only. On a 26-bin run that put 26 ``.fa`` files in a
+    directory of 52 ``.fasta`` ones, replaced 4 bins (15%) with a reassembly worse than the original,
+    and reported it as "0 bins were not improved by any reassembly".
+    """
+    count = 0
+    for base in list_bins(original_bins, (BIN_EXTENSION,)):
+        shutil.copy(
+            os.path.join(original_bins, base),
+            os.path.join(reassembled, os.path.splitext(base)[0] + ORIG_SUFFIX + BIN_EXTENSION),
+        )
+        count += 1
+    return count
+
+
+def _style_counts(names: Iterable[str]) -> Dict[str, int]:
+    """How many of the chosen ``<bin>.<style>`` names each style won, keyed by style.
+
+    Read off the style suffix rather than by asking whether "orig" appears anywhere in the filename:
+    a bin called ``bin_orig_site2`` matched all three substring tests at once, so the three reported
+    counts could add up to more than the number of bins chosen.
+    """
+    counts: Dict[str, int] = {style: 0 for style in STYLES}
+    for name in names:
+        style = name.rpartition(".")[2]
+        counts[style] = counts.get(style, 0) + 1
+    return counts
+
+
+def _summary_message(names: Sequence[str]) -> str:
+    """The closing summary: how the chosen bins split across the three candidates.
+
+    *names* is what ``choose_best_bin`` selected, so the counts are the selection rather than a
+    separate recount of the directory. The total is the number of bins chosen, which can be fewer
+    than the number of input bins - a bin whose every version fails ``-c``/``-x`` is not selected at
+    all and so is in none of the three counts.
+
+    Worded to report the "kept its original" count as the measured outcome it now is. While the
+    original was not a candidate the old wording ("%d bins were not improved by any reassembly")
+    printed a 0 that only restated the defect that excluded it.
+    """
+    counts = _style_counts(names)
+    return (
+        "Reassembly results are in! Of %d bins, %d were improved by the 'strict' reassembly and %d "
+        "by the 'permissive' reassembly; %d kept their original bin, which scored better than "
+        "either of its reassemblies."
+        % (len(names), counts["strict"], counts["permissive"], counts["orig"])
+    )
 
 
 def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
@@ -526,15 +590,12 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
             ),
             env=None,
             tool="plot_reassembly",
+            check=False,
         )
         return
 
-    # keep the original bins alongside the reassemblies as the ".orig" candidate
-    for base in list_bins(original_bins, (BIN_EXTENSION,)):
-        shutil.copy(
-            os.path.join(original_bins, base),
-            os.path.join(reassembled, os.path.splitext(base)[0] + ".orig.fa"),
-        )
+    staged = _stage_original_candidates(original_bins, reassembled)
+    comm("staged %d original bin(s) for scoring as the '%s' candidate" % (staged, ORIG_SUFFIX))
 
     comm("Running CheckM on best bins (reassembled and original)")
     stats = _checkm.run_checkm(
@@ -560,15 +621,9 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
         shutil.copy(os.path.join(reassembled, name + BIN_EXTENSION), best_dir)
     os.remove(chosen)
 
+    announcement(_summary_message(names))
+
     best = os.listdir(best_dir)
-    o = len([f for f in best if "orig" in f])
-    s = len([f for f in best if "strict" in f])
-    per = len([f for f in best if "permissive" in f])
-    announcement(
-        "Reassembly results are in! %d bins were improved with 'strict' reassembly, %d "
-        "bins were improved with 'permissive' reassembly, and %d bins were not improved "
-        "by any reassembly, and thus will stay the same." % (s, per, o)
-    )
     if not best:
         error(
             "there are no good bins found in %s - something went wrong with choosing the best "
@@ -606,8 +661,15 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
         if lines:
             out_fh.write(lines[0])
         for line in lines[1:]:
-            if "orig" in line:
+            # Matched on the row's own style suffix rather than on "orig" appearing anywhere in the
+            # line: the lineage column is free text and a bin can be named for its site, either of
+            # which would put a reassembly's row into the originals' table.
+            if line.split("\t", 1)[0].endswith(ORIG_SUFFIX):
                 out_fh.write(line)
+    # check=False, like the CheckM QA plot above: this is the last thing the step does, and by here
+    # the chosen bins, both .stats.tsv tables and the CheckM output are all written and complete. A
+    # figure that cannot be drawn must not throw away an hour of finished reassembly - the crash it
+    # used to cause came 62m53s into a run.
     run(
         PLOT_REASSEMBLY.format(
             out=out,
@@ -618,7 +680,13 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
         ),
         env=None,
         tool="plot_reassembly",
+        check=False,
     )
+    if not os.path.isfile(os.path.join(out, "reassembly_results.png")):
+        warning(
+            "Something went wrong with making the reassembly summary plots. The bins in %s and "
+            "the stats tables beside them are complete - only the figure is missing." % reassembled
+        )
 
 
 def main(argv: List[str]) -> int:
@@ -744,10 +812,14 @@ def main(argv: List[str]) -> int:
             if not to_assemble and dry_run():
                 # No reads were recruited (nothing ran), so show the per-bin SPAdes calls for
                 # the bins the user actually passed in.
+                # FASTA_EXTENSIONS, not a (".fa", ".fasta") pair of its own: a bin folder of
+                # ``.fna`` or ``.fas`` files is accepted by this module's own input validation, and
+                # the narrower pair listed none of them, so --dry-run printed no SPAdes call at all
+                # for the bins the user had.
                 to_assemble = [
                     "%s.%s_1.fastq" % (os.path.splitext(b)[0], style)
-                    for b in list_bins(args.bins, (".fa", ".fasta"))
-                    for style in ("strict", "permissive")
+                    for b in list_bins(args.bins, FASTA_EXTENSIONS)
+                    for style in REASSEMBLY_STYLES
                 ]
             if args.parallel:
                 with concurrent.futures.ThreadPoolExecutor(

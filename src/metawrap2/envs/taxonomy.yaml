@@ -9,6 +9,19 @@ channels:
   - bioconda
 dependencies:
   - kraken2 >=2.1.2
+  # Next to kraken2 because it is not an alternative to it but the second half of it: kraken2 reports
+  # the reads assigned *at* each node, and a read matching sequence conserved across a genus is
+  # assigned to the genus, so the species rows of a report are not a composition. Bracken
+  # redistributes those reads down to one rank using the k-mer distribution of the kraken2 database.
+  #
+  # It costs nothing here - 507 kB, and it declares kraken2 as its own dependency, so this env was
+  # always going to be where it lives. What it costs is a database: `bracken-build` writes
+  # databaseNmers.kmer_distrib into the kraken2 database directory, per read length, and the
+  # distribution is only valid for the kraken2 database it was built from.
+  #
+  # Note for anyone matching versions: bioconda's bracken 3.1 ships a wrapper whose VERSION string
+  # says 3.0.1, so `bracken -v` and the package version disagree. The pin is on the package.
+  - bracken >=3.0
   - krona >=2.8
   - taxator-tk >=1.3.3e
   - blast >=2.13

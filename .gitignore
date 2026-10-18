@@ -22,6 +22,12 @@ site/
 
 # Benchmark datasets: tens of GB, fetched with `metawrap2 benchmark fetch`
 benchmarks/data/
+benchmarks/work/
+benchmarks/results/
+benchmarks/figure_inputs/
+benchmarks/make_figures.py
+benchmarks/make_release_figures.py
+benchmarks/coverage_fidelity.py
 
 # Local development helpers, not shipped
 dev/

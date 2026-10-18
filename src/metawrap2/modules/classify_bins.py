@@ -233,8 +233,7 @@ def main(argv: List[str]) -> int:
         #
         # The default has not been flipped to --gtdbtk, which would be the obvious fix, for two
         # reasons. Flipping it turns a working install into a failing one for everyone without
-        # GTDB's reference data, and this project only moves a default on a measurement committed to
-        # benchmarks/results/ - which would need both NCBI nt and GTDB R2xx present at once to
+        # GTDB's reference data, and this project only moves a default on a benchmark measurement - which would need both NCBI nt and GTDB R2xx present at once to
         # produce. Neither is a reason the default is right; both are reasons it has not moved yet.
         warning(
             "the MEGABLAST + taxator-tk path is deprecated: taxator-tk has had no upstream release "

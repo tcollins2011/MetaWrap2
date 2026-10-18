@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .. import checkm as _checkm
 from .. import gunc as _gunc
+from .. import mimag as _mimag
 from .. import recovery as _recovery
 from .. import refinement as _refinement
 from ..cliformat import bounded_float, make_parser, percent
@@ -281,6 +282,46 @@ def collect_bin_sets(args) -> List[str]:
             "that result with the rest." % (len(ordered), MAX_BIN_SETS)
         )
     return ordered
+
+
+def drop_empty_bin_sets(bin_sets: Sequence[str]) -> List[str]:
+    """The bin sets that hold at least one bin, warning about each one that holds none.
+
+    A binner that finds nothing to cluster writes an empty folder and exits 0 (metaBAT2 on a small
+    assembly does), and that is a result, not a failure: refining the other sets is still worth
+    doing. Only a folder that exists and has no FASTA in it is dropped. A missing path is left for
+    the input checks to report, since that is a typo rather than an empty result. When every set is
+    empty the result is an empty list, and the caller writes an empty final set rather than failing.
+    """
+    kept: List[str] = []
+    for index, path in enumerate(bin_sets):
+        if os.path.isdir(path) and not any(
+            name.endswith(tuple(FASTA_EXTENSIONS)) for name in os.listdir(path)
+        ):
+            warning("bin set %d (%s) has no bins in it; refining without it." % (index + 1, path))
+            continue
+        kept.append(path)
+    if not kept:
+        warning(
+            "Every bin set given is empty (%s), so there is nothing to refine; writing an empty "
+            "final bin set.\nCheck the binning logs: a binner that makes no bins usually had too "
+            "few contigs above its length cut-off, or no coverage for them." % ", ".join(bin_sets)
+        )
+    elif len(kept) < len(bin_sets):
+        comm(
+            "Refining %d of %d bin sets; they are relabelled %s in order."
+            % (len(kept), len(bin_sets), ", ".join(bin_set_label(i) for i in range(len(kept))))
+        )
+    return kept
+
+
+def write_empty_result(out: str, completeness: float, contamination: float) -> str:
+    """Write the final bin set for a run with no bins: an empty folder and a header-only table."""
+    final = os.path.join(out, refined_bins_dirname(completeness, contamination))
+    os.makedirs(final, exist_ok=True)
+    with open(final + STATS_SUFFIX, "w") as fh:
+        fh.write("\t".join(_checkm.STATS_HEADER) + "\n")
+    return final
 
 
 def bin_set_label(index: int) -> str:
@@ -717,7 +758,18 @@ def main(argv: List[str]) -> int:
             "Drop --skip-consolidation to run %s, or drop --consolidator to pick the best single "
             "bin set without mixing bins." % (args.consolidator, args.consolidator)
         )
-    bin_sets = collect_bin_sets(args)
+    given = collect_bin_sets(args)
+    bin_sets = drop_empty_bin_sets(given)
+    if not bin_sets:
+        rec = start_run("bin_refinement", args, env, settings, inputs=list(given))
+        try:
+            if not dry_run():
+                final = write_empty_result(args.output, args.completeness, args.contamination)
+                comm("0 bins -> %s" % final)
+            announcement("BIN_REFINEMENT FINISHED WITH NO BINS")
+        finally:
+            finish_run(rec, args.output)
+        return 0
     validate_inputs(
         "bin_refinement",
         [
@@ -1229,6 +1281,26 @@ def main(argv: List[str]) -> int:
                 ckpt.done("gunc")
         elif args.run_gunc:
             comm("skipping GUNC (already done; --resume)")
+
+        # ── MIMAG tiers for the final bin set ───────────────────────────────────────────────
+        # Here rather than in checkm.run_checkm because this is the module whose output is the
+        # answer: the hybrid sets scored on the way in are candidates, and tagging each of them
+        # would put a quality claim on bins that were discarded.
+        #
+        # No rRNA evidence exists at this point and that is not a defect - refinement runs before
+        # annotate, so nothing has searched these bins for a 16S yet. Bins that clear 90/5 are
+        # therefore tagged high_quality_unverified_rrna, which is the distinction this step is for:
+        # it says "the completeness half passed and the rRNA half was not measured", where a plain
+        # "medium" would report a measurement that was never made. Re-running after
+        # `annotate --bakta` resolves them.
+        if not dry_run() and os.path.isdir(final_bins):
+            stats_path = final_bins + STATS_SUFFIX
+            assessments = _checkm.tag_mimag(stats_path)
+            if assessments:
+                comm(_mimag.summarise(assessments))
+                counts = _mimag.tally(assessments)
+                if counts[_mimag.MimagTag.HIGH_UNVERIFIED]:
+                    comm(_mimag.NO_EVIDENCE_HINT)
 
         # What the bin set does not say about itself. Both cheap, and both change what a reader
         # concludes rather than changing a bin - see metawrap2.recovery.

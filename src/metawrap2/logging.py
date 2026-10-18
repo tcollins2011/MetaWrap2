@@ -33,7 +33,8 @@ import logging
 import logging.handlers
 import os
 import sys
-from typing import NoReturn, Optional, TextIO
+import textwrap
+from typing import List, NoReturn, Optional, TextIO
 
 from .constants import BANNER_MAX_LINE as MAX_LINE
 from .constants import BANNER_WIDTH as WIDTH
@@ -68,34 +69,64 @@ _console_handler: Optional[logging.Handler] = None
 _file_handler: Optional[logging.Handler] = None
 
 
+#: How many delimiters frame each side of a content line, and therefore how much of the box
+#: width is border rather than text.
+_EDGE = 5
+
+#: The space that actually exists between the two borders. Text wider than this cannot be padded
+#: into the box at all, so it is the hard ceiling on the wrap column whatever the style says.
+_INNER = WIDTH - 2 * _EDGE
+
+#: The column the text is wrapped to: the style's line length, clamped to what fits.
+_WRAP = min(MAX_LINE, _INNER)
+
+
+def wrap_banner_text(message: str) -> List[str]:
+    """Break *message* into the lines that go inside the banner, each at most :data:`_WRAP` wide.
+
+    Explicit newlines are honoured as line breaks, because every caller that writes one means one:
+    a sentence, then a command to copy, then a closing sentence. Each of those segments is then
+    wrapped to the text column.
+
+    The wrapping has to happen *before* the padding, which is what this exists to guarantee.
+    The previous rendering padded each line to the box width first, measuring it with
+    ``len(segment)`` while the segment still had the author's newlines inside it - so the right
+    border was positioned from the full length of a multi-line segment and ended up printed after
+    the first break, on a line of its own. Three of the four lines of `quickstart`'s closing
+    banner came out malformed that way, and that banner is the last thing a first install prints.
+    """
+    lines: List[str] = []
+    for segment in message.split("\n"):
+        text = segment.strip()
+        if not text:
+            # An intentional blank line between paragraphs; kept so the box keeps the author's
+            # spacing rather than running two paragraphs together.
+            lines.append("")
+            continue
+        # break_long_words and break_on_hyphens are both off: the long tokens in these messages
+        # are paths, URLs and commands the user is meant to copy, and a copy with a line break
+        # through the middle of it does not run.
+        lines.extend(
+            textwrap.wrap(text, width=_WRAP, break_long_words=False, break_on_hyphens=False)
+        )
+    return lines or [""]
+
+
 def format_comment(message: str, delim: str) -> str:
-    """Return the banner-boxed rendering of *message*, identical to the legacy script.
+    """Return the banner-boxed rendering of *message*.
 
     Historically this lived in ``print_comment.py`` (Python 2), where ``/2`` was integer
-    division. We use ``//`` here so the spacing is identical under Python 3 instead of
-    crashing on ``" " * float``.
+    division; ``str.center`` reproduces that spacing exactly (the odd space goes to the right)
+    without the float that crashed under Python 3.
+
+    A single word longer than the text column is left to overrun the right border rather than be
+    cut in two: an unbreakable token here is a path or a command, and a user who pastes half of
+    one gets a confusing error instead of an ugly line.
     """
+    border = delim * _EDGE
     out = ["\n" + delim * WIDTH]
-
-    # Legacy behavior: `line` is seeded empty, so the first word keeps a leading space.
-    rendered = []
-    line = ""
-    for word in message.split(" "):
-        if (len(line) + 1 + len(word)) > MAX_LINE:
-            rendered.append(line)
-            line = word
-        else:
-            line = line + " " + word
-    rendered.append(line)
-
-    for line in rendered:
-        edge1 = (WIDTH - len(line)) // 2 - 5
-        edge2 = WIDTH - edge1 - len(line) - 10
-        # guard against pathological long lines so we never emit negative padding
-        edge1 = max(edge1, 0)
-        edge2 = max(edge2, 0)
-        out.append(delim * 5 + " " * edge1 + line + " " * edge2 + delim * 5)
-
+    for line in wrap_banner_text(message):
+        out.append(border + line.center(_INNER) + border)
     out.append(delim * WIDTH + "\n")
     return "\n".join(out)
 

@@ -19,11 +19,12 @@ import argparse
 import os
 import re
 import shutil
-from typing import IO, Dict, List, Tuple
+from typing import IO, Dict, List, Optional, Sequence, Tuple
 
 from .. import binsplit as _binsplit
 from .. import checkm as _checkm
 from .. import depth as _depth
+from .. import limits as _limits
 from .. import longreads as _long
 from ..aligners import ALIGNERS, DEFAULT_ALIGNER, INDEX_SUFFIXES
 from ..cliformat import bounded_int, make_parser, percent
@@ -72,7 +73,20 @@ METABAT2 = (
     "metabat2 -i {assembly} -a {depth} -o {out}/metabat2_bins/bin -m {metabat_len}"
     " -t {threads} --seed {seed} --unbinned"
 )
-MAXBIN2 = "run_MaxBin.pl -contig {assembly} -markerset {markers} -thread {threads} -min_contig_length {min_len} -out {maxbin_out}/bin -abund_list {abund_list}"
+MAXBIN2 = (
+    "run_MaxBin.pl -contig {assembly} -markerset {markers} -thread {threads}"
+    " -min_contig_length {min_len} -out {maxbin_out}/bin -abund_list {abund_list}"
+    " -max_iteration {max_iteration}"
+)
+#: MaxBin2's EM iteration ceiling, passed explicitly because leaving it out does not mean "fewer":
+#: MaxBin2's own default is 50 and `run_MaxBin.pl` applies it silently. The cost is *per iteration*
+#: and scales with contigs x abundance columns - measured by a user at ~53 min/iteration on a
+#: 418k-contig water co-assembly with 36 samples, so the `fast` preset's MaxBin2 alone can run for
+#: ~40 hours there against the 13.8 CPU-hours the CAMI2 tier table reports for the whole preset.
+#: The value is MaxBin2's default, so this changes no result: it makes the ceiling visible and
+#: lowerable (`--maxbin2-max-iteration`) instead of hidden in another tool's defaults.
+MAXBIN2_MAX_ITERATION = 50
+
 CONCOCT_CUTUP = "cut_up_fasta.py {assembly} -c 10000 --merge_last -b {bed} -o 0"
 CONCOCT_COVERAGE = "concoct_coverage_table.py {bed} {bams}"
 CONCOCT = (
@@ -177,8 +191,7 @@ SEMIBIN2_SEED = 1337
 #:
 #: * A binner whose training silently moves to an accelerator is not measured on the same axis as
 #:   metaBAT2, and worse, it would be
-#:   *chosen* on hardware most people running a metagenomics pipeline do not have. The machine these
-#:   comparisons ran on has several GPUs, which is exactly why this had to be noticed and nailed down.
+#:   *chosen* on hardware most people running a metagenomics pipeline do not have.
 #: * ``auto`` makes the result depend on the host. With ``--random-seed`` fixed, two CPU runs agree;
 #:   a CPU run and a GPU run need not, so the same study re-analysed on a different machine produces
 #:   different MAGs for no reason the user can see.
@@ -210,7 +223,7 @@ COMEBIN_SEED = 1337
 LEARNED_DEVICES = ("cpu", "cuda", "auto")
 #: The default, and the one number in this module that is a policy rather than a measurement.
 #:
-#: All three learned binners can train on a GPU, and on this machine all three can see eight of them.
+#: All three learned binners can train on a GPU.
 #: They still default to the CPU, because a default that silently moves to an accelerator is a
 #: default chosen on hardware most people running a metagenomics pipeline do not have, and because a
 #: GPU run and a CPU run of the same seeded network need not agree - so the same study re-analysed
@@ -253,7 +266,7 @@ BAM_BINNERS: Tuple[str, ...] = ("concoct", "semibin2", "vamb", "comebin")
 #: Which binners to run, as a tier the user picks by how much compute they have. Measured on CAMI2
 #: gastrointestinal, three samples, after bin_refinement. "Clean HQ" counts bins that are *both* >=70%
 #: complete / <=10% contaminated *and* non-chimeric by GUNC, joined per bin rather than estimated as a
-#: product - see bench_work/clean_hq.py for why that distinction mattered:
+#: product, because that distinction mattered:
 #:
 #:     tier       binners                        HQ   clean HQ   clean/HQ   cpu-hours
 #:     very-fast  metaBAT2                        37      35       94.6%       4.8
@@ -275,8 +288,7 @@ BAM_BINNERS: Tuple[str, ...] = ("concoct", "semibin2", "vamb", "comebin")
 #: enough that one model can place nearly everything; on a real assembly there is more that one model
 #: gets wrong and another does not.
 #:
-#: Complementarity was measured directly to choose the members (bench_work/binner_complementarity.py:
-#: assign every clean high-quality bin to the reference genome owning most of its sequence, then take
+#: Complementarity was measured directly to choose the members (assign every clean high-quality bin to the reference genome owning most of its sequence, then take
 #: unions over pairs and trios). The binners are highly redundant here - COMEBin recovers 176 of the 182
 #: genomes the best trio reaches, 39 of them found by nothing else - so the union says a second and
 #: third binner buy little on this dataset, and the end-to-end number says they buy something anyway.
@@ -356,7 +368,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--preset",
         choices=tuple(PRESETS),
         help="which binners to run, chosen by how much compute you have (see PRESETS for the measured "
-        "basis). Ignored if you name binners yourself",
+        "basis). Ignored if you name binners yourself. 'slow' adds COMEBin, which wants a GPU "
+        "(`--device cuda`): on CPU it did not finish three CAMI2 samples in 280 CPU-hours",
     )
     p.add_argument("--metabat2", action="store_true", help="bin with metaBAT2")
     p.add_argument("--maxbin2", action="store_true", help="bin with MaxBin2")
@@ -391,6 +404,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--universal", action="store_true", help="use universal (not bacterial) markers in MaxBin2"
     )
     p.add_argument(
+        "--maxbin2-max-iteration",
+        type=bounded_int(1),
+        default=MAXBIN2_MAX_ITERATION,
+        metavar="N",
+        help="cap MaxBin2's EM at N iterations (default: %d, MaxBin2's own). Its cost is per "
+        "iteration and grows with contigs x samples: measured at ~53 min/iteration on a "
+        "418k-contig, 36-sample co-assembly, where 50 iterations is ~40 hours"
+        % MAXBIN2_MAX_ITERATION,
+    )
+    p.add_argument(
         "--run-checkm",
         action="store_true",
         help="run CheckM on the bins (uses the bin_refinement env; needs plenty of RAM)",
@@ -415,6 +438,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         help="keep the per-sample BAMs in work_files/ after the depth tables are built "
         "(about 5 GB per sample; discarded by default)",
+    )
+    p.add_argument(
+        "--bams",
+        metavar="DIR",
+        help="bin from BAMs that already exist (what `metawrap2 coverage --keep-bams` and "
+        "`binning --keep-bams` leave in work_files/), aligning nothing. This is the other half of "
+        "--depth: the learned binners and CONCOCT read alignments rather than a table, so --depth "
+        "cannot serve them and until now there was no way to hand them BAMs either. Reads are then "
+        "not needed. The BAMs are used where they are, never deleted, and their headers are checked "
+        "against the assembly first",
     )
     p.add_argument(
         "--depth",
@@ -690,6 +723,73 @@ def _assembly_contigs(path: str) -> List[str]:
         return [contig_id(line[1:].rstrip("\n")) for line in fh if line.startswith(">")]
 
 
+def bam_reference_names(bam: str, env: Optional[str]) -> List[str]:
+    """The reference names in *bam*'s header, in order."""
+    header = capture_in_env(env, ["samtools", "view", "-H", bam])
+    names = []
+    for line in header.splitlines():
+        if line.startswith("@SQ\t"):
+            for field in line.split("\t"):
+                if field.startswith("SN:"):
+                    names.append(field[3:])
+    return names
+
+
+def check_bam_references(bams: Sequence[str], assembly: str, env: Optional[str]) -> int:
+    """Confirm supplied BAMs were aligned against *assembly*. Returns the overlap count.
+
+    The same argument as :func:`check_depth_table`, and the same failure it prevents: a BAM aligned
+    against a *catalogue* of several assemblies is exactly as well-formed as the right one, and the
+    binners that read BAMs say nothing when they match no contigs - they just produce no bins. That
+    is how `coverage --keep-bams` with a label silently produced empty bin sets. One header read
+    per BAM, before anything is aligned or any env is probed.
+    """
+    contigs = {contig_id(header) for header, _sequence in iter_fasta(assembly)}
+    if not contigs:
+        raise ValueError("%s has no contigs to compare the BAMs against" % assembly)
+    first = min(bams)
+    names = bam_reference_names(first, env)
+    if not names:
+        raise ValueError("%s has no @SQ reference lines; is it a BAM?" % first)
+    overlap = contigs.intersection(names)
+    if not overlap:
+        raise ValueError(
+            "%s names none of %s's contigs: its first reference is %r and the assembly's is %r.\n"
+            "A BAM aligned against a concatenated catalogue names contigs 'label<sep>contig' while "
+            "the assembly names them plainly - reheader the BAM, or pass the catalogue as -a."
+            % (first, assembly, names[0], min(contigs))
+        )
+    if len(overlap) < len(contigs):
+        comm(
+            "%d of %d assembly contig(s) are in %s; the rest have no coverage in it"
+            % (len(overlap), len(contigs), os.path.basename(first))
+        )
+    return len(overlap)
+
+
+def stage_supplied_bams(bam_dir: str, work: str) -> List[str]:
+    """Symlink the BAMs in *bam_dir* into *work*, and return the links.
+
+    Symlinks rather than copies: these are tens of gigabytes per sample and the run only reads
+    them. They are the user's files, so nothing here deletes or rewrites them - `--keep-bams` does
+    not apply and `_discard_alignments` is skipped when they are supplied.
+    """
+    ensure_dir(work)
+    staged = []
+    for name in sorted(listdir(bam_dir)):
+        if not name.endswith(".bam"):
+            continue
+        source = os.path.abspath(os.path.join(bam_dir, name))
+        link = os.path.join(work, name)
+        if not os.path.lexists(link):
+            os.symlink(source, link)
+        staged.append(link)
+        index = source + ".bai"
+        if os.path.isfile(index) and not os.path.lexists(link + ".bai"):
+            os.symlink(index, link + ".bai")
+    return staged
+
+
 def check_depth_table(path: str, assembly: str) -> int:
     """Confirm a precomputed depth table describes *assembly*. Returns the number of samples.
 
@@ -837,6 +937,7 @@ def _run_maxbin2(args, env, work, assembly_copy, depth):
                 min_len=args.min_len,
                 maxbin_out=maxbin_out,
                 abund_list=abund_list,
+                max_iteration=getattr(args, "maxbin2_max_iteration", MAXBIN2_MAX_ITERATION),
             ),
             env=env,
             tool="run_MaxBin.pl",
@@ -868,6 +969,7 @@ def _run_maxbin2(args, env, work, assembly_copy, depth):
             min_len=args.min_len,
             maxbin_out=maxbin_out,
             abund_list=abund_list,
+            max_iteration=getattr(args, "maxbin2_max_iteration", MAXBIN2_MAX_ITERATION),
         ),
         env=env,
         tool="run_MaxBin.pl",
@@ -974,6 +1076,34 @@ def resolve_device(device: str, env: str) -> str:
     return "cuda"
 
 
+def gpu_pin(device: str) -> Optional[Dict[str, str]]:
+    """``extra_env`` pinning a child to the card ``--device cuda:N`` names, else None.
+
+    Why an environment variable rather than each tool's own device flag: only COMEBin takes an
+    index. SemiBin2 is told an accelerator *kind* (``--engine gpu``) and VAMB a bare ``--cuda``, so
+    both collapse ``cuda:1`` to "use a GPU" and torch then takes device 0. On a multi-GPU host that
+    silently puts the run on the wrong card - measured here as a 1.5-hour SemiBin2 arm that trained
+    on cuda:0, contending with another job, while the sampler watching cuda:1 recorded 3 MiB and 0%
+    for the whole run. Two costs: the GPU figures for that arm describe the wrong device, and an
+    unrelated run on device 0 was slowed for the duration.
+
+    ``CUDA_VISIBLE_DEVICES`` fixes all three at once, because a pinned child sees its card as
+    device 0 and nothing downstream has to know which physical GPU it got. Bare ``cuda`` and
+    ``auto`` are left alone: they mean "any GPU", which is what every visible device already is.
+
+    A malformed index is not an error here - it is passed through to the tool, which reports it
+    with its own vocabulary rather than this module guessing what was meant.
+    """
+    if not device.startswith("cuda:"):
+        return None
+    index = device.split(":", 1)[1].strip()
+    if not index.isdigit():
+        return None
+    # base={} so this is the one variable to merge into the child's environment, not a copy of
+    # this process's whole environment handed back as an override.
+    return _limits.gpu_env(int(index), base={})
+
+
 def _run_semibin2(args, env, work, assembly_copy):
     """Bin with SemiBin2, which reads the BAMs itself rather than a depth table.
 
@@ -1014,7 +1144,7 @@ def _run_semibin2(args, env, work, assembly_copy):
         # from metawrap2.longreads so Flye's flag, minimap2's preset and this cannot disagree.
         command += " --sequencing-type=%s" % _long.resolve(args.long_read_type).semibin2_type
         comm("SemiBin2 in long-read mode")
-    run(command, env=env, tool="SemiBin2")
+    run(command, env=env, tool="SemiBin2", extra_env=gpu_pin(device))
 
     _adopt_bins(
         os.path.join(out, SEMIBIN2_BIN_DIR), os.path.join(args.output, "semibin2_bins"), "SemiBin2"
@@ -1137,6 +1267,8 @@ def _run_vamb(args, env, work, assembly_copy):
         ),
         env=env,
         tool="vamb",
+        # The flag says *whether*; the pin says *which*. See gpu_pin.
+        extra_env=gpu_pin(device),
     )
     _adopt_bins(os.path.join(out, VAMB_BIN_DIR), os.path.join(args.output, "vamb_bins"), "VAMB")
 
@@ -1188,6 +1320,7 @@ def _run_comebin(args, env, work, assembly_copy):
     """
     announcement("RUNNING COMEBIN")
     device = resolve_device(args.device, env)
+    pin = gpu_pin(device)
     out = os.path.join(work, "comebin_out")
     ensure_dir(out)
     comm("Starting binning with COMEBin...")
@@ -1197,11 +1330,15 @@ def _run_comebin(args, env, work, assembly_copy):
             out=out,
             bamdir=work,
             threads=args.threads,
-            device=device,
+            # COMEBin is the one binner that accepts an index, but it is pinned like the other two
+            # and then told plain `cuda`: inside a one-device view `cuda:1` is out of range, and the
+            # pin is what keeps all three on the same mechanism. `-d cuda` is COMEBin's own default.
+            device="cuda" if pin else device,
             seed=COMEBIN_SEED,
         ),
         env=env,
         tool="run_comebin.sh",
+        extra_env=pin,
     )
     _adopt_bins(
         os.path.join(out, COMEBIN_BIN_DIR), os.path.join(args.output, "comebin_bins"), "COMEBin"
@@ -1291,10 +1428,12 @@ def main(argv: List[str]) -> int:
     # a table at all, while reads with a table are merely work nobody would use.
     if args.depth:
         needs_bams = [b for b in BAM_BINNERS if getattr(args, b)]
-        if needs_bams:
+        if needs_bams and not args.bams:
             error(
                 "--depth cannot be used with %s: %s read the alignments themselves rather than a "
-                "depth table.\nRun those with the reads, or select only --metabat2/--maxbin2 here."
+                "depth table.\nPass the alignments with --bams <dir> alongside --depth (what "
+                "`coverage --split-bams` writes, and what `cohort` now does), run those binners "
+                "with the reads, or select only --metabat2/--maxbin2 here."
                 % (
                     ", ".join("--" + b for b in needs_bams),
                     "they" if len(needs_bams) > 1 else "it",
@@ -1306,16 +1445,29 @@ def main(argv: List[str]) -> int:
                 "nothing is aligned" % len(args.reads)
             )
             args.reads = []
+    elif args.bams:
+        if args.reads:
+            comm(
+                "--bams was given, so the %d read file(s) on the command line are not used: "
+                "nothing is aligned" % len(args.reads)
+            )
+            args.reads = []
     elif not args.reads:
         error(
             "No read files given. Reads are what coverage is measured from; pass them as "
-            "positional arguments, or bin from an existing depth table with --depth <table>."
+            "positional arguments, or bin from an existing depth table with --depth <table>, "
+            "or from existing alignments with --bams <dir>."
+        )
+    if args.bams and args.depth:
+        comm(
+            "--bams and --depth together: the table serves metaBAT2 and MaxBin2, the BAMs serve "
+            "CONCOCT and the learned binners, and nothing is aligned or re-measured"
         )
 
     settings = load_settings(args.config)
     resolve_threads(args, settings)
     resolve_memory_gb(args, settings)
-    absolutize_paths(args, extra=["depth"])
+    absolutize_paths(args, extra=["depth", "bams"])
     check_disk_space("binning", settings, [args.assembly] + args.reads, args.output)
     validate_inputs(
         "binning",
@@ -1329,6 +1481,16 @@ def main(argv: List[str]) -> int:
             check_depth_table(args.depth, args.assembly)
         except (OSError, ValueError) as exc:
             error(str(exc))
+    supplied_bams: List[str] = []
+    if args.bams:
+        if not os.path.isdir(args.bams):
+            error("--bams %s is not a directory" % args.bams)
+        supplied_bams = [
+            os.path.join(args.bams, f) for f in sorted(listdir(args.bams)) if f.endswith(".bam")
+        ]
+        if not supplied_bams:
+            error("--bams %s holds no .bam files" % args.bams)
+        comm("%d BAM(s) supplied with --bams; nothing will be aligned" % len(supplied_bams))
     env = env_for("binning", settings)
     # Resolved here rather than at the point of use, because the point of use for a learned binner is
     # after every read has been aligned. A missing env found there costs the whole alignment pass.
@@ -1367,8 +1529,25 @@ def main(argv: List[str]) -> int:
                 )
 
         try:
+            if args.bams:
+                # Checked against the assembly before anything else happens, for the reason in
+                # check_bam_references: a BAM from the wrong catalogue is well-formed, and the
+                # binners that read BAMs report nothing when they match no contigs.
+                if not dry_run():
+                    try:
+                        check_bam_references(supplied_bams, assembly_copy, env)
+                    except (OSError, ValueError) as exc:
+                        error(str(exc))
+                staged = stage_supplied_bams(args.bams, work)
+                comm(
+                    "linked %d supplied BAM(s) into %s; they are read where they are and never "
+                    "deleted" % (len(staged), work)
+                )
+                ckpt.done("align_reads")
             if args.depth:
                 comm("using the depth table given with --depth; no reads are aligned")
+            elif args.bams:
+                pass  # the alignments are the supplied ones; the depth table is built from them
             elif ckpt.todo("align_reads"):
                 _align_reads(args, env, work, assembly_copy)
                 ckpt.done("align_reads")
@@ -1379,6 +1558,8 @@ def main(argv: List[str]) -> int:
             # that neither binner owns a file the other depends on.
             depth = args.depth or os.path.join(work, DEPTH_TABLE)
             if not args.depth and (args.metabat2 or args.maxbin2) and ckpt.todo("depth_table"):
+                # Also the --bams path: the table is measured from the supplied alignments, which
+                # is cheap next to the alignment that produced them.
                 depth = _depth_table(args, env, work)
                 ckpt.done("depth_table")
             if args.metabat2 and ckpt.todo("metabat2"):
@@ -1401,8 +1582,23 @@ def main(argv: List[str]) -> int:
                 ckpt.done("comebin")
             if args.binsplit:
                 _post_split(args, [b for b in BINNERS if getattr(args, b, False)])
-            if not args.keep_bams and not dry_run():
+            if args.bams:
+                comm(
+                    "the BAMs given with --bams are left alone (they are not this run's to delete)"
+                )
+            elif not args.keep_bams and not dry_run():
                 _discard_alignments(work, ckpt)
+            elif args.keep_bams and not dry_run():
+                # Kept BAMs are indexed: they are sorted already, and every tool that reads one
+                # wants the index. Leaving `samtools index` as a step to remember is how a kept BAM
+                # arrives somewhere unusable.
+                for bam in _bam_paths(work):
+                    if not os.path.isfile(bam + ".bai"):
+                        run(
+                            SAMTOOLS_INDEX.format(threads=args.threads, bam=bam),
+                            env=env,
+                            tool="samtools index",
+                        )
         except ValueError as e:  # read-collection / validation errors
             error(str(e))
 

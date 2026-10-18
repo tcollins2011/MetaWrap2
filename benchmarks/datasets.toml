@@ -18,6 +18,15 @@
 
 schema = 1
 
+# Known gap, recorded here because this is the file that would close it. Every arm in
+# benchmarks/configurations.toml runs on simulated CAMI2 reads, which are uniformly high quality -
+# and the one place fastp and trim-galore diverge is low-quality data. On 2010-era 75 bp reads
+# (MetaHIT ERR011347-9) fastp's defaults discarded 58.5% of one library whole while trim-galore
+# trimmed and kept 95%, which moved nonpareil's effort projection five-fold. So the trimmer default
+# is measured, but not in the regime where the choice matters. A low-quality dataset registered here
+# would let `benchmark run <dataset> trimmer` answer it; until then `read_qc` reports retention and
+# warns below 70%, which is a signal rather than an answer.
+
 # --------------------------------------------------------------------------------------------
 # The real benchmark: CAMI2's human gastrointestinal body site. Ten samples of simulated short
 # reads with a known ground truth, which is the only way to measure binning *correctness* rather
@@ -159,6 +168,166 @@ md5 = "6bed38a056082b3358c8796c97f136cf"
 bytes = 25194106
 note = "the unfixed mapping, pinned only so a run can show the two agree where it matters"
 
+
+# --------------------------------------------------------------------------------------------
+# The second body site, for the same reason the first one exists: every default in this project
+# was measured on gastrointestinal samples, and a default that only holds there is a
+# gastrointestinal fact rather than a metagenomics one. Same deposit, same licence, same truth
+# format as cami2_gi - only the community differs, which is what makes the comparison readable.
+#
+# Three samples, not ten, because the metaWRAP 1 comparison this is meant to extend used three
+# (gastrointestinal samples 0, 1 and 10). Matching that design is the point; ten samples here
+# would be a different experiment wearing the same figure.
+# --------------------------------------------------------------------------------------------
+[cami2_oral]
+title = "CAMI2 human microbiome challenge - oral, short read"
+description = """\
+Three simulated Illumina samples from the CAMI2 oral body site, with the same per-contig gold \
+standard as the gastrointestinal set. Published in one directory with the gastrointestinal \
+samples; these are oral per the dataset's own README."""
+citation = "Meyer F, et al. Critical Assessment of Metagenome Interpretation - the second round of challenges. Nat Methods 19:429-440 (2022)."
+doi = "10.4126/FRL01-006425518"
+license = "CC BY 4.0"
+base_url = "https://frl.publisso.de/data/frl:6425518/"
+checksum = "md5"
+checksum_manifest = "md5sums.tsv"
+
+# The deposit numbers all twenty gastrooral samples in one sequence; ten are gastrointestinal
+# (listed under cami2_gi) and these are three of the ten that are not. Each archive carries its
+# own metadata, so the body site is verified after extraction rather than trusted from this list.
+samples = [6, 7, 13]
+
+keep = [
+    "*/reads/*",
+    "*/contigs/*",
+    "*/*.tsv",
+    "*/*.tsv.gz",
+    "*/*.yaml",
+]
+
+reads_glob = "*/reads/anonymous_reads.fq*"
+reads_layout = "interleaved"
+abundance_truth_glob = "*/reads/reads_mapping.tsv.gz"
+disk_note = "peak disk is bounded by the download; archives are removed as they are extracted"
+
+[[cami2_oral.files]]
+sample = 6
+path = "gastrooral/sample_6.tar.gz"
+md5 = "0df0318cfc0f5470787eae370d2b456d"
+bytes = 9686918709
+
+[[cami2_oral.files]]
+sample = 7
+path = "gastrooral/sample_7.tar.gz"
+md5 = "7f7cecccd40d9241389e2e701985b2e7"
+bytes = 10268882461
+
+[[cami2_oral.files]]
+sample = 13
+path = "gastrooral/sample_13.tar.gz"
+md5 = "f640c2d0f5038bc29cb81c757f0abc1e"
+bytes = 10279106835
+
+[[cami2_oral.gold_standard]]
+role = "assembly"
+path = "per_bodysite/oral_bam/gsa.fa"
+md5 = "0f2c77508ba269b044409661b512d003"
+bytes = 1729496090
+note = "pooled gold-standard assembly across the oral samples; AMBER's reference assembly"
+
+[[cami2_oral.gold_standard]]
+role = "binning"
+path = "per_bodysite/oral_bam/gsa_pooled_mapping_fixed.tsv"
+md5 = "3c2d78f6f833d97867ca14bea2e866ba"
+bytes = 77792819
+note = "contig -> genome truth, AMBER's -g argument; the 'fixed' file, as for cami2_gi"
+
+[[cami2_oral.gold_standard]]
+role = "binning_raw"
+path = "per_bodysite/oral_bam/gsa_pooled_mapping.tsv"
+md5 = "dae4cda38548d0a01b04c9d4e205723e"
+bytes = 155585543
+note = "the unfixed mapping, pinned only so a run can show the two agree where it matters"
+
+# --------------------------------------------------------------------------------------------
+# The third body site. Same deposit, same truth format, and the one that answers a question the
+# first two cannot: gastrointestinal and oral are both high-diversity gut-and-mouth communities,
+# while skin is low-diversity and dominated by a few genera - so a default that holds on all three
+# is holding across community *shape*, not just across two body sites.
+#
+# Which of the deposit's 29 airskinurogenital samples are skin is not written down anywhere in it.
+# It was established by overlap with the published per-body-site gold standards: of each sample's
+# genomes, 88 of 90, 50 of 52 and 238 of 240 are in skin's, against roughly half that in airways'
+# and almost none in urogenital's. Probing samples 4, 9 and 24 showed the deposit is ordered
+# airways, then skin, then urogenital.
+# --------------------------------------------------------------------------------------------
+[cami2_skin]
+title = "CAMI2 human microbiome challenge - skin, short read"
+description = """\
+Three simulated Illumina samples from the CAMI2 skin body site, with the same per-contig gold \
+standard as the gastrointestinal and oral sets. Lower diversity than either, which is the point: \
+it tests a default against a different community shape rather than a second gut."""
+citation = "Meyer F, et al. Critical Assessment of Metagenome Interpretation - the second round of challenges. Nat Methods 19:429-440 (2022)."
+doi = "10.4126/FRL01-006425518"
+license = "CC BY 4.0"
+base_url = "https://frl.publisso.de/data/frl:6425518/"
+checksum = "md5"
+checksum_manifest = "md5sums.tsv"
+
+# Verified after extraction, not trusted from the numbering - see the comment above.
+samples = [17, 18, 19]
+
+keep = [
+    "*/reads/*",
+    "*/contigs/*",
+    "*/*.tsv",
+    "*/*.tsv.gz",
+    "*/*.yaml",
+]
+
+reads_glob = "*/reads/anonymous_reads.fq*"
+reads_layout = "interleaved"
+abundance_truth_glob = "*/reads/reads_mapping.tsv.gz"
+disk_note = "peak disk is bounded by the download; archives are removed as they are extracted"
+
+[[cami2_skin.files]]
+sample = 17
+path = "airskinurogenital/sample_17.tar.gz"
+md5 = "59dc44c7a41a394eeea387ed9d821553"
+bytes = 10260593277
+
+[[cami2_skin.files]]
+sample = 18
+path = "airskinurogenital/sample_18.tar.gz"
+md5 = "50460a0e069a8503cbf15351330016ab"
+bytes = 10123854519
+
+[[cami2_skin.files]]
+sample = 19
+path = "airskinurogenital/sample_19.tar.gz"
+md5 = "f74d5a4f54d736f879196e4343c35257"
+bytes = 10555131507
+
+[[cami2_skin.gold_standard]]
+role = "assembly"
+path = "per_bodysite/skin_bam/gsa.fa"
+md5 = "57a7234f868007d6d9357cf69233f21d"
+bytes = 1562022677
+note = "pooled gold-standard assembly across the skin samples; AMBER's reference assembly"
+
+[[cami2_skin.gold_standard]]
+role = "binning"
+path = "per_bodysite/skin_bam/gsa_pooled_mapping_fixed.tsv"
+md5 = "17afcd16c9417c2a284170b62769dc92"
+bytes = 45238732
+note = "contig -> genome truth, AMBER's -g argument; the 'fixed' file, as for the other two sites"
+
+[[cami2_skin.gold_standard]]
+role = "binning_raw"
+path = "per_bodysite/skin_bam/gsa_pooled_mapping.tsv"
+md5 = "e74948368c7a97ad94d31f04115a3543"
+bytes = 90477267
+note = "the unfixed mapping, pinned only so a run can show the two agree where it matters"
 
 # --------------------------------------------------------------------------------------------
 # The fixture: a few hundred contigs from three synthetic genomes, committed to the repository.

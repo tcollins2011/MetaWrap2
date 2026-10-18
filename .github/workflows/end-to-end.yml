@@ -1,0 +1,146 @@
+name: End-to-end
+
+# One real run of `metawrap2 run` on the committed fixture, with the real tools, asserting it
+# reaches the study-complete banner.
+#
+# Unit tests stub the tools and the golden test stubs them too, deliberately: both are about
+# MetaWrap2's own contract. What neither can see is a step that finishes and hands the next step
+# something it cannot read - the output moved, a suffix changed, a path the driver built from a
+# module's old convention. That failure only exists when the steps are chained and the tools are
+# real, which is this job.
+#
+# Scope: `read_qc` -> `assembly`, the two steps the committed fixture can actually complete, and
+# the handoff (READ_QC/final_pure_reads_* -> CLEAN_READS/ -> the assembler's input) that the run
+# driver owns rather than any module. The later steps are deliberately not here: the fixture is
+# 4,000 read pairs over three shredded genomes - datasets.toml says outright that it is sized for
+# the harness and not for a binner - so binning would produce no bin of the 50 kb-20 Mb a refined
+# bin has to be, and `bin_refinement` needs a multi-GB CheckM database on top. Widen `steps` by
+# hand (the dispatch input below) when the fixture grows enough to carry them; a step added here
+# that fails because the data is too small teaches nobody anything.
+#
+# The environments come from the committed lockfiles, not a fresh solve: this job is about
+# MetaWrap2's plumbing, and a tool that changed upstream should fail the Fresh env solve
+# workflow, where that is the finding, instead of turning up here as a mystery.
+#
+# Conda, a download, and ~10 minutes, so it is weekly and on demand.
+
+on:
+  schedule:
+    # Monday, after the fresh-solve job has had time to report.
+    - cron: "53 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: "Pipeline steps to chain (space-separated)"
+        default: "read_qc assembly"
+
+jobs:
+  fixture-run:
+    name: Run the tiny fixture through `metawrap2 run`
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      STEPS: ${{ github.event.inputs.steps || 'read_qc assembly' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: "3.12"
+
+      - run: pip install .
+
+      # Which environments the chosen steps need, from the same table the modules use, so adding
+      # a step to `steps` installs what it needs without a second edit here.
+      - name: Work out what has to be installed
+        id: plan
+        run: |
+          locks=$(python - <<'PY'
+          import os
+
+          from metawrap2.config import MODULE_ENVS
+
+          steps = os.environ["STEPS"].split()
+          envs = sorted({MODULE_ENVS[s] for s in steps})
+          print(" ".join(e[len("metawrap2-"):] for e in envs))
+          PY
+          )
+          echo "Steps: $STEPS"
+          echo "Environments: $locks"
+          missing=""
+          for name in $locks; do
+            [ -f "src/metawrap2/envs/locks/$name.linux-64.lock" ] || missing="$missing $name"
+          done
+          echo "locks=$locks" >> "$GITHUB_OUTPUT"
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
+      # A green job that tested nothing is worse than no job, so the one case where this cannot
+      # run - a step whose environment has no committed lockfile - says so loudly in the run's
+      # annotations and in the summary, and the run steps below are skipped rather than passed.
+      - name: Nothing to run against
+        if: steps.plan.outputs.missing != ''
+        run: |
+          msg="End-to-end NOT RUN: no committed lockfile for${{ steps.plan.outputs.missing }}. The fixture cannot run without the conda tools those environments hold. Write the lockfile (Lockfiles workflow, refresh) or drop the step from this job's inputs."
+          echo "::warning::$msg"
+          echo "## :warning: $msg" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the environments from their lockfiles
+        if: steps.plan.outputs.missing == ''
+        run: metawrap2 install-env $STEPS --from-lock -t 1
+
+      - name: Write a sample sheet for the committed fixture
+        if: steps.plan.outputs.missing == ''
+        run: |
+          cat > sheet.toml <<'TOML'
+          # The committed fixture, one paired sample. No [modules] section: the whole point is to
+          # run what a user running MetaWrap2 runs, with the defaults the modules choose.
+          [settings]
+          coassemble = true
+
+          [[samples]]
+          name = "tiny"
+          r1 = "benchmarks/fixtures/tiny/reads/sample_1_1.fq.gz"
+          r2 = "benchmarks/fixtures/tiny/reads/sample_1_2.fq.gz"
+          TOML
+          cat sheet.toml
+
+      # -t 2 -m 6 rather than the machine's budget: a GitHub runner has 2 cores and 7 GB, and a
+      # step that asks for more than the box has is a failure this job should not be inventing.
+      - name: Run the study
+        if: steps.plan.outputs.missing == ''
+        run: |
+          set -o pipefail
+          metawrap2 run sheet.toml -o study --steps $STEPS -t 2 -m 6 2>&1 | tee run.log
+
+      - name: It reached the study-complete banner
+        if: steps.plan.outputs.missing == ''
+        run: |
+          grep -q "STUDY COMPLETE" run.log
+          # The banner alone is not enough: a step that produced nothing and was recorded as done
+          # would still print it. These are the files the *next* step reads, which is the handoff
+          # this job exists to test.
+          ls -la study study/CLEAN_READS
+          # Both names: <sample>_N.fastq is read_qc's output exposed for the per-sample steps,
+          # ALL_READS_N.fastq is the concatenation a co-assembly reads. The driver builds both,
+          # and it is the second one the assembler was handed.
+          test -s study/CLEAN_READS/tiny_1.fastq
+          test -s study/CLEAN_READS/tiny_2.fastq
+          test -s study/CLEAN_READS/ALL_READS_1.fastq
+          test -s study/ASSEMBLY/final_assembly.fasta
+          grep -c '^>' study/ASSEMBLY/final_assembly.fasta
+          echo "End-to-end run completed: $STEPS" >> "$GITHUB_STEP_SUMMARY"
+
+      # Two very different findings end up here, and the difference is worth stating rather than
+      # leaving to whoever reads the log at 7am.
+      - name: Say what a failure here means
+        if: failure()
+        run: |
+          tail -n 40 run.log 2>/dev/null || true
+          echo "::error::The fixture did not get through '$STEPS'. If a module failed, that is"\
+               "the chaining defect this job is for - the step's own log is under study/. If the"\
+               "assembler ran and produced no contigs, that is the fixture being too small"\
+               "rather than a code defect: grow it with benchmarks/fixtures/make_tiny.py and say"\
+               "so in the commit, or narrow this job's steps. Do not silence the assertion."

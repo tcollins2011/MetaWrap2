@@ -110,6 +110,9 @@ OPTIONAL_ENVS: Dict[str, str] = {
     # TRACS, the second strain backend. Its own env on a pin, like RGI's: it resolves an older
     # scientific-python stack than inStrain's env holds.
     "tracs": "metawrap2-tracs",
+    # eggNOG-mapper 2.1.x imports distutils, which Python 3.12 removed, so it needs a Python
+    # ceiling that the shared annotate env must not inherit on behalf of bakta, dbCAN and GECCO.
+    "eggnog": "metawrap2-eggnog",
     # Forced. RGI pins older dependencies than AMRFinderPlus and hAMRonization resolve to, so the
     # three cannot share an env without downgrading the default backend to satisfy the opt-in one.
     "rgi": "metawrap2-rgi",
@@ -135,6 +138,9 @@ OPTIONAL_ENV_TOOLS: Dict[str, List[str]] = {
     "gtdbtk": ["gtdbtk"],
     "rgi": ["rgi"],
     "tracs": ["tracs"],
+    # Both, because the downloader is what install-db reaches for and emapper is what annotate
+    # reaches for: an env with only one of them working is broken for whichever comes second.
+    "eggnog": ["emapper.py", "download_eggnog_data.py"],
 }
 
 # The same two tables keyed by the yaml name an opt-in env is built from (`bin_refinement-gunc`)
@@ -156,6 +162,7 @@ OPTIONAL_ENV_OWNERS: Dict[str, Optional[str]] = {
     "gtdbtk": "classify_bins",
     "rgi": "amr",
     "tracs": "strains",
+    "eggnog": "annotate",
 }
 
 OPTIONAL_ENVS_BY_MODULE: Dict[str, str] = {
@@ -213,6 +220,10 @@ MODULE_TOOLS: Dict[str, List[str]] = {
 # Database keys and which module(s) use them.
 DB_KEYS = {
     "KRAKEN2_DB": "kraken2",
+    # The databaseNmers.kmer_distrib files, one per read length. `bracken-build` writes them
+    # into the KRAKEN2_DB directory and they are only valid for that database, so this key
+    # usually repeats it. The pre-built k2_standard download already ships 50 to 300 bp.
+    "BRACKEN_DB": "kraken2 (--bracken; Bracken k-mer distributions)",
     "BMTAGGER_DB": "read_qc (host removal)",
     "BLASTDB": "blobology / classify_bins",
     "BLASTDB_NAME": "blobology / classify_bins (db name inside BLASTDB; default nt)",
@@ -234,6 +245,12 @@ DB_KEYS = {
     # between releases, so a domain call is only reproducible against the release that made it -
     # which is why the installer reads the version out of relnotes.txt and the table records it.
     "PFAM_DB": "annotate (--pfam), the directory holding Pfam-A.hmm",
+    # eggNOG's annotation SQLite and its DIAMOND protein database, for `annotate --eggnog`. About
+    # 50 GB on disk, fetched by `install-db eggnog` from eggnog5.embl.de (not by eggNOG-mapper's own
+    # download_eggnog_data.py, whose hardcoded host no longer answers). The release is part of the answer: an annotation is transferred from
+    # an orthologous group, and eggNOG renumbers groups between releases, so every row records the
+    # database version that produced it.
+    "EGGNOG_DB": "annotate (--eggnog), the eggNOG data directory: eggnog.db and eggnog_proteins.dmnd",
     # Point this at a dated release rather than the `latest` symlink amrfinder_update writes: an ARG
     # call is only as datable as its database, and a rerun against a moved symlink is a different
     # experiment wearing the same name.
@@ -259,6 +276,7 @@ OPTIONAL_DB_KEYS = {
     "KOFAM_DB",
     "KEGG_BRITE",
     "DBCAN_DB",
+    "EGGNOG_DB",
     "AMRFINDER_DB",
     "GENOMAD_DB",
     "CHECKV_DB",
@@ -267,6 +285,7 @@ OPTIONAL_DB_KEYS = {
     "CHECKM2DB",
     "BLASTDB_NAME",
     "GUNC_DB",
+    "BRACKEN_DB",
 }
 
 # Keys whose value is a setting, not a filesystem path - checking them for existence is
@@ -482,9 +501,18 @@ def env_dirs() -> List[str]:
 
     Asking the solver (``conda env list``) is the only reliable answer, because envs can
     live anywhere ``envs_dirs`` points - not just under the active prefix. The path guesses
-    are a fallback for when neither conda nor mamba is on PATH.
+    are a fallback for when neither conda nor mamba is on PATH, and they are only appended in
+    that case: the docstring said so for three releases while the code appended them always,
+    which widened every existence check by five directories nobody had asked about. One of
+    them belonged to a second conda installation on the reporter's machine, so
+    ``conda_env_exists('metawrap2-amr')`` answered True for an env ``mamba run -n`` could not
+    enter, and `doctor` reported every tool in it as missing from PATH.
     """
     dirs: List[str] = []
+    #: True once an env manager has actually listed its environments. Tracked separately from
+    #: ``dirs`` being non-empty so that "conda is here and has no envs yet" is distinguishable
+    #: from "nothing authoritative answered", which is the only case the guesses are for.
+    listed = False
     for prog in ("conda", "mamba", "micromamba"):
         exe = shutil.which(prog)
         if not exe:
@@ -500,6 +528,7 @@ def env_dirs() -> List[str]:
             )
         except (OSError, subprocess.SubprocessError):
             continue
+        listed = True
         for line in (out.stdout or "").splitlines():
             line = line.split("#", 1)[0].strip()
             if not line:
@@ -519,14 +548,18 @@ def env_dirs() -> List[str]:
         dirs.append(os.path.join(prefix, "envs"))
         if os.path.basename(os.path.dirname(prefix)) == "envs":
             dirs.append(os.path.dirname(prefix))
-    for guess in (
-        "~/miniforge3/envs",
-        "~/miniconda3/envs",
-        "~/mambaforge/envs",
-        "~/anaconda3/envs",
-        "~/micromamba/envs",
-    ):
-        dirs.append(os.path.expanduser(guess))
+    if not listed:
+        # Only now, with no manager on PATH to ask: these are the five default install locations,
+        # and on a machine that has an env manager they are at best a slower way to get the same
+        # answer and at worst a different installation's envs.
+        for guess in (
+            "~/miniforge3/envs",
+            "~/miniconda3/envs",
+            "~/mambaforge/envs",
+            "~/anaconda3/envs",
+            "~/micromamba/envs",
+        ):
+            dirs.append(os.path.expanduser(guess))
 
     seen, unique = set(), []
     for d in dirs:
@@ -680,7 +713,15 @@ def explain_unknown_name(name: str) -> List[str]:
 
 
 def conda_env_exists(env: str) -> bool:
-    """True if a conda env named *env* exists in any of conda's environment directories."""
+    """True if a conda env named *env* exists in any of conda's environment directories.
+
+    "Any" is deliberate and includes installations other than the active one: ``conda env list``
+    reads ``~/.conda/environments.txt``, a machine-global registry, so an env built by a second
+    conda install is visible here and is perfectly usable - *by prefix*. Anything that then acts
+    on the env must go through :func:`env_prefix` and pass ``-p <prefix>``, because ``-n <name>``
+    resolves only against the active root. Answering existence across all installations and
+    executing against one is what made a fresh install report every module broken.
+    """
     return any(os.path.isdir(os.path.join(d, env)) for d in env_dirs())
 
 
@@ -708,6 +749,42 @@ def env_prefix(env: str) -> Optional[str]:
         if os.path.isdir(candidate):
             return candidate
     return None
+
+
+def active_conda_root() -> Optional[str]:
+    """The conda/mamba installation that ``-n <name>`` resolves names against, or None.
+
+    ``MAMBA_ROOT_PREFIX`` and ``CONDA_ROOT`` name it outright; otherwise it is derived from
+    ``CONDA_PREFIX``, which is the *active env* - ``<root>/envs/<name>`` for a named env, and the
+    root itself for the base env. Worth knowing because an env under a different root is the one
+    case where existence and executability disagree, and a user cannot tell from the env name
+    that the env they are being shown is not theirs.
+    """
+    for var in ("MAMBA_ROOT_PREFIX", "CONDA_ROOT"):
+        value = os.environ.get(var, "")
+        if value:
+            return os.path.normpath(os.path.expanduser(value))
+    prefix = os.environ.get("CONDA_PREFIX", "")
+    if not prefix:
+        return None
+    prefix = os.path.normpath(prefix)
+    parent = os.path.dirname(prefix)
+    if os.path.basename(parent) == "envs":
+        return os.path.dirname(parent)
+    return prefix
+
+
+def prefix_in_active_root(prefix: str) -> bool:
+    """Whether *prefix* lives under the active conda root, so that ``-n`` could have found it.
+
+    True when there is no active root to compare against: with nothing to contradict, reporting
+    an env as foreign would be a guess, and a wrong guess printed next to a path reads as a fact.
+    """
+    root = active_conda_root()
+    if not root:
+        return True
+    prefix = os.path.normpath(prefix)
+    return prefix == root or prefix.startswith(root + os.sep)
 
 
 def tool_in_env(tool: str, env: str) -> Optional[bool]:

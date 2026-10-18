@@ -1,0 +1,3 @@
+genome	contig	length	tier	topology	taxonomy	virus_score	completeness
+assembly	k141_49274	63538	medium_quality	Provirus	Viruses;Duplodnaviria	0.9685	81.86
+assembly	k141_10312	9867	low_quality	No terminal repeats	Viruses	0.8812	21.40

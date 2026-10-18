@@ -30,8 +30,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .. import gunc as _gunc
 
-#: The TSV's columns, in order. Frozen on purpose: ``benchmarks/results/*.tsv`` is committed
-#: history, and a column reorder would make every old file unreadable by the current code.
+#: The TSV's columns, in order. Frozen on purpose: results tables accumulate over
+#: time, and a column reorder would make every old file unreadable by the current code.
 COLUMNS = (
     "dataset",
     "comparison",
@@ -56,8 +56,8 @@ COLUMNS = (
 #:   this project reports on, chosen because it is where bin_refinement's defaults sit and where the
 #:   MAG-recovery literature usually counts, and it is the headline number in docs/benchmarks.md.
 #:
-#: The name stays despite being a borrowed label: it is the metric key in every committed row of
-#: benchmarks/results/, so renaming it either invalidates those rows or needs a migration, and the
+#: The name stays despite being a borrowed label: it is the metric key in every recorded results
+#: row, so renaming it either invalidates those rows or needs a migration, and the
 #: label was the inaccurate part rather than the number.
 QUALITY_TIERS = (
     ("bins_near_complete", 90.0, 5.0),

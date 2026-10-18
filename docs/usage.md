@@ -25,38 +25,38 @@ Both take a sample sheet (or a directory of read files) and run every module, wi
 run lock, checkpointing, resource budget and `--resume`. They differ in co-assembly:
 
 ```bash
-metawrap2 run    samples.toml -o study/ -t 96        # co-assemble every sample, bin once
-metawrap2 cohort samples.toml -o study/ -t 96 -j 4   # assemble and bin each sample, then dereplicate
+metawrap2 run    samples.toml -o study/ -t 32        # co-assemble every sample, bin once
+metawrap2 cohort samples.toml -o study/ -t 32 -j 4   # assemble and bin each sample, then dereplicate
 ```
 
-`cohort` is `run --no-coassembly`.
+The [README](https://github.com/ursky/MetaWrap2#running) explains which to use; this section describes what each does.
 
 | | `run` | `cohort` |
 |---|---|---|
 | Assembly | one, from all the reads | one per sample |
-| Binning | once, on the co-assembly | once per sample, on a slice of one cohort-wide depth table |
+| Binning | once, on the co-assembly | once per sample, from one cohort-wide alignment (a depth-table slice and per-assembly BAMs) |
 | Result | one bin set | one non-redundant genome catalogue (`MAG_CATALOGUE/`) |
 | Steps by default | read_qc, assembly, binning, bin_refinement, reassemble_bins, quant_bins | the same, plus `coverage` and `dereplicate`, minus `reassemble_bins` |
 
 The two extra cohort steps:
 
 * `coverage` maps each sample's reads once against all samples' contigs, then splits the depth
-  table per assembly. Otherwise cross-sample coverage costs N alignments per assembly, N² per study.
+  table per assembly. Without it, cross-sample coverage costs N alignments per assembly, N² per study.
   `--coverage fairy` estimates the table from k-mer sketches in minutes, resolving nothing below
-  ~95% ANI. Alignment is the default: single-sample fairy recovered half the bins, and multi-sample
-  is untested.
-* `dereplicate` collapses per-sample bin sets into one genome per organism. Otherwise a MAG count
-  over N samples counts bins, not organisms, and `quant_bins` splits an organism's reads between near-identical copies. In a
-  cohort, `quant_bins` runs on the catalogue with no `-a`.
+  ~95% ANI. Alignment is the default; single-sample fairy recovered half the bins, and multi-sample
+  use is untested.
+* `dereplicate` collapses per-sample bin sets into one genome per organism. Without it, a MAG count
+  over N samples counts bins, and `quant_bins` splits an organism's reads between near-identical
+  copies. In a cohort, `quant_bins` runs on the catalogue with no `-a`.
 
-`reassemble_bins`, the most expensive step, is off by default in a cohort since it would run once
+`reassemble_bins`, the most expensive step, is off by default in a cohort because it would run once
 per sample. Add it to `steps` (or `--steps`) to include it.
 
 - In `run`, `coverage` and `dereplicate` are dropped with a message.
 - Under `metawrap2 cohort`, `coassemble = true` in a sheet is overridden with a warning naming `run`.
 - `-j N` sets how many samples run a per-sample stage at once, dividing threads and memory.
 
-## Functional annotation, end to end
+## Functional annotation
 
 Each module reads the previous one's table. The KEGG steps need two downloads, once:
 
@@ -64,11 +64,14 @@ Each module reads the previous one's table. The KEGG steps need two downloads, o
 metawrap2 install-db kofam kegg   # KOfam profiles and thresholds; the BRITE hierarchy
 ```
 
+`install-db` writes each database's path into your config as it finishes, so the `--*-db` flags
+below are only needed to point a run at a different copy.
+
 From a refined bin set and its reads:
 
 ```bash
 # genes, and KEGG orthologs for them. -a <assembly> instead of -b for the bin-free path.
-metawrap2 annotate -o ANNOTATION -b BIN_REFINEMENT/metawrap_70_10_bins -t 48 \
+metawrap2 annotate -o ANNOTATION -b BIN_REFINEMENT/metawrap_70_10_bins -t 32 \
     --kofam --kofam-db $KOFAM_DB
 
 # module completeness, the gene -> process -> pathway hierarchy, and Krona plots
@@ -80,7 +83,7 @@ metawrap2 quantify_function -o FUNCTION_ABUNDANCE \
     --microbial-fraction SINGLEM/microbial_fraction.tsv --biom
 
 # resistance and virulence, with genomic context and an evidence level
-metawrap2 amr -o AMR -b BIN_REFINEMENT/metawrap_70_10_bins -t 48 --db $AMRFINDER_DB
+metawrap2 amr -o AMR -b BIN_REFINEMENT/metawrap_70_10_bins -t 32 --db $AMRFINDER_DB
 
 # which functions differ between two groups of samples
 metawrap2 diff_abundance -o STATS \
@@ -105,17 +108,17 @@ Caveats:
 Run `viruses` on the assembly, not the bins. Phage contigs are in no prokaryotic bin.
 
 ```bash
-metawrap2 viruses -o VIRUSES -a ASSEMBLY/final_assembly.fasta -t 48 \
+metawrap2 viruses -o VIRUSES -a ASSEMBLY/final_assembly.fasta -t 32 \
     --genomad-db $GENOMAD_DB --checkv-db $CHECKV_DB
 ```
 
 It also writes `plasmid_contigs.tsv`, which `amr` uses for mobility.
 
-## What did the bins miss? `appraise`
+## Community share of the bins: `appraise`
 
 ```bash
 metawrap2 appraise -o APPRAISAL -b BIN_REFINEMENT/metawrap_70_10_bins \
-    -r RAW_READS/*_1.fastq.gz -t 48 --metapackage $SINGLEM_METAPACKAGE
+    -r RAW_READS/*_1.fastq.gz -t 32 --metapackage $SINGLEM_METAPACKAGE
 ```
 
 Outputs:
@@ -124,20 +127,26 @@ Outputs:
   represent.
 - `unrepresented_lineages.tsv`: lineages with no genome, most abundant first.
 
-Use forward reads, not trimmed below 60 bp. SingleM compares a 60 bp window, so shorter reads give
-a result near zero. The run checks read lengths and warns first.
+Use forward reads that were not trimmed below 60 bp. SingleM compares a 60 bp window, so shorter
+reads give a result near zero. The run checks read lengths and warns first.
 
-This is a per-cell share. On the test study, the refined bins hold most of the assembled base pairs
+The share is per cell. On the test study the refined bins hold most of the assembled base pairs
 but represent 11.6% of the bacterial cells.
 
-## Is this cohort comparable? `nonpareil`
+## Sequencing coverage: `nonpareil`
 
 Run it on every sample's QC'd forward reads before comparing samples:
 
 ```bash
-metawrap2 nonpareil -o DIVERSITY -t 48 \
+metawrap2 nonpareil -o DIVERSITY -t 32 \
     -r READ_QC/*/final_pure_reads_1.fastq
 ```
+
+These files all have the same basename, since `read_qc` puts the sample in the directory name
+(`READ_QC/<sample>/final_pure_reads_1.fastq`). When basenames collide the row label is taken from
+the directory, so this gives rows named `ERR011347`, `ERR011348`, `ERR011349`. Files already named
+per sample keep their names. A collision the directory name cannot resolve is an error, since two
+rows with one label cannot be told apart.
 
 Outputs:
 
@@ -151,12 +160,12 @@ diversity differences partly reflect sequencing depth.
 Caveats:
 
 - Coverage is abundance-weighted. C = 0.95 is 95% average coverage by abundance, not 95% of
-  species; the rare tail is what is missing.
+  species; the missing 5% is the rare tail.
 - Under the k-mer kernel, effort is in k-mers (`effort_unit`), with `sequenced_bp` given
   separately. Reads shorter than k are filtered out first and counted, since the kernel rejects
   files containing them.
-- One kernel is chosen for the cohort from read lengths, because the two disagree: 50.5% against
-  83.0% coverage on the same 34 bp reads. `--kernel kmer` or `--kernel alignment` forces one. Do
+- One kernel is chosen for the cohort from read lengths. The two give different results: 50.5%
+  against 83.0% coverage on the same 34 bp reads. `--kernel kmer` or `--kernel alignment` forces one. Do
   not mix kernels across samples you compare.
 
 ## Global options (before the module name)
@@ -169,11 +178,11 @@ Caveats:
 | `--verbose-logs` | don't collapse repeated tool messages in the captured logs |
 | `--skip-space-check` | start even if the disk-space estimate says there is no room |
 
-## How much of the machine a run may use
+## Resource limits
 
 A `[limits]` block in `~/.metawrap2/config.toml` sets threads, memory, disk ceiling and GPUs for
 every module. Defaults: half the cores, 80% of RAM, and stop when a filesystem the run writes to
-passes 70% full. Fractions let one config work on a laptop or a large node.
+passes 70% full. With fractions, one config works on a laptop or a large node.
 
 ```toml
 [limits]
@@ -195,12 +204,14 @@ Resource budget: 16/32 threads, 102.4 GB/128.0 GB memory, disk ceiling 70%, 1/1 
 * The disk ceiling is a hard stop. A run will not start above it, and a run that crosses it is
   interrupted like Ctrl-C, so `--resume` continues from the last completed step.
 
-For one run, use the global flags `--max-threads`, `--max-thread-fraction`,
-`--max-memory-gb`, `--max-memory-fraction`, `--max-disk-fraction`, `--max-gpus` and
-`--disk-check-interval`. `metawrap2 -h` lists all but `--disk-check-interval`. The grant is recorded in the manifest, and
-`metawrap2 calibrate` compares it with the memory used, showing whether 80% suits your data.
+For one run, use the global flags `--max-threads`, `--max-thread-fraction`, `--max-memory-gb`,
+`--max-memory-fraction`, `--max-disk-fraction` and `--max-gpus`, all of which `metawrap2 -h` lists.
+`disk_check_interval`, the number of seconds between disk checks inside a long step, is a
+`[limits]` setting; a `--disk-check-interval` override is accepted for testing and is not shown in
+the help. The grant is recorded in the manifest, and `metawrap2 calibrate` compares it with the
+memory used, to show whether 80% suits your data.
 
-## Tinkering with the commands
+## Editing the commands
 
 In `src/metawrap2/modules/<module>.py`, the `COMMANDS` block holds the tool command templates and
 `CONSTANTS` the tunable numbers. Edit them, or override any surfaced value in
@@ -216,7 +227,7 @@ In `src/metawrap2/modules/<module>.py`, the `COMMANDS` block holds the tool comm
 | `metawrap2 install-env <module\|--all> [-t N]` | create (and verify) conda env(s), N at a time |
 | `metawrap2 install-db <name\|--all> [-t N] [--small]` | download, index, and configure databases |
 | `metawrap2 doctor [module]` | probe envs, software and databases; print a status map (alias: `test`) |
-| `metawrap2 doctor --fix` | recreate exactly the broken environments, leaving healthy ones alone |
+| `metawrap2 doctor --fix` | recreate only the broken environments, leaving healthy ones alone |
 | `metawrap2 status <study>` | what has run, and what `--resume` would do next |
 | `metawrap2 history` | every run on this machine, and when |
 | `metawrap2 calibrate <study>...` | check the built-in disk/memory estimates against real runs |
@@ -246,10 +257,10 @@ metawrap2 history --diff RUN RUN     # version, env, databases and command line,
 
 Get run ids from `metawrap2 history --json`; a unique prefix is enough.
 
-### Deciding a default for yourself
+### Benchmarking on your own data
 
-Defaults are chosen on measured quality, with cost beside it, using `metawrap2 benchmark`. You can
-re-run it on your own data.
+Defaults are chosen with `metawrap2 benchmark` on measured quality, with cost reported alongside.
+It can be re-run on your own data.
 
 ```
 metawrap2 benchmark list                          # datasets, comparisons, and today's defaults
@@ -266,33 +277,32 @@ metawrap2 benchmark score cami2_gi binner_set     # ranked on quality, cost besi
   full MetaWrap2 run.
 - `run` gives every variant the same threads, memory and inputs.
 - Binning comparisons use the dataset's gold-standard assembly, removing assembler variance.
-- Results append to `benchmarks/results/<dataset>.tsv`, which is committed, so a changed default
-  is reviewed with its numbers.
+- Results append to `benchmarks/results/<dataset>.tsv`, one long-format table per dataset.
 
 #### Scoring bins
 
 `score` assesses bins before ranking them, outside the measured run, so the ranked cost is binning
-alone. (CheckM's cost grows with bin count and would penalise productive variants.) Each of three
-assessors runs only when the comparison's metrics need it:
+alone. CheckM's cost grows with bin count, so including it would penalise variants that produce
+more bins. Each of three assessors runs only when the comparison's metrics need it:
 
 - AMBER (`amber_f1_bp`, `amber_ari_bp`, `amber_completeness_bp`, `amber_purity_bp`) scores bins
-  against the dataset's known contig-to-genome truth. It is marker-independent, which matters
-  because several binners use single-copy markers internally. Install its env once:
+  against the dataset's known contig-to-genome truth. It does not use marker genes, which several
+  binners use internally. Install its env once:
   `metawrap2 install-env benchmark-amber`. bp-weighted metrics use contig lengths from the binners'
   assembly, taken from the run record or `--assembly`.
 - CheckM (`bins_near_complete`, `bins_high_quality`, `bins_medium_quality`, `bins_total`) gives the
   completeness/contamination tiers papers report. It uses the `bin_refinement` env's CheckM.
 - GUNC (`gunc_pass_fraction`) is the fraction of a set's bins that are not chimeric. A bin that
-  is 95% one genome and 5% another looks barely contaminated to CheckM and costs AMBER almost
-  nothing in purity. On the `binner_set` arms, a 1.3-point AMBER purity gap between two bin sets
+  is 95% one genome and 5% another shows little contamination in CheckM and almost no loss of
+  AMBER purity. On the `binner_set` arms, a 1.3-point AMBER purity gap between two bin sets
   came with a 2.8-fold difference in chimeric bins. GUNC costs 3.2 to 5.7 CPU-hours per bin set at
   48 threads, mostly diamond, so it runs only when the comparison asks or you pass
   `--metric gunc_pass_fraction`. It needs the `metawrap2-binqc` env and
   the `GUNC_DB` database (`metawrap2 install-env binqc`, `metawrap2 install-db gunc`).
 
 Each assessor writes beside the bins it scored: `<bin set>.stats.tsv` for CheckM, `<bin set>.gunc/`
-for GUNC, one `amber/` per variant. Bin sets with existing output are skipped, so adding
-a metric runs only the missing tool. `--reassess` forces a re-run when bins have changed.
+for GUNC, one `amber/` per variant. Bin sets with existing output are skipped, so adding a metric
+runs only the missing tool. `--reassess` forces a re-run when bins have changed.
 
 A variant with three binners leaves three overlapping bin sets; summing them counts a genome up to
 three times (F1 above 1). Ranked metrics come from:
@@ -305,12 +315,12 @@ three times (F1 above 1). Ranked metrics come from:
 
 #### Example comparisons
 
-`trimmer` is the cheapest and runs on a laptop. It runs `read_qc` per sample with trim-galore and
-with fastp, scoring surviving reads, bases and Q30 bases counted from the output FASTQ. Its result
-made fastp the default.
+`trimmer` is the cheapest comparison and runs on a laptop. It runs `read_qc` per sample with
+trim-galore and with fastp, and scores surviving reads, bases and Q30 bases counted from the output
+FASTQ. fastp became the default on its result.
 
 `assembler` is the most expensive: the 3-sample co-assembly took 4 hours of wall time and 140 GB of
-resident memory for the metaSPAdes arm alone. MEGAHIT stays the default; metaSPAdes is more
+resident memory for the metaSPAdes arm alone. MEGAHIT is the default; metaSPAdes is more
 contiguous and available as `--metaspades`, but costs 3.2x the CPU-hours.
 
 ```
@@ -327,11 +337,12 @@ Bins are named `bin_001.fasta` for every binner, from 1, zero-padded. Numbers ar
 `metabat2_bins/bin_001` and `maxbin2_bins/bin_001` are unrelated. For CheckM or GTDB-Tk, use
 `-x fasta`.
 
-## Two flags worth knowing about
+## Other flags
 
 * `binning --device {cpu,cuda,cuda:N,auto}` sets where the learned binners (SemiBin2, VAMB,
-  COMEBin) train. The default `cpu` reproduces on any host; `auto` uses a GPU if torch sees one.
+  COMEBin) train. The default `cpu` gives the same result on any host; `auto` uses a GPU if torch
+  sees one.
   VAMB costs 4.9 CPU-hours on a GPU against 66.9 on the CPU, and COMEBin does not finish on a CPU.
 * `reassemble_bins --max-coverage` (default 50) thins each bin's recruited reads to that depth
-  (relative to the bin's assembled length) before SPAdes. Reassembly cost is set by the bin with the
-  most reads. `--max-coverage 0` keeps every read.
+  (relative to the bin's assembled length) before SPAdes. Reassembly cost is determined by the bin
+  with the most reads. `--max-coverage 0` keeps every read.

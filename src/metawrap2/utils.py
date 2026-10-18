@@ -58,8 +58,8 @@ SOCKET_PATH_LIMIT = 107
 #:
 #: The boundary this gives - 75 usable characters - was then checked by binding real sockets under
 #: directories of length from 60 to 90: 75 succeeds, 76 raises ``AF_UNIX path too long`` in the
-#: child and surfaces in the parent as a bare ``EOFError``. A 77-character tmpdir under
-#: ``bench_work/consolidator/metawrap`` is what exposed the gap, having been judged short enough.
+#: child and surfaces in the parent as a bare ``EOFError``. A 77-character tmpdir is what exposed
+#: the gap, having been judged short enough.
 _MP_TEMP_DIR = len("/pymp-") + 8
 _LISTENER_NAME = len("/listener-") + 8
 MAX_TMPDIR_LEN = SOCKET_PATH_LIMIT - _MP_TEMP_DIR - _LISTENER_NAME

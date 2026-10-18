@@ -130,3 +130,53 @@ def test_auto_picks_alignment_when_any_sample_is_short():
     for forced in ("kmer", "alignment"):
         args = argparse.Namespace(kernel=forced, kmer_size=24)
         assert module._choose_kernel(args, {"short": _lengths(30.0, 100)}) == forced
+
+
+# ── composing with read_qc, which was impossible ─────────────────────────────────────────────
+
+
+def test_colliding_basenames_fall_back_to_the_directory_name():
+    """`read_qc` writes `<out>/<sample>/final_pure_reads_1.fastq`, so a cohort's read files all
+    share one basename and the sample identity lives in the directory.
+
+    That made the composition this project documents - `nonpareil -r
+    READ_QC/*/final_pure_reads_1.fastq` - fail every time with a correct but unhelpful message
+    about two files reducing to one name. The two modules could not be chained the way the docs
+    chain them. The directory is what the user meant.
+    """
+    from metawrap2.modules import nonpareil as module
+
+    paths = [
+        "READ_QC/ERR011347/final_pure_reads_1.fastq",
+        "READ_QC/ERR011348/final_pure_reads_1.fastq",
+        "READ_QC/ERR011349/final_pure_reads_1.fastq",
+    ]
+    assert module.sample_names(paths) == ["ERR011347", "ERR011348", "ERR011349"]
+
+
+def test_names_that_do_not_collide_are_left_alone():
+    """A cohort whose files are named per sample keeps the names it chose."""
+    from metawrap2.modules import nonpareil as module
+
+    paths = ["reads/gut_early_1.fastq.gz", "reads/gut_late_1.fastq.gz"]
+    assert module.sample_names(paths) == ["gut_early", "gut_late"]
+
+
+def test_only_the_colliding_names_are_rewritten():
+    """One collision in a cohort must not rename the files that were already unambiguous."""
+    from metawrap2.modules import nonpareil as module
+
+    paths = [
+        "READ_QC/ERR011347/final_pure_reads_1.fastq",
+        "READ_QC/ERR011348/final_pure_reads_1.fastq",
+        "reads/sampC_1.fastq",
+    ]
+    assert module.sample_names(paths) == ["ERR011347", "ERR011348", "sampC"]
+
+
+def test_a_collision_the_directory_cannot_break_is_still_a_collision():
+    """Guessing a third time would be inventing a name, and two rows with one label are not data."""
+    from metawrap2.modules import nonpareil as module
+
+    paths = ["a/reads_1.fastq", "a/reads_1.fastq.gz"]
+    assert module.sample_names(paths) == ["a", "a"]

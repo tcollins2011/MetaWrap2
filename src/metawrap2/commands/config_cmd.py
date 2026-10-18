@@ -14,7 +14,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from ..cliformat import make_parser
-from ..config import RETIRED_DB_KEYS, find_config, load_settings
+from ..config import RETIRED_DB_KEYS, check_databases, find_config, load_settings
 
 #: The starter config. This is the single source of truth: ``metawrap2.toml.example`` at the
 #: repository root is generated from it, and a test asserts the two have not drifted apart -
@@ -53,16 +53,21 @@ use_conda_envs = true
 # `metawrap2 calibrate` compares what runs were granted against what they really used.
 
 [databases]
-# Point these at your own databases, or let `metawrap2 install-db` fill them in.
+# Point these at your own databases, or let `metawrap2 install-db` fill them in. Every line is
+# commented out on purpose: an uncommented placeholder is a *configured* path that does not
+# exist, which `metawrap2 config show` and `doctor` then report as a missing database rather
+# than as one you have not set up yet - two different states needing two different fixes. It
+# also leaves `install-db` deciding whether to replace a key or add a second one. Uncomment a
+# line only when the path next to it is real.
 # kraken2 module:
-KRAKEN2_DB = "/path/to/my/kraken2_database"
+# KRAKEN2_DB = "/path/to/my/kraken2_database"
 # read_qc host removal (the directory holding <host>.bitmask and <host>.srprism*):
-BMTAGGER_DB = "/path/to/my/bmtagger_database"
+# BMTAGGER_DB = "/path/to/my/bmtagger_database"
 # blobology and classify_bins:
-BLASTDB = "/path/to/my/NCBI_nt"
+# BLASTDB = "/path/to/my/NCBI_nt"
 # The database's name inside BLASTDB. Only needed if it is not called "nt" (e.g. "core_nt").
 # BLASTDB_NAME = "nt"
-TAXDUMP = "/path/to/my/NCBI_tax"
+# TAXDUMP = "/path/to/my/NCBI_tax"
 # CheckM1 reference data, used by bin_refinement / reassemble_bins / binning --run-checkm.
 # CheckM stores this path itself; `metawrap2 install-db checkm` runs `checkm data setRoot`.
 # CHECKM_DB = "/path/to/my/checkm_data"
@@ -217,11 +222,27 @@ def _show(args) -> int:
     print("  use_conda_envs: %s" % settings.use_conda_envs)
     print("  databases:")
     if settings.databases:
+        # Ask check_databases, which is what `check` and `quickstart` ask, instead of testing each
+        # value here. This printed its own `os.path.exists(val)` and so reported a correctly set
+        # BLASTDB_NAME - the database's *name* inside BLASTDB, not a path - as missing: there is no
+        # file called "nt" to find, and config.NON_PATH_DB_KEYS is where that is already known.
+        # Two answers to one question is how they came to disagree; now there is one.
+        present_of = {key: present for key, _value, present, _used_by in check_databases(settings)}
         for key, val in settings.databases.items():
-            exists = "ok" if val and os.path.exists(val) else "missing"
-            print("    %-12s %s  [%s]" % (key, val, exists))
+            # A key present with an empty value is "not set", not "missing": nothing was pointed
+            # at, so there is nothing that could have gone missing, and telling the user to go and
+            # find a file they never named is a dead end.
+            if not val:
+                print("    %-12s %-34s [not set]" % (key, "-"))
+                continue
+            # A key check_databases does not know - something a user added by hand - can only be
+            # checked as a path, which is what it is most likely to be.
+            present = present_of.get(key, os.path.exists(val))
+            print("    %-12s %-34s [%s]" % (key, val, "ok" if present else "missing"))
     else:
         print("    <none set>")
+        print("    `metawrap2 install-db --list` shows what each module needs; installing one")
+        print("    writes its path in here for you.")
     print()
     return 0
 

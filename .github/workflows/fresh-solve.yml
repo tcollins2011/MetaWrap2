@@ -1,0 +1,95 @@
+name: Fresh env solve
+
+# Solve an environment from its *yaml* - not from its lockfile - and then run a real module
+# against the result.
+#
+# Every pin in src/metawrap2/envs/*.yaml is a floor with no ceiling, so the environment a user
+# gets today is not the one anybody tested: the day a wrapped tool renames a flag, drops an
+# option, or changes a default, `install-env` still solves and the pipeline breaks on the first
+# run. The committed lockfiles hide that from CI entirely - `--from-lock` installs the versions
+# that worked when the lock was written, which is the point of a lockfile and the opposite of an
+# early warning.
+#
+# Scope: the read-level environment (metawrap2-reads) and `read_qc`, the first step of every
+# pipeline, rather than all thirteen environments. Solving and downloading every one of them is
+# over an hour of runner time, and the monthly Lockfiles workflow already re-solves them all to
+# refresh the locks. What that workflow does *not* do is run anything against what it solved, so
+# a tool whose CLI changed solves cleanly, writes a lockfile, and reports success. This job is
+# the one that invokes the tools. Widen it (binning next) if it earns its keep.
+#
+# Network and ~15 minutes, so it is weekly and on demand, never per PR.
+
+on:
+  schedule:
+    # Monday, early. A week of upstream drift is still a readable diff.
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "Module whose environment to solve fresh (read_qc, binning, ...)"
+        default: "read_qc"
+
+jobs:
+  solve:
+    name: Solve ${{ github.event.inputs.module || 'read_qc' }} fresh and run it
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      MODULE: ${{ github.event.inputs.module || 'read_qc' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Miniforge ships conda + mamba, which is what `metawrap2 install-env` drives. Same setup
+      # as the Lockfiles workflow's refresh job, on the same Python.
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: "3.12"
+
+      - run: pip install .
+
+      # No --from-lock and no --no-test: solve the yaml as a new user would, then let
+      # install-env's own verification run, which is what notices a tool that no longer starts.
+      - name: Solve the environment from its yaml
+        run: metawrap2 install-env "$MODULE" -t 1 --force
+
+      # Always, and before the run: when the solve produced something that does not work, the
+      # versions it produced are the first thing anybody reading this log needs.
+      - name: Record the solved versions
+        if: always()
+        run: |
+          env_name=$(python -c "import sys; from metawrap2.config import MODULE_ENVS; print(MODULE_ENVS[sys.argv[1]])" "$MODULE")
+          echo "## Solved $env_name" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          conda list -n "$env_name" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the tools are callable
+        run: metawrap2 check "$MODULE"
+
+      # The part a solve cannot tell you: that the tools still take the arguments MetaWrap2
+      # passes. The committed fixture is tiny (4,000 read pairs) because the only question here
+      # is whether the commands are accepted and the outputs land where the module says.
+      - name: Run the module on the committed fixture
+        if: env.MODULE == 'read_qc'
+        run: |
+          metawrap2 read_qc \
+            -1 benchmarks/fixtures/tiny/reads/sample_1_1.fq.gz \
+            -2 benchmarks/fixtures/tiny/reads/sample_1_2.fq.gz \
+            -o qc_out -t 2
+          ls -la qc_out
+          # A module that "succeeded" and wrote no reads has not succeeded. Named by the module's
+          # own contract, so a renamed output fails here rather than in the next step's input.
+          test -s qc_out/final_pure_reads_1.fastq
+          test -s qc_out/final_pure_reads_2.fastq
+
+      - name: Say what a failure here means
+        if: failure()
+        run: |
+          echo "::error::A freshly solved $MODULE environment does not work. This is the"\
+               "floors-with-no-ceilings failure mode: nothing in the repository changed, an"\
+               "upstream package did. Compare the versions in the step summary with"\
+               "src/metawrap2/envs/locks/, find the tool that moved, and either cap it in its"\
+               "yaml or adapt the module to its new CLI."

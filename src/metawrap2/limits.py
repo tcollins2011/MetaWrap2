@@ -342,7 +342,7 @@ def human(size: Optional[float]) -> str:
 class Budget:
     """The resolved budget for a run: absolute numbers, decided once.
 
-    Both the ceiling and what it was measured against are kept, because "96 threads" means
+    Both the ceiling and what it was measured against are kept, because "64 threads" means
     nothing in a provenance record without "of 128 cores" beside it.
     """
 

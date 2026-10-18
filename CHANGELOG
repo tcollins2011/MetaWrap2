@@ -1,7 +1,696 @@
+MetaWrap2 v=2.1.3
+	CAMI2 oral and skin added to the metaWRAP 1 comparison, binning presets measured on oral,
+		`metawrap2 report` (PDF and per-genome table), MIMAG tags, `kraken2 --bracken`, `annotate
+		--eggnog`, static functional wheels, `assembly --keep-graph`, six more `install-db` databases, and
+		fixes from user testing: three defects that stopped the default pipeline on a fresh install and
+		two that changed results.
+	Fixed - read_qc now reports read retention and warns below 70%
+		With its defaults, fastp drops a read when more than 40% of its bases are below Q15 and trims nothing;
+			trim-galore trims the low-quality tail and keeps the read. On modern data the two give similar
+			results (the CAMI2 arm with fastp kept slightly more). On 2010-era 75 bp reads fastp discarded
+			14,755,926 of 25,242,208 reads and shortened none, leaving 5.24 M pairs (trim-galore: 12.04 M).
+		nonpareil then put the extra sequencing needed for 95% coverage at 20x. With trim-galore the same
+			sample gives 4.06x, matching the published figure (0.837 coverage against a documented 0.844).
+		read_qc now reports retention from the trimmer's own report: `12,621,104 pairs in -> 5,243,141 out
+			(41.5%): 58.5% removed by quality filtering`. Below 70% it warns and suggests trim-galore.
+			`--fastp-quality-trim` adds `--cut_front --cut_tail --cut_mean_quality 20`.
+		The default trimmer is unchanged: changing it needs a measured arm, and the benchmark set has no
+			low-quality dataset, the only case where the trimmers differ. The gap is recorded in
+			benchmarks/datasets.toml.
+	Fixed - reassemble_bins now scores the original bins
+		The module picks the best of three candidates per bin: strict reassembly, permissive reassembly and
+			the original. The original was staged as `<bin>.orig.fa` while CheckM runs with `-x fasta`, so it was
+			never scored and `choose_best_bin` could only return a reassembly. The earlier `.fa` -> `.fasta`
+			rename missed this call site.
+		On 26 real bins, before -> after: strict 9 -> 7, permissive 17 -> 15, original kept 0 -> 4. So 4 of 26
+			bins (15%) had been replaced by a worse genome, and the summary reported "0 bins were not improved by
+			any reassembly".
+		The run then failed with an IndexError in the plot after 62 minutes: `original_bins.stats.tsv` was
+			header-only, and the label index `len(series)//4 - 1` is -1 on an empty list, here and in two places
+			in the completion and contamination panels. All three are guarded, a failed figure is no longer fatal
+			(bins and stats are written first), and the summary reports how many bins kept their original.
+		The dry-run SPAdes preview matched only `(".fa", ".fasta")`, so a `.fna` bin folder that passes the
+			module's validation showed no commands.
+	Fixed - read_qc with FastQC 0.13.0, and FastQC thread count
+		The pin was `fastqc >=0.12.1` with no upper bound. A fresh solve installed 0.13.0, whose argparse CLI
+			has no short `-o`, so read_qc failed on every new install. `install-env --from-lock` worked (the
+			lockfile pinned 0.12.1); the default path, used by quickstart, did not. read_qc now passes `--outdir`
+			(accepted by both) and the pin is `fastqc >=0.12.1,<0.13`.
+		FastQC now gets the same thread cap as trim-galore and fastp; with every available thread it warned on
+			each run ("You can't use more than 4 threads per file").
+	Fixed - KEGG modules table missing from the wheel
+		`metawrap2/data/kegg/modules_table.tsv` was in the repository but not in the wheel. The package-data
+			list in pyproject covered only the env files and was not extended when the KEGG table was added.
+			`pathways` and `quantify_function` failed after a wheel install (the README's first install line),
+			after the annotate step that feeds them. They worked under `pip install -e .`.
+		The whole data directory is now globbed.
+	Fixed - Pfam release not found when the config holds the HMM path
+		`annotate --pfam` reported "Pfam release unknown" although relnotes.txt, which `install-db pfam`
+			downloads, has RELEASE 38.2 on line 2. `release_from_notes` accepted a directory or the notes file,
+			but install-db writes the HMM path into the config, so the function read through a 2.2 GB HMM looking
+			for a release line. Given any other file, it now looks for the notes beside it, and it refuses
+			candidates over 1 MiB.
+	Fixed - `config show` reported BLASTDB_NAME as missing
+		`BLASTDB_NAME nt` is a database name inside BLASTDB, not a path. `config.py` lists it in
+			NON_PATH_DB_KEYS and `check_databases` respects that, but `config show` ran its own
+			`os.path.exists("nt")`. It now uses the shared helper.
+		`doctor` (resolving env names itself) and install-db (a second tar guard) had the same kind of
+			duplicate and now call the shared helpers.
+	Fixed - `doctor` and `check` include modules with no conda environment
+		`quickstart` ended with "22 OK, 0 missing, 0 broken (of 22 modules)", and `diff_abundance` then failed
+			on first use because scikit-bio was not installed. The table was built from the conda environment
+			list, so the two modules with no environment were left out, and one of them needs an optional Python
+			extra. `-h` lists 24 modules; the table had 22 rows.
+		`doctor` now lists every module in the CLI and checks the extras through `importlib.metadata`. A
+			missing extra shows as `diff_abundance (python extra) MISSING needs scikit-bio>=0.7.1: pip install
+			'metawrap2[stats]'`. `check` has the same section and accepts `diff_abundance` and
+			`quantify_function`, which it had rejected as unknown names because they have no conda environment.
+			`quickstart` no longer says it installs "everything"; it lists what it builds and which extras it
+			skips.
+	Fixed - a killed `install-db` left its download running
+		After a stopped run, two curl processes wrote to the same `.part` file: the orphan from the killed run
+			and the new one resuming it with `-C -`. The file was corrupted and the next tar failed. Downloads
+			now run in their own process group and are terminated with the command. A `.part` modified in the
+			last two minutes is refused, by name, instead of resumed.
+	Fixed - `annotate` exits non-zero when a tool fails on every bin
+		With no Bakta database configured, all 26 Bakta runs failed and the module exited 0 with "ANNOTATE
+			PIPELINE SUCCESSFULLY FINISHED", after printing 26 warnings. The database is now checked before
+			anything runs, and a per-item loop in which every item fails fails the step: `Bakta failed on 26 of
+			26 bins; no Bakta output was produced`. The dbCAN, GECCO, Pfam and KOfam loops have the same check.
+	Fixed - log collapsing now shows progress lines
+		COMEBin logs one line per epoch for 200 epochs. The collapser replaces numbers with <N>, so the step
+			printed one line and then nothing for nine minutes. No uncollapsed copy was kept, so only COMEBin's
+			internal log showed it had reached epoch 85. CheckM's "Finished processing 19 of 49 (38.78%) bins"
+			was hidden the same way.
+		After 20 repeats, a signature is now reprinted every 30 seconds with its current values and the
+			suppressed count. A signature whose `n/total` keeps the same total while the count increases is
+			treated as progress, and its closing summary shows the last value instead of the masked pattern. A
+			40-minute step with 11,906 metaBAT2 warnings now prints about 80 lines (was 11,906 or 1).
+		Also: each step prints the path of its live log when it starts, not only when it fails. A standalone
+			module run now prints the cost line (`Ns wall, X GB peak memory, Y cores busy`), which was printed
+			only for steps run by `run`. It shows, for example, when most of a large allocation is idle.
+	Fixed - `run --example` uses the default preset and 70/10
+		The generated sheet had `binning = "--metabat2 --maxbin2"` under a comment calling it "the defaults".
+			That is the `fast` tier; the default is metaBAT2 + SemiBin2. The README table gives 41 clean MAGs for
+			fast and 53 for the default, about 23% fewer. The same block had `bin_refinement = "-c 50 -x 10"`
+			instead of the documented 70/10.
+		The sheet now emits `--preset %s % DEFAULT_PRESET` and `-c 70 -x 10`, so it follows PRESETS, and it no
+			longer pins `steps`.
+	Fixed - `cohort` warns when a sheet's `steps` leaves out cohort steps
+		With the sheet from `run --example`, `cohort` dropped `coverage` and `dereplicate`, the two steps that
+			produce its cross-sample depth table and its non-redundant catalogue (in place of per-sample bins).
+			It now warns, naming the missing steps and how to restore them, as it already did when overriding
+			`coassemble = true` under cohort.
+		Steps are now resolved after the mode is known, so a sheet that pins `coverage` under cohort keeps it
+			(it was dropped with "co-assembling, so coverage has nothing to do"). `--example` is mode-aware, so
+			`cohort --example | cohort`, the README's starting point, no longer warns.
+	Fixed - nonpareil row labels for read_qc output
+		`usage.md` documents `nonpareil -r READ_QC/*/final_pure_reads_1.fastq`. read_qc puts the sample name
+			in the directory, so all these files have the same basename and the command failed on a sample-name
+			collision. When basenames collide, row labels now fall back to the parent directory. Files already
+			named per sample keep their names, and a collision the directory does not resolve is still an error.
+	Fixed - `status` lists steps in execution order
+		It sorted them alphabetically (assembly, bin_refinement, binning, quant_bins, read_qc,
+			reassemble_bins).
+	Added - CI jobs for fresh solves, wheel installs and an end-to-end run
+		On the unpatched tree the suite gave 178 passed, 3 skipped, while four of twenty-four modules could
+			not run. The unit tests did not exercise the conditions behind them: an environment solved fresh from
+			an uncapped pin, a wheel install instead of an editable one, a real CheckM run over a directory of
+			candidates, a real tarball, a machine with a second conda installation, and the path format
+			install-db writes.
+		The jobs: a scheduled job that solves the environment yamls fresh (not --from-lock) and runs the
+			read-level step on the committed fixture; a per-PR job that builds the wheel, installs it into a
+			clean venv, and runs every module's --help plus a real `pathways` from that install; and a scheduled
+			end-to-end run of the fixture through `metawrap2 run` that checks the outputs exist. The first two
+			would have caught the FastQC and wheel-data defects above.
+	Changed - nonpareil figures in docs/modules.md name their trimmer and kernel
+		docs/modules.md quoted nonpareil coverage of 84.4%/74.6%/89.4% for the test cohort without naming the
+			QC. With the current default those samples give 0.65. The trimmer change left 75 bp reads instead of
+			34 bp, so `--kernel auto` switches to the k-mer kernel, and the two kernels differ by more than 30
+			points on this sample. The figures now name their trimmer and kernel and give the current default's
+			value.
+	Fixed - environment lookup with more than one conda installation
+		Every tool was reported broken. `conda_env_exists` checks every conda installation it can see (`conda
+			env list` reads `~/.conda/environments.txt`, which is machine-wide), while `doctor` ran tools with
+			`mamba run -n`, which resolves only against the active root. `quickstart` found 23 environments from
+			an unrelated miniforge, built nothing ("already exists"), then reported 22 of 22 modules BROKEN in
+			the same run.
+		An environment is now resolved to a prefix once, by `config.env_prefix`, and every probe runs `mamba
+			run -p <prefix>`, with `-n` as the fallback when no prefix resolves. The probe keeps the subprocess
+			output, so a missing prefix reports `env prefix does not exist: <path>` instead of `not on PATH` (a
+			tester spent fifty minutes on the old message). An environment outside the active root is reported as
+			such.
+		`config.env_dirs` now matches its docstring: the hardcoded `~/miniforge3/envs`-style guesses are used
+			only when no env manager answers. Added unconditionally, they caused the collision even when `conda
+			env list` was clean.
+		`install-env`'s skip message names where it found the environment, and it counts unique environments
+			instead of modules (11, not 23; the list repeated `metawrap2-reads` five times).
+	Fixed - `install-db` for amrfinder, genomad, checkv, bakta and gtdbtk
+		`install-db` knew 13 names; the README table had 18. The five missing ones blocked `amr`, `viruses`,
+			`annotate --bakta` and `classify_bins --gtdbtk` on the documented path, with no documented
+			alternative.
+		Each now installs by name with the tool's own downloader inside its environment, as CheckM2 already
+			did: `amrfinder_update --database`, `genomad download-database`, `checkv download_database`,
+			`bakta_db download` (light variant under `--small`, 1.3 GB against 30 GB) and GTDB-Tk's
+			`download-db.sh`. Each writes the resolved path to the key its module reads (`GTDBTK_DATA_PATH` for
+			GTDB-Tk, not `GTDBTK_DB`) and leaves a marker so a re-run skips it.
+	Fixed - `install-db card` rejected the archive's `.` member
+		The install always failed, which blocked `amr --rgi`. CARD's tarball has a `.` root member. A separate
+			guard tested `destination.startswith(realpath(target) + os.sep)`; `realpath` normalises `<target>/.`
+			to `<target>`, which is not a strict prefix of itself, so the guard rejected the archive's root and
+			the install aborted.
+		That guard is removed. CARD now extracts through the same `_extract`/`_escapes` as the other
+			databases, which check for a leading `/` and for `..` components and accept `.`. A test uses a
+			tarball with a `.` member.
+	Fixed - `install-db` writes each config key when its database finishes
+		The config was written once, after the whole pool completed. In one report nine databases were
+			started, four finished (17 GB on disk), the run was stopped, and the config had none of them, so
+			`check` reported them missing.
+		Each key is now written when its database finishes. The end-of-run summary still prints every key and
+			writes only those not already present.
+	Fixed - a failed database install prints the installer's output
+		`FAILED: dbcan` was the only diagnostic; the subprocess's error text went to a stdout shared with two
+			other databases' progress bars. The failure was transient: the same command worked when re-run by
+			hand.
+		Each installer's output is kept in a ring buffer, the last 15 lines are printed under the FAILED line,
+			and the run ends with `N database(s) failed: ... Re-run the same command to retry; completed
+			databases are detected and skipped`.
+	Fixed - `install-db` honours `--dry-run`
+		`metawrap2 --dry-run install-db gtdbtk` would have downloaded ~110 GB, because the command called
+			subprocess directly instead of through the runner that handles the flag. It now changes nothing (no
+			download, extraction, mamba call or config write) and prints, per database, the command or URL, the
+			destination, both sizes and the key it would set, then the totals and the same disk-headroom line as
+			a real run.
+		Presence checks also run under a dry run, so the plan says `already present, would skip` instead of
+			planning a 90 GB re-download. A missing conda environment is a note under a dry run and still fatal
+			otherwise.
+	Fixed - size columns in `install-db --list`
+		One column held four kinds of figure: a bare size, a download size, a download-and-unpacked pair, and
+			"~20 GB + indexing"; only 4 of 13 rows gave the unpacked size. GUNC, which runs by default in
+			`bin_refinement`, was listed at 6.7 GB and takes about 13 GB.
+		There are now four aligned columns (download, on disk, `--small`, and which modules need it), with
+			totals (~580 GB / ~596 GB / ~160 GB), a legend marking estimates, and a note that SingleM's
+			metapackage downloads from Zenodo at 150-300 KB/s and takes 2-4 hours. The README table has the same
+			two sizes.
+	Fixed - `bin_refinement` stopped when one input bin set was empty
+		A binner that finds nothing to cluster writes an empty folder and exits 0, but every input set
+			had to contain bins, so `-A metabat2_bins -B semibin2_bins` failed whenever one binner made
+			no bins. Empty sets are now dropped with a warning and the rest are refined (and relabelled
+			binsA, binsB, ... in order). With one set left it is scored with CheckM and cut at -c/-x as
+			a single-set run always was. With every set empty the run finishes with an empty final
+			folder, a header-only stats table and a warning. A path that does not exist is still an
+			error.
+	Fixed - concurrent manifest writes under `cohort` or `run -j N`
+		`Manifest.save()` wrote a fixed `manifest.json.tmp` and renamed it, so two threads saving at
+			once raised `FileNotFoundError: .../manifest.json.tmp`. A user lost a 36-sample study at -j 8
+			after 33 assemblies (recovered with `--resume`). A second race let `json.dump` serialise the
+			manifest while another thread added a step.
+		The temp path is now per writer (pid and thread), and a re-entrant lock covers updating and
+			writing. Inputs and outputs are fingerprinted before the lock is taken, so hashing does not
+			block other steps. A failed write removes its temp file and leaves the previous manifest.
+	Fixed - `coverage --keep-bams` BAMs kept catalogue contig names
+		With `-a LABEL=assembly`, `coverage` aligns against a catalogue whose contigs are named
+			`LABEL~contig` and splits the depth table back to plain names, but kept BAMs stayed
+			prefixed. SemiBin2, VAMB, COMEBin and CONCOCT read the BAM, matched no contigs against the
+			plain assembly and produced no bins, with no error. Two users hit it.
+		With one assembly the BAM headers are rewritten (`samtools reheader`, @SQ SN fields only). With
+			several they are not, since contig names repeat between assemblies; the run warns, names
+			the affected binners and prints the samtools command that selects one assembly.
+	New - `binning --bams DIR`: bin from existing alignments
+		`--depth` is refused for CONCOCT and the learned binners, which read alignments, and there was
+			no way to pass them alignments. Splitting a cohort between a CPU machine (alignment) and a
+			GPU machine (binning) was not possible.
+		The BAMs are symlinked, not copied, and never deleted. Their headers are checked against the
+			assembly first: no overlap is an error naming both first contigs; partial overlap is
+			reported and allowed, since a catalogue slice covers more contigs than one assembly.
+			`--bams` and `--depth` can be combined, in which case nothing is aligned.
+	Fixed - `install-db` for a tool-owned database without its environment
+		On a fresh machine `install-db checkm2` failed with `critical libmamba The given prefix does
+			not exist`. The environment is checked first and the message names `metawrap2 install-env
+			checkm2`. Applies to all five databases fetched by their own tool.
+	Changed - the depth phase measures several BAMs at once
+		`samtools depth` does not use many threads well: ~2 minutes per BAM using every thread of a large
+			machine at ~25% load, 6h44m of `coverage` for 36 samples. Each BAM fills its own column, so
+			up to 16 now run at once with the thread budget divided between them. Results are
+			identical to the serial path, which a test checks. One BAM, or fewer than four threads,
+			runs as before.
+	Changed - MaxBin2's iteration limit is explicit
+		`run_MaxBin.pl` was called without `-max_iteration`, so MaxBin2's default of 50 applied
+			implicitly. Each iteration costs more with more contigs and samples: ~53 minutes on a
+			418k-contig co-assembly of 36 samples, about 40 hours for 50. `--maxbin2-max-iteration`
+			sets it, defaulting to 50, so no result changes.
+	Changed - kept BAMs are indexed
+		`--keep-bams` in `coverage` and `binning` now writes a `.bai` beside each sorted BAM.
+	Changed - faster FASTQ validation
+		`check_fastq` reads every input to catch a truncated gzip member, but counted lines in a Python
+			loop: ~17 minutes of one core for a 21 GB + 23 GB pair. It now counts newlines in 8 MB
+			binary chunks, through `pigz -dc` where installed. The whole stream is still read.
+	Fixed - `bin_refinement` retries once when CheckM's pplacer crashes
+		On three of six steps of a skin preset arm, CheckM failed after aligning all marker genes:
+			pplacer died with `Dune__exe__Multiprocessing.Child_error(_)` at seven threads, and the step
+			ended with `CheckM did not produce .../storage/bin_stats_ext.tsv`. The other three steps on
+			the same host finished.
+		The step now retries once with a single pplacer thread, after clearing the output and tmp
+			directories so pplacer does not resume from a partial tree. If the retry also fails, the
+			error is as before.
+		One alignment of 40 (2,022 residues, nothing unusual in it) crashed pplacer on its own, at one
+			thread, every time, but placed fine against CheckM's reduced reference tree. A third attempt
+			therefore adds `--reduced_tree`, with a warning: the reduced tree can choose a different
+			marker set, so that bin set's completeness and contamination are not strictly comparable
+			with a full-tree run. Skipped under `--quick`, which already uses the reduced tree.
+	Fixed - the default `cohort` could not run its binning step
+		With the cohort coverage stage on, each sample's binning got `--depth <slice>`. The default
+			binners are metaBAT2 + SemiBin2, and `binning` refuses `--depth` with SemiBin2, so a default
+			`cohort` stopped at the first binning step after read QC, assembly and cohort-wide
+			alignment. Reported from a 36-sample run.
+		`coverage --split-bams` now writes one indexed BAM per assembly per sample under
+			`<out>/bams/<label>/`, with that assembly's contig names, and `cohort` passes both the
+			table (for metaBAT2) and the BAMs (for SemiBin2). `binning` accepts `--depth` and `--bams`
+			together. The split reads the catalogue BAMs about once, by region through the index.
+			Checked on a two-assembly catalogue: 38,372 + 38,428 of 76,800 records, none lost or
+			duplicated, and `binning --bams` on the result produced metaBAT2 and CONCOCT bins.
+	Fixed - FastTree treated every alignment as nucleotide
+		`fasttree -nt -gtr` ran on every alignment, but both documented inputs (pangenome core-gene
+			alignments and GTDB-Tk's MSA) are protein. FastTree does not fail: it reads every residue
+			other than A, C, G and T as ambiguous and returns a tree from very little information.
+		`read_alignment` now measures the type from the residue composition (90% of residues in the
+			IUPAC nucleotide codes; fourteen amino-acid letters are also nucleotide codes, so a
+			membership test would call protein DNA), and FastTree gets `-nt -gtr` or `-lg`. The summary
+			records the model used. Unclear cases are treated as protein. IQ-TREE was not affected
+			(`-m MFP` detects the type).
+	Fixed - `--device cuda:N` did not pin SemiBin2 or VAMB to card N
+		Only COMEBin takes a device index. SemiBin2 gets `--engine gpu` and VAMB `--cuda`, so both
+			reduced `cuda:1` to "use a GPU" and torch used device 0. On a multi-GPU host a SemiBin2 arm
+			asked for cuda:1 trained on cuda:0 for 1.5 hours, sharing it with another job, while the
+			sampler on cuda:1 recorded 3 MiB.
+		All three binners are now pinned with CUDA_VISIBLE_DEVICES (`binning.gpu_pin`, using the
+			existing and previously unused `limits.gpu_env`). A pinned child sees its card as device 0,
+			so COMEBin is then given plain `-d cuda`. Bare `--device cuda` and `auto` are unchanged.
+		It went unnoticed because on a single-GPU or idle multi-GPU host the bins and timings look
+			normal. The regression tests check the environment each command gets, so they need no GPU.
+		`--preset slow` help now says COMEBin needs a GPU.
+	New - steps that use a GPU record their peak VRAM
+		`rusage` does not see GPU memory. `run_measured` now samples `nvidia-smi --query-compute-apps`
+			every 5 seconds while a step runs and keeps the most VRAM a single device held for the step's
+			own process tree: per device, since the question is whether it fits on one card, and per
+			process tree, so other jobs on the card are not counted. Modules run directly sample
+			themselves the same way; under `run` only the driver samples. A step that used no GPU records
+			no VRAM keys rather than a zero. Sampler failures are ignored so they cannot fail a step.
+		The cost line shows `6.0 GB peak VRAM on 2 GPU(s)`, and the manifest has `peak_gpu_memory_bytes`
+			and `gpu_devices`.
+		First measurements, on NVIDIA GPUs: COMEBin 5.71 GB on both a 16,936-contig and a
+			63,376-contig assembly (set by batch size), SemiBin2 0.41 GB rising to 2.75 GB over the same
+			pair, VAMB 0.56 GB. The README has a new Hardware section with these and measured per-step
+			RAM.
+	Fixed - `benchmark fetch` treated a dataset as complete with one of three samples extracted
+		The plan checked only that the archive was on disk with the right md5, so an interrupted
+			extraction left `fetch` reporting nothing to do and `run` failing later on reads that were
+			never unpacked. A verified archive with no sample directories is now reported as "downloaded
+			but not extracted" and is extracted without downloading again. Found while fetching the oral
+			samples.
+	Fixed - line wrapping in the closing banner
+		Three of the four lines in the final banner were malformed. Each line was padded to the box width
+			before wrapping, so sentences broke mid-line and the right `*****` landed on the next line. Text is
+			now wrapped to the inner width first, then centred and padded.
+	Fixed - `config init` comments out all placeholder paths
+		KRAKEN2_DB, BMTAGGER_DB, BLASTDB and TAXDUMP were written uncommented while the other eight keys were
+			commented, so `config show` reported four databases as configured but missing, which needs a
+			different action from "not configured". All placeholders are now commented, `config show` prints
+			`[not set]`, and `metawrap2.toml.example` was regenerated.
+	Fixed - `quickstart --skip-envs`
+		Documented as "databases only", it printed the environment table, reported success, exited 1 and did
+			not touch any database. It now reports database status, and in a non-interactive shell with no
+			`--databases` it says nothing will be downloaded and names the option to pass. It does not prompt, so
+			it still does not block under `sbatch`/CI.
+		Skipped steps are numbered (`STEP 2/3: databases (skipped: --databases none)`), `--log-dir` is
+			forwarded so the solver logs of a successful install can be kept, and the two pure-Python modules
+			missing from the status table (diff_abundance, quantify_function) are listed as needing nothing.
+	Fixed - progress output during environment builds
+		Eleven conda solves ran for 29 minutes with no output between the banner and the result, and the
+			per-env logs went to a temp directory, so there was nothing to tail. Each environment now prints when
+			it starts and when it finishes, with elapsed time and a count over the real number of environments,
+			and the step banner gives the measured duration.
+	Fixed - `metawrap2 -v` shows the git commit in a checkout
+		From a checkout one commit past 2.1.2 it printed `MetaWrap2 v=2.1.2`, and the README asks for this
+			string in bug reports. It now prints `MetaWrap2 2.1.3 (git acbd3d1)` from a git checkout and the
+			plain version from a wheel. The git call has a 2 s timeout and a silent fallback, so it cannot fail
+			or hang.
+	Fixed - README example step 3 used raw reads
+		Step 3 of the three-command example used the raw `reads_1.fastq reads_2.fastq` after step 2 had used
+			`READ_QC/final_pure_reads_*`, and dropped the inputs' `.gz`. As written, it either fails on a missing
+			file or bins reads that were not QC'd or host-filtered. The positional arguments also sat next to a
+			flag that takes a value, so it was unclear whether `--preset` was taking a path.
+	Changed - upper bounds on pandas and numpy
+		`pandas>=1.3` and `numpy>=1.20` resolved a fresh install to pandas 3.0.6 and numpy 2.5.4, two major
+			versions with breaking changes that MetaWrap2 has not been run against. Upper bounds now state the
+			tested range.
+	Changed - Python 3.10+ and conda are stated in the install block
+		The requirement was in `## Notes`, 250 lines below the install block. On stock RHEL 8 or older Ubuntu,
+			`python3` is 3.9, and `pip install .` fails after downloading scipy, pyrodigal and seaborn, with
+			nothing saying where to get a 3.10+ interpreter. The install block now gives the requirement, the
+			Miniforge bootstrap, and whether conda is needed first.
+		The sentence "`cohort` is `run --no-coassembly`" moved from usage.md to the README beside the two
+			commands, with the comparison rows. The example also generates its sample sheet with the command it
+			then uses.
+	New - docs/tutorial.md: CAMI2 walkthrough with expected output
+		A v2 counterpart of the v1 tutorial. CAMI2 is simulated with a known truth, so output that differs
+			from the tutorial's points to the local setup.
+		Two parts: a ten-minute smoke test on the `tiny` fixture in the repository, with no download, and a
+			full walkthrough on three CAMI2 gastrointestinal samples (read_qc, assembly, binning, bin_refinement,
+			quant_bins, classify_bins, then `annotate --kofam` and `pathways`). Each step gives a measured cost
+			from the committed results or says the cost is not measured, and the tutorial ends with the clean-HQ
+			count to compare against.
+	New - MIMAG quality tags on every refined bin set
+		`mimag_tag`, `mimag_rrna` and `mimag_trnas` are appended to `.stats.tsv`, following Bowers et al. (Nat
+			Biotechnol 2017). Completeness and contamination were already measured, and `annotate --bakta`
+			already runs tRNAscan-SE, Aragorn and Infernal, so the rRNA and tRNA evidence is parsed from existing
+			output.
+		A genome annotated without that evidence is tagged `high_quality_unverified_rrna` with
+			`mimag_rrna=unknown`, not downgraded to medium. A bin above 10% contamination is `not_mimag` (no
+			MIMAG tier), not low quality.
+		Boundaries are Bowers' inequalities (>90, <5, >=50, 18 of 20 tRNAs), which differ from the existing
+			`quality_counts` tiers at 90.00 and 5.00; both are pinned. tRNAs are counted as distinct amino acids,
+			not as features. `bin_refinement` prints the tier distribution of its final set.
+	New - `kraken2 --bracken`: abundance at a chosen rank
+		Kraken2 reports the reads assigned at each node. A read matching conserved sequence is assigned at a
+			higher rank, so a species at 10% of a community can have only part of its reads at its own node and
+			the rest at genus or family. Bracken (Lu et al., PeerJ Comput Sci 2017) redistributes them using the
+			Kraken2 database's k-mer distribution. On the test fixture, 150 of 1,000 reads at the species node
+			(15%) become 301 estimated reads (31.7%).
+		Options are `--bracken-rank` (default species) and `--bracken-read-length`. Bracken needs Kraken2's
+			`--report`, which `kraken2` did not write; the flag now adds it. Without `--bracken`, Kraken2's
+			output is byte-identical to before.
+		Four checks cover cases that otherwise give no error: a rank the database was not built for, a read
+			length absent from the database (or shorter than its k), a `-w` report passed instead of the table,
+			and a redistribution that moves almost nothing, which means the Bracken and Kraken2 databases do not
+			match. Bracken exits 0 on every error, so its output is checked instead of its exit status.
+		No extra download is needed: the pre-built KRAKEN2 standard database includes the
+			`databaseNmers.kmer_distrib` files for 50 to 300 bp. A custom database needs `bracken-build -d
+			$KRAKEN2_DB -l <read length>`, with `BRACKEN_DB` pointing at it.
+	Fixed - dbCAN `-|-` EC field read as an EC number
+		dbCAN joins a multi-domain gene's per-domain fields with `|` and writes `-` for a domain it cannot
+			annotate, so a two-domain gene with no EC number gives `-|-`. The cleaner split only on `;` and `,`,
+			so `ec` came back as `-|-`, which any count of EC-annotated genes would include. This affected 2 of
+			11 rows in the vendored fixture. The trailing dash of a partial EC number (`3.2.1.-`) is kept,
+			because whole members are dropped instead of dashes stripped. Found by the parser tests below.
+	Added - parser tests for other tools' tables (about 45, restored)
+		The suite stays small: golden tests, one main path per module, and regressions for defects that
+			produced wrong output. These parser tests are added back because several past defects came from
+			parsers, each giving a plausible wrong number instead of an error: GUNC's `pass.GUNC` as `1.0`/`0.0`
+			(a 166-bin set scored 0% non-chimeric), inStrain's identities as fractions where its paper says
+			percentages (42 of 42 comparisons read as different strains), SingleM's read fraction already being a
+			percentage (0.8% read as 80%), the depth table's interleaved `-var` columns, and `bin.13` collapsing
+			to `bin` under splitext.
+		Six files cover GUNC, CheckM1 and CheckM2, the depth table, KOfam's ko_list, Pfam, dbCAN, GECCO,
+			BRITE's htext, SingleM, nonpareil, PPanGGOLiN, IQ-TREE, inStrain, TRACS, AMRFinderPlus, RGI and
+			argNorm. Each pins the column names the tool writes, the unit, and identifier handling. A missing
+			value must come back as None or blank, never as zero.
+	New - `assembly --keep-graph`, and `run`/`cohort` record which strategy built a catalogue
+		Plasmid-aware binning (PlasMAAG), graph-aware binners (GraphMB) and Hi-C placement read the assembly
+			graph, which meant re-running assembly. `--keep-graph` puts the graph at a named path. metaSPAdes'
+			`assembly_graph_with_scaffolds.gfa` and metaFlye's `assembly_graph.gfa` are hard-linked (121 MB and
+			2.3 MB, no extra disk). MEGAHIT writes no graph, so one is built from its intermediates with
+			`megahit_toolkit contig2fastg` (235 MB, two seconds on one core), from the largest k it wrote, which
+			can differ from the configured k. Off by default and a separate resumable step, so `--resume
+			--keep-graph` adds a graph to a finished assembly.
+		Correction to the earlier plans: `assembly` never deleted a graph. metaSPAdes and metaFlye graphs were
+			kept, and MEGAHIT does not write one.
+		The study manifest now records `strategy` (co-assembly or per-sample), `samples` and `dereplicated`,
+			and `status` prints them. Previously nothing recorded which kind of catalogue a directory held; the
+			two have different genome counts and redundancy and are not comparable.
+	New - `metawrap2 report`: PDF report and per-genome table
+		A finished study wrote twenty-odd tables, none of them a document to share and none per genome
+			(quality, taxonomy and coverage were in separate files). `report` reads the module output directories
+			it is given and assembles what it finds: a summary page, read QC, assembly statistics, the per-genome
+			table with its quality-tier distribution, abundance across samples, the functional wheels, and row
+			counts for resistance, viruses and strains. It computes nothing.
+		One page lists every module whose output was absent and what was looked for, so a missing output is
+			not read as a negative result; the page is included even when nothing is missing. Blank cells are
+			measurements that were not made, never zeros. A genome named by only one input (for example an
+			abundance table over a different bin set) is listed with the count stated: 13 of 26 rows on the
+			reference run.
+		`--mag-table` writes the per-genome table beside the PDF, joining the stats table, the GUNC report,
+			`classify_bins`' taxonomy and `quant_bins`' abundance on bin name across the three spellings those
+			files use (`bin_001`, `bin_001.fasta`, `bin.1`). The PDF uses matplotlib's PdfPages (already a
+			dependency), needs no HTML toolchain or headless browser, and renders the same on a cluster with no
+			network.
+		Two defects were found by running it on a real per-sample study rather than a fixture. It reported one
+			sample's bin set as the whole study (`Genomes (24)` for a study that recovered 62) because it took
+			the first stats table it found. The GUNC search also joined sample_6's chimerism report onto
+			sample_13's genomes, because every sample numbers its bins from `bin_001`, giving 23 wrong verdicts
+			and one phantom genome. Each bin set is now paired with the GUNC report in its own directory, rows
+			have a `sample` column when there is more than one bin set, and the heading says what it covers.
+		Provenance is one line per module on page 1 plus a verbatim appendix (it was six pages before the
+			first result). The reference run gives 23 pages, first result on page 2.
+	New - `pathways --brite-db`, and a PNG beside every Krona wheel
+		The BRITE hierarchy is downloaded rather than vendored, and a revised hierarchy changes the
+			percentages. Every other database has both a config key and a flag; BRITE had only `KEGG_BRITE`, so
+			selecting a snapshot meant editing metawrap2.toml. The flag overrides the config key, and the skip
+			message names all three ways to supply one.
+	New - static PNG wheels of the functional hierarchy
+		`ktImportText` writes only an interactive HTML file, which cannot go into a report, release note,
+			paper figure or message, and rasterising Krona needs a headless browser. `metawrap2.sunburst` draws
+			the same data with matplotlib (already a hard dependency) from the same file Krona reads, so the two
+			agree. `pathways` writes one PNG beside each Krona HTML.
+		BRITE's scaffolding branches are kept, because dropping them inflates every remaining percentage.
+			Level A is drawn in KEGG's order with a fixed colour per branch, so wheels from two samples can be
+			compared directly. Small wedges are drawn but not labelled, and the caption gives how many pathway
+			wedges fall below the label threshold and their total share.
+	New - `annotate --eggnog`: GO terms, EC numbers and COG categories from eggNOG-mapper
+		eggNOG-mapper (Cantalapiedra et al., Mol Biol Evol 2021) runs over the same proteins as `--kofam`
+			and `--pfam`. Annotations are transferred from the orthologous group a gene falls in, not
+			matched against a profile. Each row keeps `max_annot_lvl`, the taxonomic level of that group.
+		Five development bins, 14,171 genes, 1,134 s wall for all three searches at -t 24 (6.5 GB peak,
+			13.1 cores busy; eggNOG about 100 s per bin, nearly all DIAMOND): --kofam placed 5,827 genes
+			(41.1%), --pfam 11,369 (80.2%), --eggnog 13,443 (94.9%), and 12,634 (89.2%) got a GO term, EC
+			number or COG category, 41,075 terms in all. No module produced GO terms or COG categories
+			before this; EC numbers came only from `--cazy`.
+		eggNOG's KOs are written beside KOfam's, not merged: 5,077 genes called by both (4,841 with the
+			same KO), 2,295 by eggNOG only, 750 by KOfam only. The overlap is printed.
+		`install-db eggnog` downloads 12 GB and unpacks to 48 GB (eggnog.db 39 GB, eggnog_proteins.dmnd
+			8.7 GB), so it is opt-in and its plan lists every URL. eggNOG-mapper 2.1.15 imports
+			`distutils`, removed in Python 3.12, so it has its own environment (`envs/eggnog.yaml`, Python
+			below 3.12).
+		Two defects found while running it: the first installer pointed at a host that no longer serves
+			the files and reported `Finished` after three 0-byte downloads (it now uses eggnog5.embl.de
+			through the shared checked download path), and `EGGNOG_DB` named `eggnog.db` instead of the
+			directory, the pattern that lost Pfam's release above.
+	New - metaWRAP 1 comparison on CAMI2 oral and skin
+		All defaults were measured on three CAMI2 gastrointestinal samples. The comparison now also runs on
+			oral and skin with the same design: three samples, per-sample assembly, metaWRAP 1.3.0 beside the
+			current default, both scored with CheckM2 and GUNC. Skin is a low-diversity community
+			dominated by a few genera.
+		Clean high-quality MAGs, counted per bin by joining the two reports:
+			  body site          metaWRAP 1.3.0   MetaWrap2 default   cpu-h (mw1 vs mw2)
+			  gastrointestinal   48               53  (+10%)          132.0 vs 127.1
+			  oral               45               51  (+13%)          172.6 vs 184.9
+			  skin               41               50  (+22%)          136.2 vs 200.2
+		MetaWrap2 is ahead on all three sites, most on skin. Per sample it is ahead on five of the six oral
+			and skin samples and level on one (oral 20/17, 13/10, 18/18; skin 14/10, 17/16, 19/15).
+		The gastrointestinal arms were re-scored with the per-bin join instead of reusing their older
+			high-quality counts, so all six numbers use the same method. Cost is not comparable across sites:
+			the gastrointestinal arm trained SemiBin2 on a GPU (0.6 GPU-hours) and the oral and skin arms
+			ran the CPU default, which accounts for the 124 and 139 vs 32 cpu-hour binning difference.
+			Within a site, MetaWrap2 is 4% cheaper on gastrointestinal, 7% more expensive on oral and 47%
+			more expensive on skin, where it recovers 9 more clean MAGs for 64 more cpu-hours.
+		Figure: docs/figures/body_sites.png.
+	New - binning presets measured on CAMI2 oral
+		The preset table was from the gastrointestinal samples only. All presets now have oral numbers,
+			scored with the same per-bin CheckM2 and GUNC join:
+			  arm                     binners                        device  clean  HQ   cpu-h
+			  --preset fast           metaBAT2 + MaxBin2             cpu      39    50     9.4
+			  metaWRAP 1.3.0          metaBAT2 + MaxBin2 + CONCOCT   cpu      45    49   123.4
+			  --preset default        metaBAT2 + SemiBin2            cpu      51    57   132.8
+			  --preset slow           + COMEBin                      cuda     59    63    80.3
+		`slow` recovers 16% more clean MAGs than `default` on oral (13% on gastrointestinal) and is ahead
+			on each sample (23/20, 15/13, 21/18). A user-testing run on MetaHIT reads gave +58%.
+		The cost column is binning plus refinement, since the preset arms reuse the default arm's
+			assemblies. `default` trained SemiBin2 on CPU and `slow` used a GPU, so `slow` shows fewer
+			CPU-hours. The comparable pair is fast and default, both on CPU: 9.4 against 132.8 cpu-hours
+			for 39 against 51 clean MAGs.
+		No default changed. Making `slow` the default needs its cost measured with SemiBin2 and COMEBin on
+			CPU, which has not been done.
+		Figure: docs/figures/oral_tiers.png.
+	New - binning presets measured on CAMI2 skin
+		The same four arms on the three skin samples, scored with the same per-bin CheckM2 and GUNC join:
+			  arm                     binners                        device  clean  HQ   cpu-h
+			  --preset fast           metaBAT2 + MaxBin2             cpu      35    41    10.7
+			  metaWRAP 1.3.0          metaBAT2 + MaxBin2 + CONCOCT   cpu      41    48    81.0
+			  --preset default        metaBAT2 + SemiBin2            cpu      50    57   147.7
+			  --preset slow           + COMEBin                      cuda     54    59   122.3
+		`slow` recovers 8% more clean MAGs than `default` on skin (16% on oral, 13% on
+			gastrointestinal) and wins two samples and ties one (15/14, 17/17, 22/19). `fast` recovers
+			fewer clean MAGs than metaWRAP 1 (35 against 41) for 13% of its compute.
+		On sample_17 CheckM1 needed `--reduced_tree` for COMEBin's bin set, so that sample's hybrid-set
+			choice used a slightly different scorer; the reported counts come from the shared join.
+		No default changed. The three sites agree on the direction of `slow`'s gain but not its size,
+			so it stays opt-in.
+		Figures: docs/figures/body_sites.png, docs/figures/skin_tiers.png.
+	New - cami2_oral and cami2_skin benchmark datasets
+		The CAMI2 deposit (frl:6425518, CC BY 4.0, Meyer et al. 2022) has 49 short-read samples across five
+			body sites with the same truth format. `cami2_oral` and `cami2_skin` each take three samples,
+			matching the three-sample design of the metaWRAP 1 comparison.
+		md5s are pinned from the publisher's manifest, and every byte count is measured with a HEAD request,
+			as benchmarks/datasets.toml requires. Body sites were checked after extraction, not taken from
+			sample numbering. Oral: 88 of 89, 176 of 177 and 159 of 159 of each sample's genomes are in the
+			oral gold standard, against 4-5 in the gastrointestinal one.
+		The deposit's 29 airskinurogenital samples are not labelled by site. 88 of 90, 50 of 52 and 238 of
+			240 of the genomes in samples 17, 18 and 19 are in the skin gold standard, about half that in the
+			airways one and almost none in the urogenital one; checking samples 4, 9 and 24 showed the
+			deposit is ordered airways, skin, urogenital.
+MetaWrap2 v=2.1.2`, and the README asks for this
+			string in bug reports. It now prints `MetaWrap2 2.1.3 (git acbd3d1)` from a git checkout and the
+			plain version from a wheel. The git call has a 2 s timeout and a silent fallback, so it cannot fail
+			or hang.
+	Fixed - README example step 3 used raw reads
+		Step 3 of the three-command example used the raw `reads_1.fastq reads_2.fastq` after step 2 had used
+			`READ_QC/final_pure_reads_*`, and dropped the inputs' `.gz`. As written, it either fails on a missing
+			file or bins reads that were not QC'd or host-filtered. The positional arguments also sat next to a
+			flag that takes a value, so it was unclear whether `--preset` was taking a path.
+	Changed - upper bounds on pandas and numpy
+		`pandas>=1.3` and `numpy>=1.20` resolved a fresh install to pandas 3.0.6 and numpy 2.5.4, two major
+			versions with breaking changes that MetaWrap2 has not been run against. Upper bounds now state the
+			tested range.
+	Changed - Python 3.10+ and conda are stated in the install block
+		The requirement was in `## Notes`, 250 lines below the install block. On stock RHEL 8 or older Ubuntu,
+			`python3` is 3.9, and `pip install .` fails after downloading scipy, pyrodigal and seaborn, with
+			nothing saying where to get a 3.10+ interpreter. The install block now gives the requirement, the
+			Miniforge bootstrap, and whether conda is needed first.
+		The sentence "`cohort` is `run --no-coassembly`" moved from usage.md to the README beside the two
+			commands, with the comparison rows. The example also generates its sample sheet with the command it
+			then uses.
+	New - docs/tutorial.md: CAMI2 walkthrough with expected output
+		A v2 counterpart of the v1 tutorial. CAMI2 is simulated with a known truth, so output that differs
+			from the tutorial's points to the local setup.
+		Two parts: a ten-minute smoke test on the `tiny` fixture in the repository, with no download, and a
+			full walkthrough on three CAMI2 gastrointestinal samples (read_qc, assembly, binning, bin_refinement,
+			quant_bins, classify_bins, then `annotate --kofam` and `pathways`). Each step gives a measured cost
+			from the committed results or says the cost is not measured, and the tutorial ends with the clean-HQ
+			count to compare against.
+	New - MIMAG quality tags on every refined bin set
+		`mimag_tag`, `mimag_rrna` and `mimag_trnas` are appended to `.stats.tsv`, following Bowers et al. (Nat
+			Biotechnol 2017). Completeness and contamination were already measured, and `annotate --bakta`
+			already runs tRNAscan-SE, Aragorn and Infernal, so the rRNA and tRNA evidence is parsed from existing
+			output.
+		A genome annotated without that evidence is tagged `high_quality_unverified_rrna` with
+			`mimag_rrna=unknown`, not downgraded to medium. A bin above 10% contamination is `not_mimag` (no
+			MIMAG tier), not low quality.
+		Boundaries are Bowers' inequalities (>90, <5, >=50, 18 of 20 tRNAs), which differ from the existing
+			`quality_counts` tiers at 90.00 and 5.00; both are pinned. tRNAs are counted as distinct amino acids,
+			not as features. `bin_refinement` prints the tier distribution of its final set.
+	New - `kraken2 --bracken`: abundance at a chosen rank
+		Kraken2 reports the reads assigned at each node. A read matching conserved sequence is assigned at a
+			higher rank, so a species at 10% of a community can have only part of its reads at its own node and
+			the rest at genus or family. Bracken (Lu et al., PeerJ Comput Sci 2017) redistributes them using the
+			Kraken2 database's k-mer distribution. On the test fixture, 150 of 1,000 reads at the species node
+			(15%) become 301 estimated reads (31.7%).
+		Options are `--bracken-rank` (default species) and `--bracken-read-length`. Bracken needs Kraken2's
+			`--report`, which `kraken2` did not write; the flag now adds it. Without `--bracken`, Kraken2's
+			output is byte-identical to before.
+		Four checks cover cases that otherwise give no error: a rank the database was not built for, a read
+			length absent from the database (or shorter than its k), a `-w` report passed instead of the table,
+			and a redistribution that moves almost nothing, which means the Bracken and Kraken2 databases do not
+			match. Bracken exits 0 on every error, so its output is checked instead of its exit status.
+		No extra download is needed: the pre-built KRAKEN2 standard database includes the
+			`databaseNmers.kmer_distrib` files for 50 to 300 bp. A custom database needs `bracken-build -d
+			$KRAKEN2_DB -l <read length>`, with `BRACKEN_DB` pointing at it.
+	Fixed - dbCAN `-|-` EC field read as an EC number
+		dbCAN joins a multi-domain gene's per-domain fields with `|` and writes `-` for a domain it cannot
+			annotate, so a two-domain gene with no EC number gives `-|-`. The cleaner split only on `;` and `,`,
+			so `ec` came back as `-|-`, which any count of EC-annotated genes would include. This affected 2 of
+			11 rows in the vendored fixture. The trailing dash of a partial EC number (`3.2.1.-`) is kept,
+			because whole members are dropped instead of dashes stripped. Found by the parser tests below.
+	Added - parser tests for other tools' tables (about 45, restored)
+		The suite stays small: golden tests, one main path per module, and regressions for defects that
+			produced wrong output. These parser tests are added back because several past defects came from
+			parsers, each giving a plausible wrong number instead of an error: GUNC's `pass.GUNC` as `1.0`/`0.0`
+			(a 166-bin set scored 0% non-chimeric), inStrain's identities as fractions where its paper says
+			percentages (42 of 42 comparisons read as different strains), SingleM's read fraction already being a
+			percentage (0.8% read as 80%), the depth table's interleaved `-var` columns, and `bin.13` collapsing
+			to `bin` under splitext.
+		Six files cover GUNC, CheckM1 and CheckM2, the depth table, KOfam's ko_list, Pfam, dbCAN, GECCO,
+			BRITE's htext, SingleM, nonpareil, PPanGGOLiN, IQ-TREE, inStrain, TRACS, AMRFinderPlus, RGI and
+			argNorm. Each pins the column names the tool writes, the unit, and identifier handling. A missing
+			value must come back as None or blank, never as zero.
+	New - `assembly --keep-graph`, and `run`/`cohort` record which strategy built a catalogue
+		Plasmid-aware binning (PlasMAAG), graph-aware binners (GraphMB) and Hi-C placement read the assembly
+			graph, which meant re-running assembly. `--keep-graph` puts the graph at a named path. metaSPAdes'
+			`assembly_graph_with_scaffolds.gfa` and metaFlye's `assembly_graph.gfa` are hard-linked (121 MB and
+			2.3 MB, no extra disk). MEGAHIT writes no graph, so one is built from its intermediates with
+			`megahit_toolkit contig2fastg` (235 MB, two seconds on one core), from the largest k it wrote, which
+			can differ from the configured k. Off by default and a separate resumable step, so `--resume
+			--keep-graph` adds a graph to a finished assembly.
+		Correction to the earlier plans: `assembly` never deleted a graph. metaSPAdes and metaFlye graphs were
+			kept, and MEGAHIT does not write one.
+		The study manifest now records `strategy` (co-assembly or per-sample), `samples` and `dereplicated`,
+			and `status` prints them. Previously nothing recorded which kind of catalogue a directory held; the
+			two have different genome counts and redundancy and are not comparable.
+	New - `metawrap2 report`: PDF report and per-genome table
+		A finished study wrote twenty-odd tables, none of them a document to share and none per genome
+			(quality, taxonomy and coverage were in separate files). `report` reads the module output directories
+			it is given and assembles what it finds: a summary page, read QC, assembly statistics, the per-genome
+			table with its quality-tier distribution, abundance across samples, the functional wheels, and row
+			counts for resistance, viruses and strains. It computes nothing.
+		One page lists every module whose output was absent and what was looked for, so a missing output is
+			not read as a negative result; the page is included even when nothing is missing. Blank cells are
+			measurements that were not made, never zeros. A genome named by only one input (for example an
+			abundance table over a different bin set) is listed with the count stated: 13 of 26 rows on the
+			reference run.
+		`--mag-table` writes the per-genome table beside the PDF, joining the stats table, the GUNC report,
+			`classify_bins`' taxonomy and `quant_bins`' abundance on bin name across the three spellings those
+			files use (`bin_001`, `bin_001.fasta`, `bin.1`). The PDF uses matplotlib's PdfPages (already a
+			dependency), needs no HTML toolchain or headless browser, and renders the same on a cluster with no
+			network.
+		Two defects were found by running it on a real per-sample study rather than a fixture. It reported one
+			sample's bin set as the whole study (`Genomes (24)` for a study that recovered 62) because it took
+			the first stats table it found. The GUNC search also joined sample_6's chimerism report onto
+			sample_13's genomes, because every sample numbers its bins from `bin_001`, giving 23 wrong verdicts
+			and one phantom genome. Each bin set is now paired with the GUNC report in its own directory, rows
+			have a `sample` column when there is more than one bin set, and the heading says what it covers.
+		Provenance is one line per module on page 1 plus a verbatim appendix (it was six pages before the
+			first result). The reference run gives 23 pages, first result on page 2.
+	New - `pathways --brite-db`, and a PNG beside every Krona wheel
+		The BRITE hierarchy is downloaded rather than vendored, and a revised hierarchy changes the
+			percentages. Every other database has both a config key and a flag; BRITE had only `KEGG_BRITE`, so
+			selecting a snapshot meant editing metawrap2.toml. The flag overrides the config key, and the skip
+			message names all three ways to supply one.
+	New - static PNG wheels of the functional hierarchy
+		`ktImportText` writes only an interactive HTML file, which cannot go into a report, release note,
+			paper figure or message, and rasterising Krona needs a headless browser. `metawrap2.sunburst` draws
+			the same data with matplotlib (already a hard dependency) from the same file Krona reads, so the two
+			agree. `pathways` writes one PNG beside each Krona HTML.
+		BRITE's scaffolding branches are kept, because dropping them inflates every remaining percentage.
+			Level A is drawn in KEGG's order with a fixed colour per branch, so wheels from two samples can be
+			compared directly. Small wedges are drawn but not labelled, and the caption gives how many pathway
+			wedges fall below the label threshold and their total share.
+	New - metaWRAP 1 comparison on CAMI2 oral
+		All defaults were measured on three CAMI2 gastrointestinal samples. The comparison now also runs on
+			oral with the same design: three samples, per-sample assembly, metaWRAP 1.3.0 beside the current
+			default, both scored with CheckM2 and GUNC.
+		Clean high-quality MAGs, counted per bin by joining the two reports:
+			  body site          metaWRAP 1.3.0   MetaWrap2 default   cpu-h (mw1 vs mw2)
+			  gastrointestinal   48               53  (+10%)          132.0 vs 127.1
+			  oral               45               51  (+13%)          172.6 vs 184.9
+		The margin is slightly larger on oral. Per sample on oral, MetaWrap2 is ahead on two and level on the
+			third (20/17, 13/10, 18/18).
+		The gastrointestinal arms were re-scored with the per-bin join instead of reusing their older
+			high-quality counts, so all four numbers use the same method. Cost is not comparable across sites:
+			the gastrointestinal arm trained SemiBin2 on a GPU (0.6 GPU-hours) and the oral arm ran the CPU
+			default, which accounts for all of the 124 vs 32 cpu-hour binning difference. Within a site,
+			MetaWrap2 is 4% cheaper on gastrointestinal and 7% more expensive on oral.
+		Figure: docs/figures/body_sites.png.
+	New - cami2_oral benchmark dataset
+		The CAMI2 deposit (frl:6425518, CC BY 4.0, Meyer et al. 2022) has 49 short-read samples across five
+			body sites with the same truth format. `cami2_oral` takes three of the oral samples, matching the
+			three-sample design of the metaWRAP 1 comparison.
+		md5s are pinned from the publisher's manifest, and every byte count is measured with a HEAD request,
+			as benchmarks/datasets.toml requires. The body site was checked after extraction, not taken from
+			sample numbering: 88 of 89, 176 of 177 and 159 of 159 of each sample's genomes are in the oral gold
+			standard, against 4-5 in the gastrointestinal one.
 MetaWrap2 v=2.1.2
-	Functional annotation subsystem: gene calling over bins or an assembly, KEGG orthologs at curated
-		thresholds, module completeness, functional hierarchy and Krona wheels, AMR with context and an
-		evidence level, viruses, strains, community appraisal, long reads and comparative genomics.
+	Functional annotation (gene calling over bins or an assembly, KEGG orthologs at curated thresholds,
+		module completeness, functional hierarchy and Krona wheels), AMR with context and an evidence
+		level, viruses, strains, community appraisal, long reads and comparative genomics.
 	New - `metawrap2 annotate`, replacing the Prokka wrapper `annotate_bins`: Pyrodigal gene calls over a
 		bin folder or a whole assembly, one table every later step reads. Bins under 20 kb fall back to
 		meta mode with a notice. Each gene carries `partial` and `distance_to_contig_end`.
@@ -83,11 +772,9 @@ MetaWrap2 v=2.1.2
 		and a chimerism caveat (54.5-81.8% of HQ MAGs are single-strain; Treichel et al. 2026).
 	New - measured module completeness vs MAG completeness (one CAMI2 genome): complete modules at 100/95/
 		90/80/70/50% = 58/52.7/48.0/37.0/24.0/15.0. At 70/10, 59% are gone. `pathways` rows carry CheckM2
-		completeness. Draws at 80% gave 31, 39 and 41. Details: bench_work/degradation/FINDINGS.md.
+		completeness. Draws at 80% gave 31, 39 and 41.
 	New - vendored, dated KEGG snapshots: modules_table.tsv (573 modules; live KEGG has 582), ko_list.gz
 		(28,453 profiles), ko_hierarchy.tsv.gz (64,956 KO-pathway pairs). KOfam HMMs are not vendored (KOFAM_DB).
-	New - `benchmarks/make_release_figures.py` draws eleven release-note figures from module runs and skips
-		any whose input is missing.
 	New - docs: `## Function` and `## Viruses` in docs/modules.md, a worked chain in docs/usage.md
 		(annotate -> pathways -> quantify_function -> amr -> diff_abundance). README updated to the current modules.
 	Changed - CoverM in quant_bins filters reads at 90% identity and 75% aligned (were CoverM's 0 and 0).
@@ -105,7 +792,8 @@ MetaWrap2 v=2.1.2
 		(>=90/<5) is MIMAG HQ without rRNA/tRNA, `bins_high_quality` (>=70/<10) is not a MIMAG tier.
 		Field names unchanged.
 	Fixed - install-env on 2.0.1 could not reach bakta, checkm2 or gtdbtk under any name (KeyError, "No env
-		file"). doctor invented env names and check printed "Preflight OK" after checking nothing.
+		file"). doctor used env names that did not exist, and check printed "Preflight OK" after checking
+		nothing.
 	Fixed - `check` looked for tools on PATH; it now looks inside the module's conda env (PATH only with
 		`use_conda_envs = false`). A tool missing from an existing env is reported as half-built (`--force`).
 	Fixed - four help strings named envs removed in 2.1.0 (`metawrap2-annotate_bins-bakta`,
@@ -118,7 +806,7 @@ MetaWrap2 v=2.1.2
 	Fixed - cctyper 1.9.0 from bioconda could not find its database (MetaWrap2 passes `--db`) and crashed
 		on pandas 3 (envs/viruses.yaml pins `pandas <3`).
 	Fixed - `install-env --from-lock` never used the lockfiles: the option was parsed and ignored, so every
-		"reproducible" install solved the yaml. It now installs `envs/locks/<env>.<platform>.lock`, and says
+		install solved the yaml. It now installs `envs/locks/<env>.<platform>.lock`, and says
 		so when an environment has no lockfile for the platform and falls back to solving.
 	Fixed - `install-env --lock binning` wrote `binning.linux-64.lock`; lockfiles are now named after the
 		environment (`bins.linux-64.lock`), which is the name `--from-lock` reads.
@@ -147,19 +835,19 @@ MetaWrap2 v=2.1.2
 	Known issue - long-read assemblies are not polished with short reads or merged with short-read
 		assemblies.
 MetaWrap2 v=2.1.1
-	The top binning tier is an ensemble again, measured end to end, and tier cost is read from the run.
+	Ensemble `slow` binning tier, tier costs read from run logs, and plans for functional annotation.
 	Changed - `--preset slow` runs metaBAT2 + SemiBin2 + COMEBin (was COMEBin alone): end to end 64 HQ /
 		60 clean vs 61 / 57, for 120.7 vs 80.8 cpu-hours and 2.4 vs 1.7 GPU-hours. `--comebin` restores the
 		old tier. On the gold assembly the two tie (177 vs 176 clean).
 	Changed - metaBAT2 is the third member on cost: a MaxBin2 trio covers 182 genomes vs 181, but MaxBin2
 		costs 24.5 cpu-hours vs ~1.5 and 37.7% of its bins pass GUNC.
-	New - bench_work/preset_cost.py and preset_gpu_hours.py read cpu-hours and GPU-hours out of `mw2 run`
-		logs. The `default` tier's GPU figure is now 0.6 (was 0.8). Re-run counts matched: 14/14, 20/19, 30/27.
+	New - a tier's cpu-hours and GPU-hours are read from `mw2 run` logs. The `default` tier's GPU figure is
+		now 0.6 (was 0.8). Re-run counts matched: 14/14, 20/19, 30/27.
 	New - docs/plan_functional_annotation.md and docs/plan_other_modules.md (not implemented). Licence
 		findings: CARD/RGI and geNomad are non-commercial; KOfam's HMM profiles carry no licence statement.
 MetaWrap2 v=2.1.0
-	Defaults chosen by measurement, the first defaults moved, learned binners, cohorts, GUNC chimerism checks
-		and the benchmark harness.
+	Measured defaults (binning tier, aligner, depth identity floor, trimmer, quantifier), learned binners,
+		cohorts, GUNC chimerism checks and the benchmark harness.
 	Changed - `run` bins with metaBAT2 + SemiBin2 (`--preset default`); was metaBAT2 + MaxBin2 + CONCOCT.
 		End to end: 53 clean HQ MAGs vs metaWRAP 1's 48, 43.8 vs 52.5 cpu-hours. Needs metawrap2-learned
 		(~1.5 GB pytorch). `--preset fast` gives metaBAT2 + MaxBin2; `--metabat2 --maxbin2 --concoct` the old set.
@@ -206,7 +894,7 @@ MetaWrap2 v=2.1.0
 		removed; WORK_SUMMARY.md is now docs/benchmarks.md.
 	Changed - `benchmark score --checkm2` scores bins with CheckM2.
 	Changed - the test suite pins use_conda_envs per test.
-	Changed - none for assembly: MEGAHIT stays default. metaSPAdes gave N50 12,874 vs 9,325 for 3.2x the
+	Changed - none for assembly; MEGAHIT stays the default. metaSPAdes gave N50 12,874 vs 9,325 for 3.2x the
 		cpu-hours (245 vs 77), 140 vs 15 GB peak memory, 197 vs 228 Mbp. `--metaspades` for contiguity.
 	New - `binning --semibin2` (2.5.0), `--vamb` (5.0.4), `--comebin` (1.1.0), all seeded, installed by
 		`metawrap2 install-env learned`. VAMB: `--minfasta` 200 kb, `-o ''`, `-m 250`. None can run on the
@@ -233,12 +921,12 @@ MetaWrap2 v=2.1.0
 	New - `metawrap2 install-db checkm2`.
 	New - `mw2`, the same CLI under a shorter name.
 	New - `metawrap2 benchmark list|fetch|run|score` with datasets and comparisons in benchmarks/*.toml,
-		committed results in benchmarks/results/, a ~370 kB fixture, AMBER, CheckM, GUNC and abundance scoring.
+		a results table per dataset, a ~370 kB fixture, AMBER, CheckM, GUNC and abundance scoring.
 		`--score-failed` scores crashed variants; `--reassess` re-runs assessors.
 	New - benchmark B5: cross-sample coverage gives 37 HQ MAGs vs 32 single-sample, for 1.9 more cpu-hours
 		of 90. Co-assembly is level at three samples: 85.1 cpu-hours and 81.4% GUNC pass vs 90.9 and 87.0%.
-	New - benchmarks/coverage_fidelity.py compares coverage estimators per contig. CoverM reads 2.001x bwa
-		because jgi filters below 97% identity.
+	New - coverage estimators compared per contig: CoverM reads 2.001x bwa because jgi filters below 97%
+		identity.
 	Fixed - MaxBin2 binned on depths `--noIntraDepthVariance` invented. Every earlier multi-sample MaxBin2
 		result is affected. CAMI2: precision 0.6485 -> 0.8016, F1 0.4228 -> 0.4598, 188 bins -> 129.
 	Fixed - quant_bins salmon tables were wrong with more than one bin (cumulative medians, NaN rows). Also:

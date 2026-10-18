@@ -1,0 +1,27 @@
+#Annotated with Bakta
+#Software: v1.9.2
+#Database: v5.1, light
+#DOI: 10.1099/mgen.0.000685
+#URL: github.com/oschwengers/bakta
+#Sequence Id	Type	Start	Stop	Strand	Locus Tag	Gene	Product	DbXrefs
+contig_1	cds	1000	2365	+	KPHLEM_00005	dnaA	Chromosomal replication initiator protein DnaA	SO:0001217, UniRef:UniRef50_P03004
+contig_1	rRNA	3000	3115	+	KPHLEM_00300		5S ribosomal RNA	KEGG:K01985, SO:0001179
+contig_1	rRNA	3615	6511	+	KPHLEM_00361		23S ribosomal RNA	KEGG:K01985, SO:0001179
+contig_1	tRNA	7011	7086	+	KPHLEM_00701		tRNA-Ala(nnn)	SO:0000253
+contig_1	tRNA	7211	7286	+	KPHLEM_00721		tRNA-Arg(nnn)	SO:0000253
+contig_1	tRNA	7411	7486	+	KPHLEM_00741		tRNA-Asn(nnn)	SO:0000253
+contig_1	tRNA	7611	7686	+	KPHLEM_00761		tRNA-Asp(nnn)	SO:0000253
+contig_1	tRNA	7811	7886	+	KPHLEM_00781		tRNA-Cys(nnn)	SO:0000253
+contig_1	tRNA	8011	8086	+	KPHLEM_00801		tRNA-Gln(nnn)	SO:0000253
+contig_1	tRNA	8211	8286	+	KPHLEM_00821		tRNA-Glu(nnn)	SO:0000253
+contig_1	tRNA	8411	8486	+	KPHLEM_00841		tRNA-Gly(nnn)	SO:0000253
+contig_1	tRNA	8611	8686	+	KPHLEM_00861		tRNA-His(nnn)	SO:0000253
+contig_1	tRNA	8811	8886	+	KPHLEM_00881		tRNA-Ile(nnn)	SO:0000253
+contig_1	tRNA	9011	9086	+	KPHLEM_00901		tRNA-Leu(nnn)	SO:0000253
+contig_1	tRNA	9211	9286	+	KPHLEM_00921		tRNA-Lys(nnn)	SO:0000253
+contig_1	tRNA	9411	9486	+	KPHLEM_00941		tRNA-Met(nnn)	SO:0000253
+contig_1	tRNA	9611	9686	+	KPHLEM_00961		tRNA-Phe(nnn)	SO:0000253
+contig_1	tRNA	9811	9886	+	KPHLEM_00981		tRNA-Pro(nnn)	SO:0000253
+contig_1	tRNA	10011	10086	+	KPHLEM_01001		tRNA-Ser(nnn)	SO:0000253
+contig_1	tRNA	10211	10286	+	KPHLEM_01021		tRNA-Thr(nnn)	SO:0000253
+contig_1	tRNA	10411	10483	+	KPHLEM_00099		tRNA-Xxx(???)	SO:0000253

@@ -15,8 +15,8 @@ settle an argument about a flag. This package is the machinery that makes the me
   ``dataset x tool x mode x metric``, and into the accuracy-per-CPU-hour ratio the defaults are
   actually decided on.
 
-The results are committed under ``benchmarks/results/`` so that a change to a default arrives in
-review alongside the numbers that justify it, and so a regression is a diff rather than a memory.
+Results append to ``benchmarks/results/<dataset>.tsv``, so a change to a default can be reviewed
+alongside the numbers that justify it.
 """
 
 from __future__ import annotations

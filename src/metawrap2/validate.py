@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import gzip
 import os
+import shutil
+import subprocess
 import zlib
 from typing import List, Optional, Sequence
 
@@ -106,6 +108,67 @@ def _tail_text(path: str) -> str:
     return chunk
 
 
+#: How much is read at a time when counting a FASTQ's lines. Big enough that the newline count is
+#: one memchr per chunk rather than a Python loop per line, small enough to stay in cache.
+SCAN_CHUNK = 8 * 1024 * 1024
+
+
+def _scan_lines(path: str):
+    """Stream *path* once and return ``(first_line, line_count, ends_with_newline)``.
+
+    Counting newlines over binary chunks rather than iterating lines in Python, and through `pigz`
+    when it is installed. The check itself is worth keeping - it catches a truncated gzip member,
+    which is what a concatenated download leaves behind, and a user's run died on exactly that -
+    but it was costing ~17 minutes of one core on a 21 GB + 23 GB pair before MEGAHIT even started:
+    the decompression is C, the per-line loop was not.
+
+    `pigz -dc` parallelises the decompression itself; without it this falls back to the same
+    streaming read, which is still several times faster than a line loop. Either way the whole
+    stream is read, so a partial member still raises.
+    """
+    first = b""
+    count = 0
+    last_byte = b""
+    use_pigz = detect_compression(path) == "gzip" and shutil.which("pigz")
+    process = None
+    if use_pigz:
+        process = subprocess.Popen(
+            ["pigz", "-dc", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert process.stdout is not None
+        stream = process.stdout
+    else:
+        stream = smart_open(path, "rb")
+    try:
+        while True:
+            chunk = stream.read(SCAN_CHUNK)
+            if not chunk:
+                break
+            if not first:
+                head, _nl, _rest = chunk.partition(b"\n")
+                first = head
+            count += chunk.count(b"\n")
+            last_byte = chunk[-1:]
+    finally:
+        stream.close()
+        if process is not None:
+            stderr = process.stderr.read() if process.stderr is not None else b""
+            if process.stderr is not None:
+                process.stderr.close()
+            if process.wait() != 0:
+                # Raised as a read error so the caller reports it the way it reports a bad gzip:
+                # pigz exits non-zero on a truncated member, which is the case this check is for.
+                raise OSError(
+                    "pigz could not read %s: %s" % (path, stderr.decode("utf-8", "replace").strip())
+                )
+    ends_with_newline = last_byte == b"\n"
+    if last_byte and not ends_with_newline:
+        # The unterminated tail is a line too, which is what makes the multiple-of-four check see
+        # a truncated record rather than a round number.
+        count += 1
+    return first.decode("utf-8", "replace"), count, ends_with_newline
+
+
 def check_fastq(path: str, what: str = "FASTQ file") -> Optional[str]:
     """Validate that *path* looks like a complete FASTQ file."""
     problem = require_file(path, what)
@@ -115,30 +178,23 @@ def check_fastq(path: str, what: str = "FASTQ file") -> Optional[str]:
     # multiple of four), and remember the last line. Reading the whole stream also surfaces a
     # truncated gzip (a partial member raises here). We must count *all* lines, not a tail window:
     # the number of lines in an arbitrary byte-tail is not a multiple of four even for a valid file.
-    n_lines = 0
-    last_line = ""
     try:
-        with smart_open(path, "rt") as fh:
-            first = fh.readline()
-            if not first:
-                return "%s has no content (%s)" % (_describe(path), what)
-            if not first.startswith("@"):
-                return (
-                    "%s does not look like FASTQ - the first line starts with %r, not '@' (%s)"
-                    % (_describe(path), first[:1], what)
-                )
-            n_lines = 1
-            last_line = first
-            for line in fh:
-                n_lines += 1
-                last_line = line
+        first, n_lines, ends_with_newline = _scan_lines(path)
     except _READ_ERRORS as exc:
         return "%s is truncated or corrupt - reading it failed: %s (%s)" % (
             _describe(path),
             exc,
             what,
         )
-    if last_line and not last_line.endswith("\n"):
+    if not n_lines and not first:
+        return "%s has no content (%s)" % (_describe(path), what)
+    if not first.startswith("@"):
+        return "%s does not look like FASTQ - the first line starts with %r, not '@' (%s)" % (
+            _describe(path),
+            first[:1],
+            what,
+        )
+    if not ends_with_newline:
         return "%s does not end with a newline, so its last record is truncated (%s)" % (
             _describe(path),
             what,

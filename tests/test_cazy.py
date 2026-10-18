@@ -19,6 +19,7 @@ from metawrap2 import cazy
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "cazy")
 OVERVIEW = os.path.join(FIXTURES, "overview.tsv")
+MULTIDOMAIN = os.path.join(FIXTURES, "overview_multidomain.tsv")
 
 
 # ── parsing real output ──────────────────────────────────────────────────────────────────────
@@ -51,3 +52,19 @@ def test_coordinates_are_stripped_but_the_family_is_kept():
     assert all("(" not in family for family in call.families)
     # dbCAN-sub exists to add the `_e82` suffix; treating it as a different call defeats that.
     assert cazy._agreed(("GH13",), ("GH13",), ("GH13_e82",)) == ("GH13",)
+
+
+def test_a_gene_with_no_ec_on_either_domain_has_no_ec():
+    """dbCAN joins a multi-domain gene's per-domain fields with `|`, and writes `-` for a domain it
+    cannot annotate - so a two-domain gene with no EC number anywhere comes out as `-|-`.
+
+    The cleaner split on `;` and `,` only, so that string survived intact and `ec` came back as
+    `-|-`: a non-empty EC annotation for a gene that has none, which any downstream count of
+    EC-annotated genes would have believed. 2 of the 11 rows in the vendored fixture are like this.
+    The trailing dash of a partial EC number (`3.2.1.-`) has to survive, which is why whole members
+    are dropped rather than dashes stripped.
+    """
+    calls = {c.gene: c for c in cazy.parse_overview(MULTIDOMAIN, "bin_001")}
+    assert calls["k141_10594_length_49463_cov_14.0000_27"].ec == ""
+    assert calls["k141_10594_length_49463_cov_14.0000_17"].ec == "3.2.1.-:2"
+    assert sum(1 for c in calls.values() if c.ec) == 4

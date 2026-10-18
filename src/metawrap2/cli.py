@@ -8,6 +8,7 @@ Thin dispatcher. Each module owns its own argument parsing and is fully usable o
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from typing import List, Optional
 
@@ -101,7 +102,7 @@ UTILITIES = {
     # First in the list on purpose: it is the answer to "I just cloned this, now what?"
     "quickstart": (
         "metawrap2.commands.quickstart",
-        "Install everything and verify it, in one command (start here)",
+        "Build the conda environments and verify them, in one command (start here)",
     ),
     "run": ("metawrap2.commands.run", "Run the whole pipeline for a study from a sample sheet"),
     "cohort": (
@@ -122,6 +123,10 @@ UTILITIES = {
         "metawrap2.commands.status_cmd",
         "Show what has run in a study, and what --resume would do next",
     ),
+    "report": (
+        "metawrap2.commands.report_cmd",
+        "One PDF report, and one per-genome table, for a finished run",
+    ),
     "calibrate": (
         "metawrap2.commands.calibrate",
         "Check the built-in disk/memory estimates against real runs",
@@ -130,13 +135,16 @@ UTILITIES = {
         "metawrap2.commands.benchmark",
         "Measure tools and settings against known-truth datasets",
     ),
-    "test": (
+    # `doctor` is the name to document and the one its own repair flag uses (`--fix`). It was
+    # listed as "alias for test", which put the useful name second and left a reader choosing
+    # between three spellings - `check`, `doctor`, `test` - for two behaviours. `check` is the
+    # scripting one (pass/fail exit code); `doctor` is the one that reads.
+    "doctor": (
         "metawrap2.commands.doctor",
-        "Test module conda envs + software, run unit tests, print a status map",
+        "Check every module's env, tools, databases and Python extras; `--fix` repairs envs",
     ),
-    # Same command under the name people reach for when something is broken - and the name its
-    # own repair flag uses (`--fix`). Both spellings work; neither is deprecated.
-    "doctor": ("metawrap2.commands.doctor", "Alias for `test`; `doctor --fix` repairs what it can"),
+    # The older spelling of `doctor`. Both work; neither is deprecated.
+    "test": ("metawrap2.commands.doctor", "Older name for `doctor`"),
     "config": (
         "metawrap2.commands.config_cmd",
         "Scaffold (init) or inspect (show) the metawrap2.toml config",
@@ -165,10 +173,65 @@ def _retirement_notice(argv: List[str]) -> Optional[str]:
     return None
 
 
+#: How long to wait for `git rev-parse`. A version string must answer immediately: this runs on
+#: `-h` as well as `-v`, and a repository on a stalled network filesystem must not be able to
+#: hang the help text. Two seconds is far longer than the local object read ever takes.
+GIT_REVISION_TIMEOUT = 2.0
+
+
+def git_revision() -> Optional[str]:
+    """The short commit this package is running from, or None if that cannot be established.
+
+    A clone is almost always some commits past the last tag, so the version number on its own
+    cannot tell a bug report filed from a release apart from one filed from an arbitrary commit -
+    and the README asks for `-v` output in bug reports. One reporter's `-v` said 2.1.2 from a
+    checkout one commit past the 2.1.2 tag, which made the report unreproducible.
+
+    Every way this can fail ends in None rather than an exception: a wheel install has no
+    repository, a slim container has no git binary, and git in a non-repository exits non-zero.
+    None of those is an error worth telling the user about, and a version string that can raise is
+    a version string that can stop `-v` from answering at all - which is worse than a missing
+    commit. The output is checked against the shape of an abbreviated sha so that a future git
+    writing something unexpected cannot end up quoted back as if it were one.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        proc = subprocess.run(
+            ["git", "-C", here, "rev-parse", "--short", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=GIT_REVISION_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    rev = (proc.stdout or "").strip()
+    if not (7 <= len(rev) <= 40) or any(c not in "0123456789abcdef" for c in rev):
+        return None
+    return rev
+
+
+def version_string() -> str:
+    """What `metawrap2 -v` prints: ``MetaWrap2 2.1.2``, plus the commit in a checkout.
+
+    No ``v=``: it is not the convention, and the whole value of this line is that it can be
+    pasted into a bug report as it stands.
+    """
+    rev = git_revision()
+    if rev:
+        return "MetaWrap2 %s (git %s)" % (__version__, rev)
+    return "MetaWrap2 %s" % __version__
+
+
 def help_message() -> str:
     lines = [
         "",
-        "MetaWrap2 v=%s" % __version__,
+        version_string(),
         "Usage: metawrap2 [module] [options]",
         "",
         "  Modules:",
@@ -203,6 +266,11 @@ def help_message() -> str:
         "\t%-24s or, as a share of this machine's RAM (default 0.80)" % "--max-memory-fraction F",
         "\t%-24s stop when a filesystem is this full (default 0.70)" % "--max-disk-fraction F",
         "\t%-24s how many GPUs the run may use (0 for none)" % "--max-gpus N",
+        # Listed rather than suppressed: it is an ordinary [limits] key with a documented config
+        # equivalent and its own validation, and `--help` claiming to list the budget flags while
+        # omitting one of them is how a documented flag comes to look like an internal one.
+        "\t%-24s seconds between disk checks during a long step (default 60)"
+        % "--disk-check-interval S",
         "",
         "\t%-20s show this help message" % "--help | -h",
         "\t%-20s show MetaWrap2 version" % "--version | -v",
@@ -269,7 +337,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(help_message())
         return 0
     if argv[0] in ("-v", "--version"):
-        print("MetaWrap2 v=%s" % __version__)
+        print(version_string())
         return 0
 
     from .limits import LimitsError

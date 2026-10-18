@@ -1,0 +1,4 @@
+bin	completeness	contamination	GC	lineage	N50	size
+bin_001	98.65	1.21	0.412	Clostridiales	54983	2097308
+bin.2	75.40	0.0	0.311	Bacteroidales	14870	1654168
+bin_003			0.374	root	4827	2263926

@@ -1,0 +1,10 @@
+  0.00	40	40	U	0	unclassified
+100.00	800	0	R	1	root
+ 95.00	760	0	D	2	  Bacteria
+ 30.00	240	60	P	1239	    Firmicutes
+ 22.50	180	80	G	1301	      Streptococcus
+ 12.50	100	100	S	1313	        Streptococcus pneumoniae
+  0.00	0	0	S	1309	        Streptococcus mutans
+ 65.00	520	20	P	1224	    Proteobacteria
+ 62.50	500	100	G	561	      Escherichia
+ 50.00	400	400	S	562	        Escherichia coli

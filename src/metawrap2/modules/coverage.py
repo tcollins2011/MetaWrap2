@@ -39,6 +39,7 @@ from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 from .. import depth as _depth
 from ..aligners import ALIGNERS, DEFAULT_ALIGNER, INDEX_SUFFIXES
 from ..cliformat import make_parser, percent
+from ..command import capture_in_env
 from ..config import MODULE_ENVS, load_settings
 from ..io.seqio import contig_id, is_binnable, iter_fasta
 from ._common import (
@@ -56,6 +57,7 @@ from ._common import (
     error,
     expect_produced,
     finish_run,
+    fs_move,
     fs_remove,
     listdir,
     make_checkpoint,
@@ -66,7 +68,7 @@ from ._common import (
     validate_inputs,
     warning,
 )
-from .binning import DEPTH_HEADER, depth_means
+from .binning import DEPTH_HEADER, SAMTOOLS_INDEX, depth_means
 
 #: Shared with `binning`: the aligner and samtools this needs are
 #: exactly the ones that module installs, and a second environment holding the same four tools would
@@ -120,6 +122,8 @@ SEPARATOR = "~"
 CATALOGUE = "catalogue.fa"
 CATALOGUE_DEPTH = "catalogue_depth.txt"
 DEPTH_DIR = "depth"
+#: Where --split-bams writes one directory per assembly label.
+BAMS_DIR = "bams"
 WORK_DIR = "work_files"
 #: Written beside the slices so a later run - or a human - can map a prefixed catalogue contig back
 #: to its assembly without re-deriving the labels from the filenames.
@@ -178,6 +182,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         help="keep the per-sample BAMs in work_files/ after the depth table is built (about 5 GB "
         "per sample; discarded by default)",
+    )
+    p.add_argument(
+        "--split-bams",
+        action="store_true",
+        help="also write one BAM per assembly per sample under <out>/" + BAMS_DIR + "/<label>/, "
+        "with this assembly's contigs named as the assembly names them. That is what the BAM-reading "
+        "binners need - SemiBin2, VAMB, COMEBin and CONCOCT cannot use a depth table - so it is how "
+        "a cohort binned from one set of alignments reaches them (`binning --bams`). Costs about "
+        "what the catalogue BAMs cost in disk; the extraction itself reads each record once, through "
+        "the index",
     )
     p.add_argument(
         "--keep-catalogue",
@@ -468,6 +482,226 @@ def _bams(work: str) -> List[str]:
     return [os.path.join(work, f) for f in sorted(listdir(work)) if f.endswith(".bam")]
 
 
+def plain_header(header: str, label: str, separator: str) -> Tuple[str, int]:
+    """*header* with ``label<sep>`` stripped from every ``@SQ SN:``. Returns it and the count.
+
+    Only the SN field, and only that one prefix: a read name or a program's command line in @PG can
+    legitimately contain the same text, and rewriting those would corrupt provenance to fix a name.
+    """
+    prefix = label + separator
+    out: List[str] = []
+    renamed = 0
+    for line in header.splitlines():
+        if line.startswith("@SQ\t"):
+            fields = line.split("\t")
+            for i, field in enumerate(fields):
+                if field.startswith("SN:" + prefix):
+                    fields[i] = "SN:" + field[len("SN:") + len(prefix) :]
+                    renamed += 1
+            line = "\t".join(fields)
+        out.append(line)
+    return "\n".join(out) + "\n", renamed
+
+
+def _index_kept_bams(bams: Sequence[str], threads: int, env: Optional[str]) -> None:
+    """Index the BAMs that are being kept.
+
+    They are sorted already, and every tool that reads a BAM - the BAM binners, `samtools view` on
+    a region, any inspection - wants the index. Doing it here rather than leaving `samtools index`
+    as a step to remember costs a fraction of what the alignment cost.
+    """
+    for bam in bams:
+        if os.path.isfile(bam + ".bai"):
+            continue
+        run(SAMTOOLS_INDEX.format(threads=threads, bam=bam), env=env, tool="samtools index")
+
+
+def bam_references(bam: str, env: Optional[str]) -> List[Tuple[str, int]]:
+    """``(name, length)`` for every reference in *bam*'s header, in header order."""
+    out: List[Tuple[str, int]] = []
+    for line in capture_in_env(env, ["samtools", "view", "-H", bam]).splitlines():
+        if not line.startswith("@SQ\t"):
+            continue
+        name = length = None
+        for field in line.split("\t"):
+            if field.startswith("SN:"):
+                name = field[3:]
+            elif field.startswith("LN:"):
+                length = int(field[3:]) if field[3:].isdigit() else None
+        if name and length:
+            out.append((name, length))
+    return out
+
+
+def write_region_bed(references: Sequence[Tuple[str, int]], prefix: str, path: str) -> int:
+    """Write a BED of every reference starting with *prefix*. Returns how many it held.
+
+    A BED rather than regions on the command line: a catalogue label can carry hundreds of
+    thousands of contigs, and that argument list does not fit in ARG_MAX. `samtools view -M -L`
+    takes the file and uses the index, so each record is read once even though the extraction runs
+    once per label.
+    """
+    kept = 0
+    with open(path, "w") as handle:
+        for name, length in references:
+            if name.startswith(prefix):
+                handle.write("%s\t0\t%d\n" % (name, length))
+                kept += 1
+    return kept
+
+
+def split_bams(
+    assemblies: Sequence[Assembly],
+    work: str,
+    out_dir: str,
+    separator: str,
+    env: Optional[str],
+    threads: int,
+) -> Dict[str, List[str]]:
+    """Write one BAM per assembly per sample, named as that assembly names its contigs.
+
+    This is the piece that lets a cohort's single alignment pass reach the binners that read
+    alignments rather than a table. SemiBin2, VAMB, COMEBin and CONCOCT are refused `--depth` by
+    name, so before this they could only be run by aligning each sample against its own assembly -
+    which is the cost the catalogue exists to avoid - or not at all. `binning --bams <dir>` takes
+    what this writes.
+
+    Two details that are not obvious:
+
+    * The extraction is by region file, through the index, so the whole set costs about one pass
+      over the catalogue BAMs rather than one pass per label.
+    * Only *this* label's `@SQ` names are de-prefixed. The foreign ones have to stay, and stay
+      prefixed: reference IDs in a BAM are positional, so dropping `@SQ` lines would renumber every
+      record's reference, and stripping the prefix from all of them would collide two assemblies'
+      `k141_1` into one name. The foreign references carry no records in the extracted file, so a
+      binner matching contig names against its assembly ignores them.
+    """
+    ensure_dir(out_dir)
+    bams = _bams(work)
+    written: Dict[str, List[str]] = {}
+    if not bams:
+        return written
+    # The index is what makes this affordable: `samtools view -M -L` then reads only the records of
+    # the label being extracted, so the whole split costs about one pass over the BAMs rather than
+    # one pass per label. Without it samtools refuses the region file outright.
+    _index_kept_bams(bams, threads, env)
+    references = bam_references(bams[0], env)
+    for assembly in assemblies:
+        label_dir = os.path.join(out_dir, assembly.label)
+        ensure_dir(label_dir)
+        bed = os.path.join(label_dir, "regions.bed")
+        count = write_region_bed(references, assembly.label + separator, bed)
+        if not count:
+            warning(
+                "no contig in the catalogue BAMs is labelled %r; %s gets no per-assembly BAM"
+                % (assembly.label, assembly.label)
+            )
+            continue
+        comm("extracting %d contig(s) of %s from %d BAM(s)" % (count, assembly.label, len(bams)))
+        produced = []
+        for bam in bams:
+            sample = os.path.splitext(os.path.basename(bam))[0]
+            target = os.path.join(label_dir, sample + ".bam")
+            run(
+                "samtools view -b -M -L %s -@ %d -o %s %s"
+                % (bed, max(1, threads - 1), target, bam),
+                env=env,
+                tool="samtools view",
+            )
+            header = capture_in_env(env, ["samtools", "view", "-H", target])
+            plain, renamed = plain_header(header, assembly.label, separator)
+            if renamed:
+                header_path = target + ".plain.sam"
+                with open(header_path, "w") as handle:
+                    handle.write(plain)
+                reheadered = target + ".plain.bam"
+                run(
+                    "samtools reheader %s %s" % (header_path, target),
+                    env=env,
+                    tool="samtools reheader",
+                    stdout_path=reheadered,
+                )
+                fs_move(reheadered, target)
+                fs_remove(header_path)
+            produced.append(target)
+        _index_kept_bams(produced, threads, env)
+        written[assembly.label] = produced
+        comm("wrote %s" % label_dir)
+    return written
+
+
+def _deprefix_kept_bams(
+    assemblies: Sequence[Assembly],
+    work: str,
+    separator: str,
+    env: Optional[str],
+    threads: int = 1,
+) -> None:
+    """Make kept BAMs name contigs the way the assembly does, or say why they cannot.
+
+    The alignment is against the catalogue, whose contigs are ``label<sep>contig``, while the depth
+    table this module splits out is de-prefixed. So the kept BAMs disagreed with both the slice and
+    the assembly, and the consequence was silent: metaBAT2 reads the table and works, while every
+    BAM-reading binner - SemiBin2, COMEBin, VAMB, CONCOCT - matched *zero* contigs against the
+    plain assembly and produced no bins without erroring. Two users hit it independently.
+
+    With one assembly the prefix carries no information, so the headers are rewritten and the BAMs
+    become usable as they are. `samtools reheader` streams the records, so this costs a copy of
+    each BAM - which is why it happens only when `--keep-bams` asked for the BAMs at all.
+
+    With several, a header rewrite would be wrong rather than slow: two assemblies routinely share
+    contig names (`k141_1` in both), and stripping the prefix would merge references that are
+    different sequences. Those BAMs stay in catalogue space and the run says so, with the command
+    that splits one out.
+    """
+    bams = _bams(work)
+    if not bams:
+        return
+    if len(assemblies) != 1:
+        warning(
+            "the kept BAMs are aligned against the catalogue, so a contig in them is named "
+            f"label{separator}contig while the depth tables and the assemblies name it plainly. metaBAT2 "
+            "and MaxBin2 read the table and are unaffected; SemiBin2, VAMB, COMEBin and CONCOCT "
+            "read the BAM and will match zero contigs against a plain assembly.\n"
+            f"The headers are not rewritten here because {len(assemblies)} assemblies share this catalogue and "
+            "contig names repeat between assemblies, so stripping the prefix would merge "
+            "references that are different sequences. To get one assembly's BAM, select its "
+            "contigs first:\n"
+            "  samtools view -b -o <sample>.<label>.bam <sample>.bam $(grep '^>' <assembly> | "
+            f"sed 's/^>/<label>{separator}/;s/ .*//')\n"
+            "and reheader that to drop the prefix."
+        )
+        _index_kept_bams(bams, threads, env)
+        return
+    label = assemblies[0].label
+    comm(
+        "rewriting the kept BAM headers to drop the '%s%s' catalogue prefix, so the BAM-reading "
+        "binners see the same contig names as the assembly and the depth table" % (label, separator)
+    )
+    for bam in bams:
+        header = capture_in_env(env, ["samtools", "view", "-H", bam])
+        rewritten, renamed = plain_header(header, label, separator)
+        if not renamed:
+            continue
+        header_path = bam + ".plain.sam"
+        with open(header_path, "w") as handle:
+            handle.write(rewritten)
+        plain = bam + ".plain.bam"
+        run(
+            "samtools reheader %s %s" % (header_path, bam),
+            env=env,
+            tool="samtools reheader",
+            stdout_path=plain,
+        )
+        # In-place reheader is CRAM-only, so the rewrite is out of place and then moved over the
+        # original - after the new file exists, so an interrupted rewrite leaves the BAM intact.
+        fs_move(plain, bam)
+        fs_remove(header_path)
+    comm("%d BAM(s) now name contigs as the assembly does" % len(bams))
+    # After the rewrite, not before: reheadering writes a new file, which would strand the index.
+    _index_kept_bams(bams, threads, env)
+
+
 def _sketches(sketch_dir: str) -> List[str]:
     """The sketches a previous run left behind, for a --resume that skips the sketching stage."""
     return [os.path.join(sketch_dir, f) for f in sorted(listdir(sketch_dir)) if f.endswith(".bcsp")]
@@ -648,10 +882,32 @@ def main(argv: List[str]) -> int:
             # them. The BAMs are swept for the opposite reason - gigabytes, and specific to the
             # catalogue that produced them.
             comm("kept the read sketches in %s; they are reusable for another catalogue" % work)
-        elif not args.keep_bams:
-            for bam in _bams(work):
-                fs_remove(bam)
-            comm("removed the per-sample BAMs (pass --keep-bams to keep them)")
+        else:
+            # Split first, while the catalogue BAMs are still here: the per-assembly BAMs are
+            # extracted from them, and --split-bams is what makes this stage usable by the binners
+            # that read alignments rather than a table.
+            if args.split_bams:
+                announcement("SPLITTING THE ALIGNMENTS INTO ONE BAM PER ASSEMBLY")
+                split = split_bams(
+                    assemblies,
+                    work,
+                    os.path.join(args.output, BAMS_DIR),
+                    args.separator,
+                    env,
+                    args.threads,
+                )
+                if split:
+                    comm(
+                        "bin each assembly's BAMs with `binning -a <assembly> --bams %s/<label>`"
+                        % os.path.join(args.output, BAMS_DIR)
+                    )
+            if not args.keep_bams:
+                for bam in _bams(work):
+                    fs_remove(bam)
+                    fs_remove(bam + ".bai")
+                comm("removed the catalogue BAMs (pass --keep-bams to keep them)")
+            else:
+                _deprefix_kept_bams(assemblies, work, args.separator, env, args.threads)
         if not args.keep_catalogue:
             # By suffix rather than by prefix: the index names are known (INDEX_SUFFIXES), and a
             # sweep of everything starting with the catalogue's name would eventually take something

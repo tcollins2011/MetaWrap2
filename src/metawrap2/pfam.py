@@ -273,16 +273,39 @@ def architecture_rows(hits: Sequence[DomainHit], genome: str) -> List[Dict[str, 
     ]
 
 
+#: What Pfam calls its release notes, and the only file this reads.
+NOTES_NAME = "relnotes.txt"
+
+#: A notes file is a couple of kilobytes; Pfam-A.hmm is 2.2 GB. Anything above this ceiling is not
+#: release notes however it is named, and scanning it to the last line for a `RELEASE n` that is
+#: not in it is minutes of IO to print "unknown" - which is what `annotate --pfam` did on every
+#: run, because the configured PFAM_DB *is* the HMM file.
+NOTES_MAX_BYTES = 1 << 20
+
+
 def release_from_notes(path: str) -> str:
     """The Pfam release from its own `relnotes.txt`, or "unknown".
 
     Read rather than taken from a directory name: a domain call is only reproducible against the
     release that made it, and Pfam's families are renumbered between releases.
+
+    *path* may be the notes file, the directory holding it, or - the shape the tool actually
+    passes - a sibling file in that directory. ``install-db pfam`` downloads relnotes.txt for this
+    one purpose and then records ``<dir>/Pfam-A.hmm`` in the config (``key_file="Pfam-A.hmm"``),
+    so the only caller that matters arrived here with a file that is not the notes, and every
+    `annotate --pfam` run printed "Pfam release unknown" beside a directory that said 38.2.
     """
     candidate = path
     if os.path.isdir(candidate):
-        candidate = os.path.join(candidate, "relnotes.txt")
+        candidate = os.path.join(candidate, NOTES_NAME)
+    elif os.path.basename(candidate) != NOTES_NAME:
+        candidate = os.path.join(os.path.dirname(candidate), NOTES_NAME)
     if not os.path.isfile(candidate):
+        return "unknown"
+    try:
+        if os.path.getsize(candidate) > NOTES_MAX_BYTES:
+            return "unknown"
+    except OSError:
         return "unknown"
     with open(candidate, errors="replace") as handle:
         for line in handle:

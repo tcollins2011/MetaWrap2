@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -165,6 +166,13 @@ class Manifest:
     def __init__(self, path: str):
         self.path = path
         self.data: Dict[str, Any] = {"schema": SCHEMA_VERSION, "steps": {}}
+        # `cohort` and `run -j N` start steps from a thread pool, and every start and finish both
+        # mutates `data` and serialises it. Two threads in `save()` at once raced twice over: on
+        # the shared temp path, where the second rename found nothing
+        # (`FileNotFoundError: manifest.json.tmp`, which killed a study after 33 of 36 assemblies),
+        # and on `data` itself, where json.dump can see a dict another thread is still writing.
+        # One re-entrant lock covers both, because the mutators call save() while holding it.
+        self._lock = threading.RLock()
         self.load()
 
     # -- persistence ----------------------------------------------------------------------
@@ -184,11 +192,26 @@ class Manifest:
         self.data.setdefault("steps", {})
 
     def save(self) -> None:
-        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(self.data, fh, indent=2, sort_keys=True)
-        os.replace(tmp, self.path)  # atomic: a killed run never leaves a half-written file
+        """Write the manifest. Atomic, and safe to call from several threads at once.
+
+        The temp name carries the writer's identity rather than being shared: `os.replace` is
+        atomic for one writer, and with a fixed `.tmp` two writers are one file - the first rename
+        takes it and the second raises FileNotFoundError. The lock then serialises the dump itself,
+        so no writer sees `data` mid-mutation.
+        """
+        with self._lock:
+            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+            tmp = "%s.%d.%d.tmp" % (self.path, os.getpid(), threading.get_ident())
+            try:
+                with open(tmp, "w") as fh:
+                    json.dump(self.data, fh, indent=2, sort_keys=True)
+                os.replace(tmp, self.path)
+            except BaseException:
+                # Leave no stray temp behind on an interrupt or a full disk; the manifest itself
+                # is untouched, which is the state a later --resume can still read.
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                raise
 
     # -- recording ------------------------------------------------------------------------
 
@@ -201,7 +224,9 @@ class Manifest:
     ) -> float:
         """Record that *name* is starting. Returns the start time to pass back to finish()."""
         started = time.time()
-        self.data["steps"][name] = {
+        # Built before the lock is taken: `describe` fingerprints every input, which is file I/O,
+        # and holding the lock through it would make one thread's inputs block another's start.
+        entry: Dict[str, Any] = {
             "status": "running",
             "command": list(command),
             "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started)),
@@ -214,8 +239,10 @@ class Manifest:
             # or a fifth of it, which is the difference between a budget to raise and one to cut.
             # Recorded at start so an interrupted step - the interesting case for an OOM - keeps
             # it. See metawrap2.limits and `metawrap2 calibrate`.
-            self.data["steps"][name]["grant"] = dict(grant)
-        self.save()
+            entry["grant"] = dict(grant)
+        with self._lock:
+            self.data["steps"][name] = entry
+            self.save()
         return started
 
     def finish(
@@ -227,18 +254,21 @@ class Manifest:
         log: Optional[str] = None,
         usage: Optional[Dict[str, Any]] = None,
     ) -> None:
-        entry = self.data["steps"].setdefault(name, {})
-        entry["status"] = status
-        entry["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        entry["duration_seconds"] = round(time.time() - started, 1)
-        entry["outputs"] = [describe(p) for p in outputs]
-        if log:
-            entry["log"] = log
-        if usage:
-            # What the step really cost: peak memory, CPU time, wall time. Recorded so budgets
-            # and disk estimates can be calibrated from runs rather than asserted.
-            entry["usage"] = dict(usage)
-        self.save()
+        # Outputs are described before the lock, for the reason given in start().
+        described = [describe(p) for p in outputs]
+        with self._lock:
+            entry = self.data["steps"].setdefault(name, {})
+            entry["status"] = status
+            entry["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            entry["duration_seconds"] = round(time.time() - started, 1)
+            entry["outputs"] = described
+            if log:
+                entry["log"] = log
+            if usage:
+                # What the step really cost: peak memory, CPU time, wall time. Recorded so budgets
+                # and disk estimates can be calibrated from runs rather than asserted.
+                entry["usage"] = dict(usage)
+            self.save()
 
     # -- querying -------------------------------------------------------------------------
 

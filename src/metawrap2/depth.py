@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -72,7 +73,7 @@ EDGE_BASES = 75
 #: divergence from it is sequencing error plus real strain variation.
 #:
 #: One set of minimap2 alignments, six depth tables from it, metaBAT2 on each, AMBER and GUNC on the
-#: results (bench_work/identity_sweep/):
+#: results:
 #:
 #:     floor   mean depth   bins   AMBER F1   purity   HQ   clean HQ
 #:     none        15.71      90     0.6607   0.8374     48      45
@@ -110,6 +111,21 @@ EXCLUDED_FLAGS = 0x4 | 0x100 | 0x200 | 0x400
 #: Rows parsed per chunk. Large enough that the parse is amortised, small enough that the frame is a
 #: few hundred MB at ten samples.
 CHUNK_ROWS = 4_000_000
+
+#: How many samtools threads one BAM's pileup gets, and so how many BAMs are measured at once.
+#:
+#: `samtools depth` does not scale: a user measured ~2 minutes per BAM using every thread of a large
+#: machine, with the machine at ~25% utilisation for the hours it took to walk 50 BAMs one at a time.
+#: The work is embarrassingly parallel across BAMs - each one fills its own column of the running
+#: sums and nothing is shared - so the threads are spent on several BAMs at once instead. Four per
+#: pileup rather than one: `samtools view` does the identity filtering and decompression, which
+#: does thread, and the pandas C parser and numpy accumulation both release the GIL.
+DEPTH_THREADS_PER_BAM = 4
+
+#: A ceiling on how many pileups run at once, whatever the thread budget allows. Each worker holds
+#: a chunk of up to CHUNK_ROWS rows while it folds it in, so this bounds memory as well as the
+#: number of samtools processes.
+MAX_DEPTH_WORKERS = 16
 
 #: The first three columns, then two per sample. Written out here because three separate places used
 #: to spell this layout and one of them had it wrong.
@@ -225,7 +241,11 @@ def write_depth_table(
     # contig - a 4 Mbp contig reporting a depth of 1.6 million.)
     widths = trimmed_widths(np.array([lengths[c] for c in order], dtype=np.int64), edge_bases)
 
-    for column, bam in enumerate(bams):
+    workers = depth_workers(len(bams), threads)
+    per_bam = max(1, threads // workers) if workers > 1 else threads
+
+    def measure(job: Tuple[int, str]) -> None:
+        column, bam = job
         comm("measuring per-base depth in %s" % os.path.basename(bam))
         _accumulate_bam(
             bam,
@@ -235,14 +255,42 @@ def write_depth_table(
             edge_bases,
             percent_identity,
             min_map_qual,
-            threads,
+            per_bam,
             env,
             total,
             total_sq,
         )
 
+    jobs = list(enumerate(bams))
+    if workers == 1:
+        for job in jobs:
+            measure(job)
+    else:
+        comm(
+            "measuring %d BAM(s) %d at a time, %d samtools thread(s) each: one pileup does not "
+            "use a whole machine" % (len(bams), workers, per_bam)
+        )
+        # Each BAM writes its own column of `total`/`total_sq` and reads nothing another writes,
+        # so no lock is needed. Exceptions surface on result(), and the first one stops the rest
+        # rather than letting a half-measured table be written.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for future in [pool.submit(measure, job) for job in jobs]:
+                future.result()
+
     _write(out_path, order, lengths, names, total, total_sq, widths)
     return out_path
+
+
+def depth_workers(bam_count: int, threads: int) -> int:
+    """How many pileups to run at once, given *threads* for the whole stage.
+
+    Never more than there are BAMs, never more than MAX_DEPTH_WORKERS, and never so many that a
+    pileup gets less than one thread. One worker when the budget is small, which is also what keeps
+    a single-BAM call exactly as it was.
+    """
+    if bam_count <= 1 or threads <= DEPTH_THREADS_PER_BAM:
+        return 1
+    return max(1, min(bam_count, MAX_DEPTH_WORKERS, threads // DEPTH_THREADS_PER_BAM))
 
 
 def trimmed_widths(contig_len: np.ndarray, edge_bases: int) -> np.ndarray:

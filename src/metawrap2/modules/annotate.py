@@ -28,10 +28,12 @@ import csv
 import os
 from typing import Dict, List, Optional
 
-from .. import bgc, cazy, genecall, kofam, pfam
+from .. import bgc, cazy, eggnog, genecall, kofam, pfam
+from ..checkm import tag_mimag
 from ..cliformat import make_parser
+from ..command import capture_in_env
 from ..config import MODULE_ENVS, load_settings
-from ..constants import FASTA_EXTENSIONS, TSV_SUFFIX
+from ..constants import FASTA_EXTENSIONS, STATS_SUFFIX, TSV_SUFFIX
 from ..io.seqio import contig_id, iter_fasta
 from ..progress import bar
 from ._common import (
@@ -46,6 +48,7 @@ from ._common import (
     finish_run,
     list_bins,
     make_checkpoint,
+    optional_env_for,
     require_nonempty_dir,
     resolve_threads,
     run,
@@ -86,6 +89,23 @@ DBCAN = (
 GECCO = (
     "gecco run -g {genome} --gff {gff} -o {outdir} -j {threads} --force-tsv --no-color --no-markup"
 )
+# Orthology-based annotation, over the proteins this module has already called - hence
+# `--itype proteins`, which is emapper's default and is passed anyway because a default is not a
+# contract. With `--itype genome` eggNOG calls its own genes with Prodigal, and the COG/GO/EC terms
+# would then belong to genes that are in no other table here.
+#
+# `--override` is not optional: emapper refuses to start with "Output files detected in disk. Use
+# --resume or --override to continue" if any of its outputs already exist, which on a re-run into
+# the same -o is every time.
+#
+# `--data_dir`, `--output_dir` and `--temp_dir` are all `type=existing_dir` in emapper's own
+# argument parser, so a directory that does not exist is an argparse error from inside emapper
+# rather than a MetaWrap2 message - which is why the output directory is created and the database
+# checked before this is ever formatted.
+EGGNOG = (
+    "emapper.py -i {proteins} --itype proteins -m diamond --data_dir {db}"
+    " --output_dir {outdir} --temp_dir {outdir} -o {prefix} --cpu {threads} --override"
+)
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
 #: Where per-genome gene files go, one set per genome, named for the genome.
@@ -107,6 +127,21 @@ CAZY_TABLE = "cazymes" + TSV_SUFFIX
 CAZY_CLASS_TABLE = "cazyme_classes" + TSV_SUFFIX
 #: Where dbCAN's own output is kept, one directory per genome.
 CAZY_DIR = "dbcan"
+#: The per-gene eggNOG table, written by --eggnog. One row per gene emapper placed, carrying the
+#: COG category, GO terms and EC numbers that neither --kofam nor --pfam produces.
+EGGNOG_TABLE = "eggnog" + TSV_SUFFIX
+#: One row per (gene, namespace, term) - long, because a gene has any number of GO terms and
+#: exactly one row per term is what a group-by can count.
+EGGNOG_TERM_TABLE = "eggnog_terms" + TSV_SUFFIX
+#: Where emapper's own output is kept, one directory per genome: the .annotations table this parses,
+#: plus the .seed_orthologs and .hits files, which are what a re-annotation at a different
+#: --tax_scope needs and are expensive to regenerate.
+EGGNOG_DIR = "eggnog"
+#: What `download_eggnog_data.py` writes and what `-m diamond` needs: the annotation SQLite and the
+#: DIAMOND database of eggNOG proteins. Checked by name because pointing --eggnog-db at the parent
+#: of the real data directory is the easy mistake, and emapper's own error for it arrives once per
+#: genome and names --data_dir, a flag the user never typed.
+EGGNOG_DB_FILES = ("eggnog.db", "eggnog_proteins.dmnd")
 #: One row per predicted biosynthetic gene cluster, written by --bgc.
 BGC_TABLE = "gene_clusters" + TSV_SUFFIX
 #: Per-genome cluster counts, split by whether a cluster runs into unassembled sequence.
@@ -198,6 +233,23 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="directory holding Pfam-A.hmm (default: PFAM_DB from metawrap2.toml)",
     )
     p.add_argument(
+        "--eggnog",
+        action="store_true",
+        # No literal per-cent sign anywhere in this help: argparse treats the string as a format
+        # template, and a bare one once made `--help` fail for every command in the package.
+        help="also annotate the called proteins by orthology with eggNOG-mapper, for the COG "
+        "category, GO terms and EC numbers neither --kofam nor --pfam produces. Coverage is not "
+        "what this buys: on one bin 1578 genes had a Pfam domain and no KO against 13 the other "
+        "way round, so Pfam nearly subsumes KEGG's gene set and the orthogonal annotation is the "
+        "gap. Needs the eggNOG data (about 50 GB) via --eggnog-db",
+    )
+    p.add_argument(
+        "--eggnog-db",
+        metavar="DIR",
+        help="directory holding eggnog.db and eggnog_proteins.dmnd, as "
+        "download_eggnog_data.py writes them (default: EGGNOG_DB from metawrap2.toml)",
+    )
+    p.add_argument(
         "--cazy",
         action="store_true",
         help="also assign CAZyme families to the called proteins with dbCAN (needs DBCAN_DB). "
@@ -246,6 +298,29 @@ def _inputs(args) -> List[tuple]:
     return [(os.path.splitext(name)[0], os.path.join(args.bins, name), args.meta) for name in names]
 
 
+def _unit(args) -> str:
+    """What the per-genome loops are iterating over, so a message matches the input flag given."""
+    return "bins" if args.bins else "genomes"
+
+
+def _require_some_output(tool: str, failed: int, total: int, unit: str) -> None:
+    """Fail the step when *every* item in a per-item loop failed.
+
+    "Warn and proceed with the rest" is the right policy for one pathological genome: a bin that
+    Bakta or dbCAN cannot handle should not cost the user the other 25. It is the wrong policy when
+    every item fails, because then there is one cause rather than one bad input, nothing was
+    produced to carry on with, and the closing banner and the exit status contradict every warning
+    above them. The report this comes from launched Bakta 26 times without a database, failed 26
+    times, printed 26 warnings and exited 0 with ANNOTATE PIPELINE SUCCESSFULLY FINISHED - which
+    anything reading exit codes recorded as a finished annotation.
+    """
+    if total and failed >= total:
+        error(
+            "%s failed on %d of %d %s; no %s output was produced"
+            % (tool, failed, total, unit, tool)
+        )
+
+
 def _call_and_write(name: str, path: str, meta: bool, genes_dir: str) -> genecall.GenomeGenes:
     called = genecall.call_genome(path, name=name, meta=meta)
     genecall.write_faa(called, os.path.join(genes_dir, name + ".faa"))
@@ -255,9 +330,24 @@ def _call_and_write(name: str, path: str, meta: bool, genes_dir: str) -> genecal
 
 
 def _bakta_db(args, settings) -> Optional[str]:
+    """The Bakta database to annotate against, checked before anything is launched.
+
+    "Rely on Bakta's own default" was not a fallback: Bakta has no default database, so with
+    BAKTA_DB unset this launched Bakta once per bin and watched it fail once per bin - 26 of 26 on
+    the report this comes from. BAKTA_DB is a known config key with a ``check_databases()`` entry,
+    which makes the one configurable reason all 26 would fail answerable before the first launch
+    rather than 26 warnings later.
+    """
     db = args.bakta_db or settings.db("BAKTA_DB")
-    if args.bakta and not db:
-        comm("No Bakta database given (--bakta-db / BAKTA_DB); relying on Bakta's own default.")
+    if not args.bakta:
+        return db
+    if not db:
+        error(
+            "--bakta needs BAKTA_DB; set it in metawrap2.toml "
+            "(bakta_db download --output <dir>), or pass --bakta-db"
+        )
+    if not os.path.exists(db):
+        error("the Bakta database does not exist: %s (BAKTA_DB / --bakta-db)" % db)
     return db
 
 
@@ -312,6 +402,80 @@ def _ko_genes(args) -> Dict[str, set]:
     return out
 
 
+def _eggnog_db(args, settings) -> str:
+    """The eggNOG data directory, checked before emapper is launched once per genome.
+
+    ``EGGNOG_DB`` is not a config key yet, so ``settings.db`` returns "" for it rather than raising
+    - which means ``--eggnog-db`` is the only way to pass it today and the config default starts
+    working the moment the key is added, with no change here.
+
+    Checked rather than left to emapper because its own ``--data_dir`` is ``type=existing_dir``: an
+    absent directory is an argparse error from inside emapper, printed once per genome, naming a
+    flag the user did not type.
+    """
+    db = args.eggnog_db or settings.db("EGGNOG_DB")
+    if not db:
+        error(
+            "--eggnog needs the eggNOG data (about 50 GB: eggnog.db and eggnog_proteins.dmnd): "
+            "pass --eggnog-db, or set EGGNOG_DB in metawrap2.toml. The data is downloaded by "
+            "eggNOG-mapper's own `download_eggnog_data.py --data_dir <dir>`"
+        )
+    if not os.path.isdir(db):
+        error("the eggNOG data directory does not exist: %s (EGGNOG_DB / --eggnog-db)" % db)
+    missing = [name for name in EGGNOG_DB_FILES if not os.path.isfile(os.path.join(db, name))]
+    if missing:
+        error(
+            "%s is not an eggNOG data directory: %s missing. Run `download_eggnog_data.py "
+            "--data_dir %s`" % (db, ", ".join(missing), db)
+        )
+    return db
+
+
+def _eggnog_version(env: Optional[str], db: str) -> tuple:
+    """(what emapper reports about itself, the installed eggNOG DB version).
+
+    ``emapper.py --version`` prints the tool version, the DB version it expects *and* the DB version
+    it found, on one line - so one probe answers both halves of "what produced this table". Probed
+    rather than assumed because an orthology transfer is only reproducible against the eggNOG
+    release that held the group, and eggNOG renumbers groups between releases.
+
+    Silent on failure, with "unknown" as the answer: a version probe that fails must not stop an
+    annotation, and the row still records what was found.
+    """
+    line = capture_in_env(env, ["emapper.py", "--data_dir", db, "--version"]).strip()
+    line = line.splitlines()[0] if line else ""
+    db_version = "unknown"
+    marker = "Installed eggNOG DB version:"
+    if marker in line:
+        db_version = line.split(marker, 1)[1].split("/")[0].strip() or "unknown"
+    return line or "unknown", db_version
+
+
+def _kofam_kos(args) -> Dict[str, Dict[str, List[str]]]:
+    """genome -> gene -> the KOs ``--kofam`` assigned it, from this run's own KO table.
+
+    Read off disk for the reason :func:`_ko_genes` is, and keyed by gene rather than collapsed to a
+    set of genes because the eggNOG comparison needs the K numbers themselves: "both annotators
+    called a KO" and "both called the same KO" are different counts, and only the second one says
+    they agree.
+
+    Empty when --kofam was not used, and the eggNOG report then omits the overlap rather than
+    claiming eggNOG called every KO alone.
+    """
+    path = os.path.join(args.output, KOS_TABLE)
+    if not os.path.isfile(path):
+        return {}
+    out: Dict[str, Dict[str, List[str]]] = {}
+    with open(path) as handle:
+        for row in csv.DictReader(handle, delimiter="\t"):
+            genome = (row.get("genome") or "").strip()
+            gene = (row.get("gene_id") or "").strip()
+            ko = (row.get("ko") or "").strip()
+            if genome and gene and ko:
+                out.setdefault(genome, {}).setdefault(gene, []).append(ko)
+    return out
+
+
 def _run_pfam(args, genes_dir: str, todo: List[tuple], ko_genes_by_genome=None) -> None:
     """Search every genome's proteins against Pfam-A and write the domain tables.
 
@@ -338,6 +502,7 @@ def _run_pfam(args, genes_dir: str, todo: List[tuple], ko_genes_by_genome=None) 
     domain_path = os.path.join(args.output, PFAM_TABLE)
     arch_path = os.path.join(args.output, PFAM_ARCHITECTURE_TABLE)
     totals = {"genes": 0, "annotated": 0, "domains": 0, "rescued": 0}
+    failed = 0
     with (
         open(domain_path, "w", newline="") as domain_fh,
         open(arch_path, "w", newline="") as arch_fh,
@@ -353,14 +518,17 @@ def _run_pfam(args, genes_dir: str, todo: List[tuple], ko_genes_by_genome=None) 
         for name, _path, _meta in bar(todo, desc="Pfam", unit=" genome", total=len(todo)):
             faa = os.path.join(genes_dir, name + ".faa")
             if not os.path.isfile(faa):
+                failed += 1
                 warning("no proteins for %s; skipping Pfam annotation" % name)
                 continue
             proteins = [(contig_id(header), sequence) for header, sequence in iter_fasta(faa)]
             if not proteins:
+                failed += 1
                 continue
             try:
                 hits = pfam.search(proteins, hmm, threads=args.threads)
             except Exception as problem:  # noqa: BLE001 - one genome failing must not lose the rest
+                failed += 1
                 warning("Pfam search failed on %s: %s" % (name, problem))
                 continue
             for hit in hits:
@@ -375,6 +543,7 @@ def _run_pfam(args, genes_dir: str, todo: List[tuple], ko_genes_by_genome=None) 
             if found.genes_rescued is not None:
                 totals["rescued"] += found.genes_rescued
 
+    _require_some_output("Pfam", failed, len(todo), _unit(args))
     share = 100.0 * totals["annotated"] / totals["genes"] if totals["genes"] else 0.0
     comm(
         "%d domain(s) over %d of %d gene(s) (%.1f%%) -> %s"
@@ -417,7 +586,7 @@ def _run_cazy(args, genes_dir: str, todo: List[tuple]) -> None:
     gene_path = os.path.join(args.output, CAZY_TABLE)
     class_path = os.path.join(args.output, CAZY_CLASS_TABLE)
     methods = " --methods %s" % args.cazy_methods if args.cazy_methods else ""
-    total = confident = 0
+    total = confident = failed = 0
     with open(gene_path, "w", newline="") as gene_fh, open(class_path, "w", newline="") as class_fh:
         gene_writer = csv.DictWriter(
             gene_fh, fieldnames=cazy.CAZYME_COLUMNS, delimiter="\t", lineterminator="\n"
@@ -430,6 +599,7 @@ def _run_cazy(args, genes_dir: str, todo: List[tuple]) -> None:
         for name, _path, _meta in bar(todo, desc="CAZymes", unit=" genome", total=len(todo)):
             faa = os.path.join(genes_dir, name + ".faa")
             if not os.path.isfile(faa):
+                failed += 1
                 warning("no proteins for %s; skipping CAZyme annotation" % name)
                 continue
             outdir = os.path.join(root, name)
@@ -441,6 +611,7 @@ def _run_cazy(args, genes_dir: str, todo: List[tuple]) -> None:
             )
             overview = os.path.join(outdir, "overview.tsv")
             if rc != 0 or not os.path.isfile(overview):
+                failed += 1
                 warning("dbCAN failed on %s; it contributes no CAZyme calls" % name)
                 continue
             calls = cazy.parse_overview(overview, name)
@@ -451,6 +622,7 @@ def _run_cazy(args, genes_dir: str, todo: List[tuple]) -> None:
             total += len(calls)
             confident += sum(1 for call in calls if call.is_confident)
 
+    _require_some_output("dbCAN", failed, len(todo), _unit(args))
     comm(
         "%d CAZyme gene(s), %d of them found by at least %d of dbCAN's three methods -> %s"
         % (total, confident, cazy.MIN_TOOLS, gene_path)
@@ -477,7 +649,7 @@ def _run_bgc(args, genes_dir: str, todo: List[tuple]) -> None:
     ensure_dir(root)
     cluster_path = os.path.join(args.output, BGC_TABLE)
     summary_path = os.path.join(args.output, BGC_SUMMARY_TABLE)
-    total = truncated = 0
+    total = truncated = failed = 0
     with (
         open(cluster_path, "w", newline="") as cluster_fh,
         open(summary_path, "w", newline="") as summary_fh,
@@ -493,6 +665,7 @@ def _run_bgc(args, genes_dir: str, todo: List[tuple]) -> None:
         for name, path, _meta in bar(todo, desc="gene clusters", unit=" genome", total=len(todo)):
             gff = os.path.join(genes_dir, name + ".gff")
             if not os.path.isfile(gff):
+                failed += 1
                 warning("no GFF for %s; skipping cluster prediction" % name)
                 continue
             outdir = os.path.join(root, name)
@@ -514,6 +687,7 @@ def _run_bgc(args, genes_dir: str, todo: List[tuple]) -> None:
                 )
                 table = found[0] if found else ""
             if rc != 0 or not table:
+                failed += 1
                 warning("gecco failed on %s; it contributes no clusters" % name)
                 continue
             lengths = {contig_id(header): len(seq) for header, seq in iter_fasta(path)}
@@ -524,6 +698,7 @@ def _run_bgc(args, genes_dir: str, todo: List[tuple]) -> None:
             total += len(clusters)
             truncated += sum(1 for cluster in clusters if cluster.is_truncated)
 
+    _require_some_output("GECCO", failed, len(todo), _unit(args))
     comm("%d gene cluster(s), %d of them at a contig edge -> %s" % (total, truncated, cluster_path))
     if total:
         comm(bgc.TRUNCATION_CAVEAT)
@@ -558,6 +733,7 @@ def _run_kofam(args, genes_dir: str, todo: List[tuple]) -> None:
     ko_list_tag = kofam.ko_list_label(ko_list)
     out_path = os.path.join(args.output, KOS_TABLE)
     counts = {evidence: 0 for evidence in kofam.Evidence}
+    failed = 0
     with open(out_path, "w", newline="") as fh:
         writer = csv.DictWriter(
             fh, fieldnames=kofam.KO_COLUMNS, delimiter="\t", lineterminator="\n"
@@ -566,12 +742,14 @@ def _run_kofam(args, genes_dir: str, todo: List[tuple]) -> None:
         for name, _path, _meta in bar(todo, desc="assigning KOs", unit=" genome", total=len(todo)):
             faa = os.path.join(genes_dir, name + ".faa")
             if not os.path.isfile(faa):
+                failed += 1
                 warning("no proteins for %s; skipping KO assignment" % name)
                 continue
             hits = kofam.search(faa, profile_files, threads=args.threads)
             for call in kofam.assign(hits, profiles, policy):
                 writer.writerow(kofam.ko_row(name, call, policy, ko_list_tag))
                 counts[call.evidence] += 1
+    _require_some_output("KOfam", failed, len(todo), _unit(args))
     total = sum(counts.values())
     comm(
         "assigned %d KOs (%s)"
@@ -581,6 +759,116 @@ def _run_kofam(args, genes_dir: str, todo: List[tuple]) -> None:
         )
     )
     comm("per-gene KO table: %s" % out_path)
+
+
+def _run_eggnog(args, genes_dir: str, todo: List[tuple], kofam_by_genome=None) -> None:
+    """Annotate every genome's proteins by orthology with eggNOG-mapper and write both tables.
+
+    Per genome rather than over a concatenation, for the reason the CAZyme and cluster passes are:
+    every table in this module is keyed on (genome, gene) and emapper's output is keyed on the query
+    name alone, so two genomes sharing a gene id would merge silently.
+
+    The overlap with KOfam is computed here and not merged into either table. eggNOG transfers a KO
+    from an orthologous group; KOfam calls one from that profile's curated bit-score threshold.
+    Preferring one silently would destroy the only measurement that justifies running both.
+    """
+    settings = load_settings(args.config)
+    # Its own environment, not the shared annotate one, and its own lookup rather than main's `env`
+    # (which is None unless --bakta was given, and would reach for emapper.py on the user's PATH).
+    # eggNOG-mapper 2.1.x imports distutils, which Python 3.12 removed, so it needs a Python
+    # ceiling that bakta, dbCAN and GECCO must not inherit - found by running its own downloader
+    # in a freshly solved annotate env and watching it die before any user code ran.
+    env = optional_env_for("eggnog", settings, needed_by="annotate --eggnog")
+    db = _eggnog_db(args, settings)
+    if dry_run():
+        comm("would annotate %d genome(s) by orthology with eggNOG-mapper" % len(todo))
+        return
+
+    version, db_version = _eggnog_version(env, db)
+    comm("%s; annotations transferred from eggNOG DB %s" % (version, db_version))
+    root = os.path.join(args.output, EGGNOG_DIR)
+    ensure_dir(root)
+    gene_path = os.path.join(args.output, EGGNOG_TABLE)
+    term_path = os.path.join(args.output, EGGNOG_TERM_TABLE)
+    totals = {"genes": 0, "annotated": 0, "orthogonal": 0, "terms": 0}
+    overlaps = {"both": 0, "agreeing": 0, "eggnog_only": 0, "kofam_only": 0}
+    failed = 0
+    with (
+        open(gene_path, "w", newline="") as gene_fh,
+        open(term_path, "w", newline="") as term_fh,
+    ):
+        gene_writer = csv.DictWriter(
+            gene_fh, fieldnames=eggnog.GENE_COLUMNS, delimiter="\t", lineterminator="\n"
+        )
+        gene_writer.writeheader()
+        term_writer = csv.DictWriter(
+            term_fh, fieldnames=eggnog.TERM_COLUMNS, delimiter="\t", lineterminator="\n"
+        )
+        term_writer.writeheader()
+        for name, _path, _meta in bar(todo, desc="eggNOG", unit=" genome", total=len(todo)):
+            faa = os.path.join(genes_dir, name + ".faa")
+            if not os.path.isfile(faa):
+                failed += 1
+                warning("no proteins for %s; skipping eggNOG annotation" % name)
+                continue
+            outdir = os.path.join(root, name)
+            # emapper's --output_dir and --temp_dir are both type=existing_dir, so this has to exist
+            # before the command is run rather than being created by it.
+            ensure_dir(outdir)
+            rc = run(
+                EGGNOG.format(
+                    proteins=faa, outdir=outdir, db=db, prefix=name, threads=args.threads
+                ),
+                env=env,
+                tool="emapper.py",
+                check=False,
+            )
+            annotations = os.path.join(outdir, "%s.emapper.annotations" % name)
+            if rc != 0 or not os.path.isfile(annotations):
+                failed += 1
+                warning("eggNOG-mapper failed on %s; it contributes no annotations" % name)
+                continue
+            rows = eggnog.parse_annotations(annotations, name)
+            for row in rows:
+                gene_writer.writerow(eggnog.gene_row(row, db_version))
+            terms = eggnog.term_rows(rows, db_version)
+            for term in terms:
+                term_writer.writerow(term)
+            proteins = [contig_id(header) for header, _sequence in iter_fasta(faa)]
+            found = eggnog.coverage(rows, proteins)
+            totals["genes"] += found.genes
+            totals["annotated"] += found.genes_annotated
+            totals["orthogonal"] += found.genes_with_orthogonal_annotation
+            totals["terms"] += len(terms)
+            if kofam_by_genome:
+                overlap = eggnog.compare_kos(rows, kofam_by_genome.get(name, {}))
+                overlaps["both"] += overlap.both
+                overlaps["agreeing"] += overlap.agreeing
+                overlaps["eggnog_only"] += overlap.eggnog_only
+                overlaps["kofam_only"] += overlap.kofam_only
+
+    _require_some_output("eggNOG-mapper", failed, len(todo), _unit(args))
+    share = 100.0 * totals["annotated"] / totals["genes"] if totals["genes"] else 0.0
+    comm(
+        "%d of %d gene(s) (%.1f%%) placed in an orthologous group -> %s"
+        % (totals["annotated"], totals["genes"], share, gene_path)
+    )
+    comm(
+        "%d of them carry a GO term, EC number or COG category - the annotation neither --kofam "
+        "nor --pfam emits at all (%d term(s) -> %s)"
+        % (totals["orthogonal"], totals["terms"], term_path)
+    )
+    comm(eggnog.ORTHOGONAL_CAVEAT)
+    if kofam_by_genome:
+        comm(
+            eggnog.KoOverlap(
+                both=overlaps["both"],
+                eggnog_only=overlaps["eggnog_only"],
+                kofam_only=overlaps["kofam_only"],
+                agreeing=overlaps["agreeing"],
+            ).describe()
+        )
+    comm(eggnog.TRANSFER_CAVEAT)
 
 
 def main(argv: List[str]) -> int:
@@ -683,6 +971,7 @@ def main(argv: List[str]) -> int:
                 bakta_out = os.path.join(args.output, "bakta")
                 ensure_dir(bakta_out)
                 db = "--db %s" % bakta_db if bakta_db else ""
+                failed = 0
                 for name, path, _meta in bar(todo, desc="bakta", unit=" genome", total=len(todo)):
                     rc = run(
                         BAKTA.format(
@@ -697,7 +986,19 @@ def main(argv: List[str]) -> int:
                         check=False,
                     )
                     if rc != 0:
+                        failed += 1
                         warning("Bakta failed on %s. Proceeding with the rest." % name)
+                _require_some_output("Bakta", failed, len(todo), _unit(args))
+                # Bakta is the only engine here that runs tRNAscan-SE, Aragorn and Infernal, so it
+                # is the only one whose output can answer MIMAG's rRNA and tRNA criteria. Tag the
+                # stats table beside the bins while that evidence is on disk: a genome annotated
+                # without it keeps `mimag_rrna=unknown` rather than being quietly downgraded, which
+                # is the one distinction the tag exists to preserve.
+                for _name, genome_path, _meta in todo:
+                    stats = os.path.dirname(genome_path.rstrip("/")) + STATS_SUFFIX
+                    if os.path.isfile(stats):
+                        tag_mimag(stats, evidence_dir=args.output)
+                        break
                 ckpt.done("bakta")
             else:
                 comm("skipping bakta (already done; --resume)")
@@ -729,6 +1030,18 @@ def main(argv: List[str]) -> int:
                 ckpt.done("pfam")
             else:
                 comm("skipping Pfam annotation (already done; --resume)")
+
+        # After KOfam and Pfam, not before: the overlap summary reads kos.tsv off disk, so a block
+        # placed above the KOfam one would find no KO table and report that eggNOG called every KO
+        # alone. The Pfam block was once ordered before KOfam and its reported increment was
+        # therefore always zero - the same defect, and it went unnoticed because zero is a plausible
+        # answer.
+        if args.eggnog:
+            if ckpt.todo("eggnog"):
+                _run_eggnog(args, genes_dir, todo, _kofam_kos(args))
+                ckpt.done("eggnog")
+            else:
+                comm("skipping eggNOG annotation (already done; --resume)")
 
         comm("per-gene table: %s" % os.path.join(args.output, GENES_TABLE))
         comm("per-genome summary: %s" % os.path.join(args.output, SUMMARY_TABLE))

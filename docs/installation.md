@@ -1,27 +1,41 @@
 # Installation
 
-## The short way
+## Quick install
 
 ```bash
+# 1. mamba, which solves the conda environments much faster than conda. Needs Python 3.10-3.14.
+#    No conda on the machine: install Miniforge, which includes mamba and a current Python.
+#      curl -L -O https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+#      bash Miniforge3-Linux-x86_64.sh -b -p ~/miniforge3 && export PATH="$HOME/miniforge3/bin:$PATH"
+#    Anaconda or Miniconda already installed: add mamba to its base environment.
+#      conda install -n base -c conda-forge mamba
+# 2. MetaWrap2 and its environments.
 git clone https://github.com/ursky/MetaWrap2.git && cd MetaWrap2
 pip install .
 metawrap2 quickstart -t 8
 ```
 
-`quickstart` builds and verifies every module's conda environment, then lists the databases each
-module needs (550 MB to ~300 GB each). It downloads none unless asked:
+On stock RHEL 8 or older Ubuntu, `python3` is 3.9 and `pip install .` fails after downloading the
+dependencies with `requires a different Python: 3.9.x not in '>=3.10'`. Current Miniforge provides
+Python 3.14; `pip install .` took 17 seconds on a fresh install. mamba must also be on `PATH` when a
+module runs, which unattended jobs do not set up; see
+[mamba must be on PATH](#mamba-must-be-on-path-when-a-module-runs).
 
-- `--databases small`: capped-but-real builds, good for a first run.
+`quickstart` builds and verifies every module's conda environment, then lists the databases each
+module needs (550 MB to ~300 GB each). It downloads databases only when asked:
+
+- `--databases small`: reduced but real builds, for a first run.
 - `--databases full`: the full databases.
 - Or answer the prompt when running interactively.
 
-`--binning-only` installs just the six modules genome recovery needs. The rest of this page is what
-quickstart does, step by step.
+`--binning-only` installs the six modules genome recovery needs. `--skip-envs` builds no
+environments and reports each database's status. With no `--databases` and no terminal to prompt
+on, it downloads nothing and says so. The sections below go through what quickstart does.
 
 ## Step by step
 
-MetaWrap2 is a Python core plus five conda environments, one per workflow. Modules that run in
-sequence with the same tools share one.
+MetaWrap2 is a Python core plus conda environments, one per workflow. Modules that run in sequence
+with the same tools share one.
 
 ```bash
 git clone https://github.com/ursky/MetaWrap2.git
@@ -45,8 +59,8 @@ metawrap2 install-env --all -t 4      # every environment, 4 at a time
   environment once, opt-in ones included; `quickstart` builds the ten defaults plus
   `metawrap2-learned`.
 - `-t` sets how many build at once. Each writes its solver output to a log file, printed on failure.
-- Existing environments are kept unless you pass `--force`, so re-running after an interruption is
-  cheap.
+- Existing environments are kept unless you pass `--force`, so a re-run after an interruption
+  builds only what is missing.
 - Names from MetaWrap2 2.0.x, such as `bin_refinement-checkm2`, still work and map to the current
   environment.
 
@@ -74,6 +88,7 @@ The default environments:
 | `metawrap2-learned` | pytorch, about 1.5 GB | `binning --semibin2` / `--vamb` / `--comebin` |
 | `metawrap2-rgi` | Pins older dependencies than AMRFinderPlus | `amr --rgi` |
 | `metawrap2-tracs` | Pins an older scientific-Python stack than inStrain | `strains --backend tracs` |
+| `metawrap2-eggnog` | eggNOG-mapper needs Python below 3.12 | `annotate --eggnog` |
 | `metawrap2-benchmark-amber` | Benchmark only; pins matplotlib below 3.9 | `benchmark score` |
 
 ```bash
@@ -88,9 +103,9 @@ lists the tools in each environment.
 
 ### k-mer coverage (fairy)
 
-`coverage --coverage fairy` estimates contig depth per sample without alignment. fairy ships in
-`metawrap2-bins`. It is opt-in: single-sample, it recovered half the bins minimap2 did. Multi-sample
-performance is untested.
+`coverage --coverage fairy` estimates contig depth per sample without alignment. fairy is in
+`metawrap2-bins` and is opt-in. On a single sample it recovered half as many bins as minimap2.
+Multi-sample performance is untested.
 
 ```bash
 metawrap2 install-env bins   # then: metawrap2 coverage --coverage fairy ...
@@ -108,38 +123,47 @@ metawrap2 install-db  checkm2          # 1.7 GB; CheckM2 downloads it, we record
 
 ### GUNC
 
-GUNC runs by default in `bin_refinement`. It detects chimeric bins, which CheckM can score as
+GUNC runs by default in `bin_refinement` and detects chimeric bins, which CheckM can score as
 complete and clean. It is in `metawrap2-binqc` and needs its own database:
 
 ```bash
 metawrap2 install-env binqc
-metawrap2 install-db gunc              # 6.7 GB reference; pass --skip-gunc to do without
+metawrap2 install-db gunc              # 6.7 GB download, ~13 GB installed; or pass --skip-gunc
 ```
 
-`bin_refinement` checks for this database before CheckM starts, and if it is missing, says to
-install it or pass `--skip-gunc`.
+`bin_refinement` checks for this database before CheckM starts. If it is missing, the error says
+to install it or pass `--skip-gunc`.
 
 ## Databases
 
 ```bash
-metawrap2 install-db --list           # what's available, sizes, which module needs each
+metawrap2 install-db --list           # what's available, its sizes, which module needs each
 metawrap2 install-db --all -t 4       # download, index, and configure everything
 metawrap2 install-db --all --small    # capped-but-real builds: fast, good for testing
+metawrap2 install-db --all --dir /data/metawrap2_dbs   # a different location (default ~/metawrap2_dbs)
 ```
 
-`install-db` downloads, unpacks and indexes each database (including `checkm data setRoot`) and
-writes its path to your config. It skips databases already present.
+`install-db` downloads, unpacks and indexes each database (including `checkm data setRoot`). It
+writes each path to your config (`~/.metawrap2/config.toml`, or the file `--config` or
+`$METAWRAP2_CONFIG` names) as soon as that database is installed, so later runs find it and an
+interrupted install keeps what it finished. `--no-config-update` installs without touching the
+config. Databases already present are skipped.
 
-Check that a module is ready:
+`kraken2 --bracken` needs no extra download. The pre-built KRAKEN2 standard database includes the
+`databaseNmers.kmer_distrib` files Bracken reads, for 50 to 300 bp reads. For a custom Kraken2
+database, build them with `bracken-build -d $KRAKEN2_DB -l <read length>` and point `BRACKEN_DB` at
+the same directory.
+
+Check that a module is ready with `doctor`:
 
 ```bash
-metawrap2 check binning            # conda env + databases, with a pass/fail exit code
 metawrap2 doctor binning           # env, software and databases, with a status map
 metawrap2 doctor --fix             # recreate exactly the environments that are broken
 ```
 
-`doctor` is an alias for `test`. It also reports each database's content fingerprint, so a
-database replaced in place shows as changed.
+It also reports each database's content fingerprint, so a database replaced in place shows as
+changed. `test` is the same command under its original name. In scripts, use
+`metawrap2 check <module>`, which exits non-zero if the module is not ready.
 
 ## Reproducing an environment later
 
@@ -171,7 +195,7 @@ metawrap2 config migrate /path/to/old-config -o ~/.metawrap2/config.toml
 ```
 
 This keeps database paths, drops obsolete settings with a reason, and flags paths missing on this
-machine. The old file is read, not executed.
+machine. The old file is parsed and not executed.
 
 ### mamba must be on PATH when a module runs
 

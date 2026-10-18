@@ -23,9 +23,9 @@ repos:
       # Test fixtures and recorded benchmark inputs are verbatim tool output, whitespace included;
       # rewriting them changes what the tests compare against.
       - id: end-of-file-fixer
-        exclude: ^(tests/fixtures/|benchmarks/figure_inputs/|benchmarks/fixtures/)
+        exclude: ^(tests/fixtures/|benchmarks/fixtures/)
       - id: trailing-whitespace
-        exclude: ^(tests/fixtures/|benchmarks/figure_inputs/|benchmarks/fixtures/)
+        exclude: ^(tests/fixtures/|benchmarks/fixtures/)
       - id: check-yaml
       - id: check-added-large-files
         args: [--maxkb=512]

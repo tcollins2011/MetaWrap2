@@ -1,0 +1,36 @@
+{
+  "summary": {
+    "fastp_version": "0.24.0",
+    "sequencing": "paired end (151 cycles + 151 cycles)",
+    "before_filtering": {
+      "total_reads": 20000000,
+      "total_bases": 3020000000,
+      "q20_bases": 2963478000,
+      "q30_bases": 2862740000,
+      "q20_rate": 0.981284,
+      "q30_rate": 0.947927,
+      "read1_mean_length": 151,
+      "read2_mean_length": 151,
+      "gc_content": 0.442017
+    },
+    "after_filtering": {
+      "total_reads": 19820000,
+      "total_bases": 2982410000,
+      "q20_bases": 2944151000,
+      "q30_bases": 2851203000,
+      "q20_rate": 0.987170,
+      "q30_rate": 0.956008,
+      "read1_mean_length": 150,
+      "read2_mean_length": 150,
+      "gc_content": 0.441688
+    }
+  },
+  "filtering_result": {
+    "passed_filter_reads": 19820000,
+    "low_quality_reads": 168000,
+    "too_many_N_reads": 2000,
+    "too_short_reads": 10000,
+    "too_long_reads": 0
+  },
+  "command": "fastp -i modern_1.fastq -I modern_2.fastq -o trimmed_1.fastq -O trimmed_2.fastq -w 16 -j fastp.json -h fastp.html"
+}

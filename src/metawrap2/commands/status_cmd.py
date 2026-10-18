@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import usage as _usage
 from ..cliformat import make_parser
@@ -42,6 +42,27 @@ def manifest_path(study_dir: str) -> str:
     if os.path.isfile(study_dir):
         return study_dir
     return os.path.join(study_dir, _STATE_DIR, MANIFEST_NAME)
+
+
+def execution_order(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The steps in the order a run performs them, which is not the order a name sort gives.
+
+    The manifest is saved with sorted keys, so reading it back produced assembly, bin_refinement,
+    binning, quant_bins, read_qc, reassemble_bins - a sequence no study ever ran, and the one thing
+    a user wants from a status table is what happened after what. The driver's ``ALL_STEPS`` is the
+    order its planner itself uses, so that is the order used here. A step the plan does not contain
+    (an older manifest, a module since renamed) keeps its manifest position after the ones it does,
+    and the sort is stable, so the samples within a stage stay in sheet order.
+    """
+    from .run import ALL_STEPS
+
+    def key(step: Dict[str, Any]) -> Tuple[int, int]:
+        module = str(step.get("name", "")).split(":", 1)[0]
+        if module in ALL_STEPS:
+            return (0, ALL_STEPS.index(module))
+        return (1, 0)
+
+    return sorted(steps, key=key)
 
 
 def _duration(seconds: Optional[float]) -> str:
@@ -156,13 +177,14 @@ def main(argv: List[str]) -> int:
         return 1
 
     manifest = Manifest(path)
-    steps = manifest.summary()
+    ordered = execution_order(manifest.summary())
+    steps = ordered
     if args.step:
-        steps = [s for s in steps if s["name"] == args.step]
+        steps = [s for s in ordered if s["name"] == args.step]
         if not steps:
             print(
                 "\nNo step named %r in %s.\nKnown steps: %s\n"
-                % (args.step, path, ", ".join(s["name"] for s in manifest.summary()) or "none")
+                % (args.step, path, ", ".join(s["name"] for s in ordered) or "none")
             )
             return 1
 
@@ -179,6 +201,19 @@ def main(argv: List[str]) -> int:
         return 0
 
     _print_table(manifest, steps, args.strict_fingerprints)
+    study = manifest.data.get("study") or {}
+    if study:
+        # Which of the two analyses produced this directory. A co-assembly catalogue and a
+        # per-sample one are not comparable - different genome counts, different redundancy - and
+        # the step table alone does not say which one is on disk.
+        print(
+            "  %s of %d sample(s), dereplication %s."
+            % (
+                study.get("strategy", "?"),
+                study.get("samples", 0),
+                "ran" if study.get("dereplicated") else "not run",
+            )
+        )
     done = sum(1 for s in steps if s.get("status") == COMPLETED)
     print("  %d of %d step(s) completed. Manifest: %s\n" % (done, len(steps), path))
     return 0

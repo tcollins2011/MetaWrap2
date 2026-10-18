@@ -1,0 +1,23 @@
+Sequence		tRNA	Bounds	tRNA	Anti	Intron Bounds	Inf
+Name    	tRNA #	Begin	End	Type	Codon	Begin	End	Score	Note
+--------	------	-----	----	----	-----	-----	----	------	------
+contig_1	1	20000	20075	Ala	NNN	0	0	75.3	
+contig_1	2	20200	20275	Arg	NNN	0	0	75.3	
+contig_1	3	20400	20475	Asn	NNN	0	0	75.3	
+contig_1	4	20600	20675	Asp	NNN	0	0	75.3	
+contig_1	5	20800	20875	Cys	NNN	0	0	75.3	
+contig_1	6	21000	21075	Gln	NNN	0	0	75.3	
+contig_1	7	21200	21275	Glu	NNN	0	0	75.3	
+contig_1	8	21400	21475	Gly	NNN	0	0	75.3	
+contig_1	9	21600	21675	His	NNN	0	0	75.3	
+contig_1	10	21800	21875	Ile	NNN	0	0	75.3	
+contig_1	11	22000	22075	Leu	NNN	0	0	75.3	
+contig_1	12	22200	22275	Lys	NNN	0	0	75.3	
+contig_1	13	22400	22475	Met	NNN	0	0	75.3	
+contig_1	14	22600	22675	Phe	NNN	0	0	75.3	
+contig_1	15	22800	22875	Pro	NNN	0	0	75.3	
+contig_1	16	23000	23075	Ser	NNN	0	0	75.3	
+contig_1	17	23200	23275	Thr	NNN	0	0	75.3	
+contig_1	18	23400	23475	Trp	NNN	0	0	75.3	
+contig_1	19	23600	23670	Undet	???	0	0	21.4	
+contig_1	20	23900	23970	Pseudo	NNN	0	0	18.2	pseudo

@@ -68,9 +68,19 @@ IQTREE = (
     "iqtree -s {alignment} --prefix {prefix} -m MFP -B {replicates} --alrt 1000"
     " -T AUTO --threads-max {threads} --seed {seed} -redo"
 )
-# FastTree's -gtr -nt for nucleotides; the SH-like supports it reports are not bootstrap values and
-# the summary says so by recording which tool produced the tree.
-FASTTREE = "fasttree -nt -gtr -log {log} {alignment}"
+# Two templates, because FastTree's data type is a flag and not a guess it makes for you. `-nt`
+# declares nucleotide; without it FastTree reads protein. Run the wrong way round the tool does not
+# complain - `-nt` over a protein alignment treats every residue that is not A, C, G or T as
+# ambiguous, which is most of them, and returns a tree built from almost nothing. Every aligner
+# upstream of this module (pangenome core genes, GTDB-Tk's MSA) writes protein, so the fixed `-nt`
+# this used to pass was wrong for its own documented inputs. :func:`metawrap2.phylogeny.read_alignment`
+# measures which it is, and the summary records the model that was used.
+# The SH-like supports FastTree reports are not bootstrap values; the summary says so by recording
+# which tool produced the tree.
+FASTTREE_NT = "fasttree -nt -gtr -log {log} {alignment}"
+#: -lg rather than FastTree's default JTT: LG is the better-fitting empirical matrix for
+#: concatenated single-copy markers, and FastTree has supported it since 2.1.5.
+FASTTREE_AA = "fasttree -lg -log {log} {alignment}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 #: One row per tree.
 SUMMARY_TABLE = "trees" + TSV_SUFFIX
@@ -219,14 +229,20 @@ def main(argv: List[str]) -> int:
             model: Optional[str] = None
             if args.fast:
                 newick = prefix + ".treefile"
+                nucleotide = alignment.kind == "nucleotide"
+                template = FASTTREE_NT if nucleotide else FASTTREE_AA
+                comm(
+                    "%s looks like %s, so FastTree runs with %s"
+                    % (name, alignment.kind, "-nt -gtr" if nucleotide else "-lg")
+                )
                 rc = run(
-                    FASTTREE.format(log=prefix + ".log", alignment=path),
+                    template.format(log=prefix + ".log", alignment=path),
                     env=env,
                     tool="fasttree",
                     check=False,
                     stdout_path=newick,
                 )
-                model = "GTR (FastTree, fixed)"
+                model = "GTR (FastTree, fixed)" if nucleotide else "LG (FastTree, fixed)"
             else:
                 rc = run(
                     IQTREE.format(

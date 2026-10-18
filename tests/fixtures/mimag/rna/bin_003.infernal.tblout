@@ -1,0 +1,6 @@
+#idx target name          accession query name           accession clan name mdl mdl from   mdl to seq from   seq to strand trunc pass   gc  bias  score   E-value inc olp anyidx afrct1 afrct2 winidx wfrct1 wfrct2 description of target
+#--- -------------------- --------- -------------------- --------- --------- --- -------- -------- -------- -------- ------ ----- ---- ---- ----- ------ --------- --- --- ------ ------ ------ ------ ------ ------ ---------------------
+   1 5S_rRNA              RF00001   contig_1             -         CL00111   cm         1     1500     2000     3500      +     no    1 0.53   0.0 1200.0   0.0e+00  !   *      -      -      -      -      -      - 5S_rRNA
+   2 SSU_rRNA_bacteria    RF00177   contig_1             -         CL00111   cm         1     1500     2000     3500      +     no    1 0.53   0.0 1200.0   0.0e+00  !   *      -      -      -      -      -      - SSU_rRNA_bacteria
+   3 LSU_rRNA_bacteria    RF02541   contig_1             -         CL00111   cm         1     1500     2000     3500      +     no    1 0.53   0.0 1200.0   0.0e+00  !   *      -      -      -      -      -      - LSU_rRNA_bacteria
+   4 5_8S_rRNA            RF00002   contig_1             -         CL00112   cm         1      154     9000     9154      +     no    1 0.50   0.0   80.0   1.0e-12  !   *      -      -      -      -      -      - 5_8S_rRNA

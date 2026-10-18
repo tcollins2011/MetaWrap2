@@ -1,0 +1,6 @@
+bin	completeness	contamination	GC	lineage	N50	size
+bin_002.orig	91.5	1.2	0.44	Bacteroidales	26000	3920000
+bin_001.strict	88.0	1.5	0.51	Bacteria	38000	3240000
+bin_004.orig	88.0	2.0	0.61	Actinobacteria	22000	2910000
+bin_003.permissive	83.0	2.0	0.38	Clostridiales	33000	2720000
+bin_005.orig	76.0	4.0	0.33	Fusobacteriales	15000	2050000

@@ -241,7 +241,7 @@ ALISIM COMMAND
 --------------
 To simulate an alignment of the same length as the original alignment, using the tree and model parameters estimated from this analysis, you can use the following command:
 
---alisim simulated_MSA -t runs/phylo_run/trees/msa__core_genome_alignment.treefile -m "GTR{1.90956,3.15913,0.827032,1.12613,7.05558}+F{0.286967,0.205119,0.255069,0.252846}+I{0.439916}" --length 82280
+--alisim simulated_MSA -t trees/msa__core_genome_alignment.treefile -m "GTR{1.90956,3.15913,0.827032,1.12613,7.05558}+F{0.286967,0.205119,0.255069,0.252846}+I{0.439916}" --length 82280
 
 To mimic the alignment used to produce this analysis, i.e. simulate an alignment of the same length as the original alignment, using the tree and model parameters estimated from this analysis *and* copying the same gap positions as the original alignment, you can use the following command:
 

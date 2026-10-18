@@ -7,7 +7,9 @@ verifies what it built with ``metawrap2 test``.
 
 Environments are built several at a time (``-t``), since each one solves and downloads
 independently. Each env's solver output goes to its own log file rather than the screen,
-because concurrent solver output interleaved into one stream is unreadable.
+because concurrent solver output interleaved into one stream is unreadable - but each
+environment does announce when it starts and how long it took, so the slowest step of an
+install is not half an hour of silence.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import List, Optional, Tuple
 
 from ..cliformat import make_parser
@@ -26,8 +29,10 @@ from ..config import (
     LEGACY_ENV_ALIASES,
     MODULE_ENVS,
     conda_env_exists,
+    env_prefix,
     explain_unknown_name,
     known_envs,
+    prefix_in_active_root,
     resolve_env_name,
 )
 
@@ -35,6 +40,18 @@ from ..config import (
 # independent, so building several at once is close to a linear speedup. Default is modest
 # so a laptop on a slow link is not swamped; raise it with -t.
 DEFAULT_PARALLEL_ENVS = 4
+
+
+def format_duration(seconds: float) -> str:
+    """``45s``, ``3m12s``, ``1h04m`` - short enough to sit at the end of a progress line."""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return "%.0fs" % seconds
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes < 60:
+        return "%dm%02ds" % (minutes, secs)
+    hours, minutes = divmod(minutes, 60)
+    return "%dh%02dm" % (hours, minutes)
 
 
 def envs_dir() -> str:
@@ -298,7 +315,12 @@ def main(argv: List[str]) -> int:
 
     rc = 0
     todo = []
-    queued_envs = set()
+    # Every env this run has already decided about, whether it was queued for building or skipped
+    # because it exists. It used to hold only the queued ones, because the "already exists" branch
+    # below `continue`d before reaching the `add` - so a run over modules that share an env printed
+    # "metawrap2-reads already exists" five times and "metawrap2-bins already exists" four, while
+    # the build path printed each env once. Same decision, two different-looking outputs.
+    seen_envs = set()
     for module in modules:
         env = _resolve_or_explain(module)
         if env is None:
@@ -309,13 +331,27 @@ def main(argv: List[str]) -> int:
             print("No env file for module '%s' (%s); skipping." % (module, yaml))
             rc = 1
             continue
-        if env in queued_envs:
+        if env in seen_envs:
             # Two modules sharing one env: `--all` reaches both, and building it twice at once would
             # have two mamba solves writing the same prefix.
-            print("%s is already queued for this run; skipping (%s shares it)." % (env, module))
+            print("%s is already covered by this run; skipping (%s shares it)." % (env, module))
             continue
+        seen_envs.add(env)
         if conda_env_exists(env) and not force:
-            print("%s already exists; skipping (use --force to recreate)." % env)
+            # Name the prefix, not just the env. `conda_env_exists` answers across every conda
+            # installation on the machine, so "already exists" on its own can mean an env that
+            # belongs to a different conda and is not the one this user is about to run against.
+            # The path is how they tell; without it the only way to find out was to go looking.
+            where = env_prefix(env)
+            print(
+                "%s already exists at %s; skipping (use --force to recreate)."
+                % (env, where or "a location conda did not report")
+            )
+            if where and not prefix_in_active_root(where):
+                print(
+                    "    note: that prefix is not under the conda installation on your PATH, so "
+                    "this environment was built by a different conda."
+                )
             continue
         lock = None
         if args.from_lock:
@@ -328,7 +364,6 @@ def main(argv: List[str]) -> int:
                     % (lock_platform(), env, os.path.basename(yaml))
                 )
         todo.append((module, env, yaml, lock))
-        queued_envs.add(env)
 
     if todo and runner.dry_run:
         # The global --dry-run promises "print the commands without running them", and this command
@@ -356,23 +391,56 @@ def main(argv: List[str]) -> int:
             print("  queued  %s  (%s)" % (env, module))
         print()
 
-        done = 0
+        total = len(todo)
+
+        def build(
+            position: int, module: str, env: str, yaml: str, lock: Optional[str]
+        ) -> Tuple[str, bool, str]:
+            """Create one env, announcing when it starts and how long it took.
+
+            A conda solve prints nothing to the screen on purpose (its output goes to the per-env
+            log, which is only shown on failure), so this step - the slowest in the whole install,
+            measured at 29 minutes for eleven environments - used to print the banner and then
+            nothing at all until it was over. After five minutes of silence the honest question is
+            whether it has hung, and the only way to answer it was to go and find the log.
+
+            The lines interleave when several workers are running; each one carries its env name,
+            which is what makes that readable. Flushed because stdout is a pipe under `tee`, `nohup`
+            and CI, where a block-buffered progress line arrives after the thing it announces.
+            """
+            print("  [%d/%d] %-22s solving..." % (position, total, env), flush=True)
+            started = time.time()
+            result = _create_one(module, env, yaml, force, log_dir, lock)
+            _m, ok, log = result
+            if ok:
+                print(
+                    "  [%d/%d] %-22s done in %s"
+                    % (position, total, env, format_duration(time.time() - started)),
+                    flush=True,
+                )
+            else:
+                print(
+                    "  [%d/%d] %-22s FAILED after %s   -> %s"
+                    % (position, total, env, format_duration(time.time() - started), log),
+                    flush=True,
+                )
+            return result
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_create_one, m, e, y, force, log_dir, lk): (m, e)
-                for m, e, y, lk in todo
+                pool.submit(build, i, m, e, y, lk): (m, e)
+                for i, (m, e, y, lk) in enumerate(todo, start=1)
             }
             for future in concurrent.futures.as_completed(futures):
                 module, env = futures[future]
-                done += 1
                 try:
-                    _m, ok, log = future.result()
+                    _m, ok, _log = future.result()
                 except Exception as exc:  # noqa: BLE001 - keep building the other envs
-                    ok, log = False, "%s" % exc
-                if ok:
-                    print("  [%d/%d] OK      %s" % (done, len(todo), env))
-                else:
-                    print("  [%d/%d] FAILED  %s   -> %s" % (done, len(todo), env, log))
+                    # The per-env line never printed in this case, so say so here or the env
+                    # vanishes from the output entirely.
+                    print("  FAILED  %s   -> %s" % (env, exc))
+                    ok = False
+                if not ok:
                     rc = 1
 
     if not args.no_test:

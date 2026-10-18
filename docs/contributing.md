@@ -1,7 +1,7 @@
 # Contributing
 
 The full guide is [CONTRIBUTING.md](https://github.com/ursky/MetaWrap2/blob/main/CONTRIBUTING.md)
-in the repository. In short:
+in the repository. Setup and the test run:
 
 ```bash
 pip install -e ".[dev]"
@@ -13,4 +13,4 @@ python tests/run_on_small_machine.py -q
 - Each module is one file, with its commands in the `COMMANDS` and `CONSTANTS` blocks at the top of
   `src/metawrap2/modules/<module>.py`.
 - External tools run only through `metawrap2.command.run(...)`.
-- Every change comes with tests. A default changes only on a committed benchmark.
+- Every change comes with tests. A default changes only with a committed benchmark.

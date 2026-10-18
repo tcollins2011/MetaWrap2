@@ -5,4 +5,4 @@ modules stay thin, legible "recipe" files that assemble and run external tools; 
 package keeps that layer portable and testable.
 """
 
-__version__ = "2.1.2"
+__version__ = "2.1.3"

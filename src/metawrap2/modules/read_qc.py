@@ -17,9 +17,10 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import shlex
 import shutil
-from typing import List
+from typing import List, NamedTuple, Optional, Tuple
 
 from ..cliformat import make_parser
 from ..config import MODULE_ENVS, load_settings
@@ -54,11 +55,27 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["read_qc"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-FASTQC = "fastqc -q -t {threads} -o {outdir} -f fastq {files}"
-TRIM_GALORE = "trim_galore --no_report_file --paired -j {trim_threads} -o {outdir} {r1} {r2}"
-TRIM_GALORE_SINGLE = "trim_galore --no_report_file -j {trim_threads} -o {outdir} {reads}"
+# --outdir, not -o: FastQC 0.13.0 rewrote this CLI in argparse and dropped the short spelling, so a
+# fresh env solve (the pin below had no upper bound) killed the very first step of the pipeline with
+# `fastqc: error: unrecognized arguments: -o .../pre-QC_report`. 0.12.x accepts --outdir too, so one
+# spelling works on both. The other three flags here are not at risk: argparse reports every
+# unrecognised argument in a single message, and 0.13.0's message named only -o, so -q, -t and
+# -f fastq were all accepted by it.
+FASTQC = "fastqc -q -t {threads} --outdir {outdir} -f fastq {files}"
+# The trimming report is no longer suppressed with --no_report_file. It is the only place Trim
+# Galore's retention numbers exist - without it this path cannot say how many pairs it kept, and
+# saying nothing about a large loss is the defect _report_retention exists to fix.
+TRIM_GALORE = "trim_galore --paired -j {trim_threads} -o {outdir} {r1} {r2}"
+TRIM_GALORE_SINGLE = "trim_galore -j {trim_threads} -o {outdir} {reads}"
 FASTP = "fastp -i {r1} -I {r2} -o {o1} -O {o2} -w {trim_threads} -j {json} -h {html}"
 FASTP_SINGLE = "fastp -i {reads} -o {o1} -w {trim_threads} -j {json} -h {html}"
+# Appended to either fastp command by --fastp-quality-trim, and only by it. fastp's defaults do no
+# quality trimming whatsoever: they *filter* a read when more than 40% of its bases fall below Q15
+# and keep the rest at full length. These three flags make it trim the bad ends instead, which is
+# what trim-galore does. This is opt-in and must stay opt-in - moving the shipped default takes a
+# committed measurement on a benchmark dataset, and the only data where the two behaviours diverge
+# is low-quality data that the current benchmark set does not contain.
+FASTP_QUALITY_TRIM = "--cut_front --cut_tail --cut_mean_quality 20"
 BMTAGGER = "bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1" " -1 {r1} -2 {r2} -o {listfile}"
 BMTAGGER_SINGLE = (
     "bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1" " -1 {reads} -o {listfile}"
@@ -71,6 +88,19 @@ TRIM_GALORE_MAX_THREADS = 4
 # fastp is single-pass and threads properly, but its own docs put the useful ceiling at 16 -
 # beyond that it is I/O bound and the extra workers just contend.
 FASTP_MAX_THREADS = 16
+# FastQC's -t is files-processed-in-parallel, and it refuses anything above 4 out loud:
+# `[WARNING] You can't use more than 4 threads per file - setting this many is a waste`. On a
+# large host that warning was the only thing either FastQC step had to say, twice per run, so the
+# cap is applied here instead of passing -t straight through.
+FASTQC_MAX_THREADS = 4
+#: Warn when the trimmer keeps less than this share of the input pairs. 70% sits in the empty space
+#: between the two regimes rather than near either of them: on the CAMI2 GI benchmark (modern reads)
+#: both trimmers keep over 99% of pairs, while on the MetaHIT 2010-era 75 bp cohort fastp's defaults
+#: kept 41.5% (14,755,926 of 25,242,208 reads discarded whole, none shortened) where trim-galore
+#: kept 95%. So anything under 70% is not normal library variation, it is the
+#: filter-instead-of-trim divergence - which on that cohort made nonpareil ask for 20x more
+#: sequencing where the trimmed reads asked for 4.06x, a five-fold error in a budget number.
+LOW_RETENTION_WARN = 0.70
 #: Which trimmer runs by default. Measured, not assumed: `benchmark run cami2_gi trimmer` over the
 #: 10 CAMI2 GI samples (333M read pairs) put fastp ahead on both halves of the ratio at once - it
 #: kept marginally more of everything (+0.03% reads, +0.83% bases, +0.40% Q30 bases) for 5.8% fewer
@@ -78,8 +108,7 @@ FASTP_MAX_THREADS = 16
 #: The quality margins are small enough to call a tie, and cost is what breaks a tie. trim-galore
 #: remains fully supported via
 #: --trimmer trim-galore, and is the better choice if 1.3 GB of RSS is too much (it peaks at 0.1 GB).
-#: Re-measure with `metawrap2 benchmark score cami2_gi trimmer`; the rows are in
-#: benchmarks/results/cami2_gi.tsv.
+#: Re-measure with `metawrap2 benchmark score cami2_gi trimmer`.
 DEFAULT_TRIMMER = "fastp"
 TRIMMERS = ("trim-galore", "fastp")
 # ───────────────────────────────────────────────────────────────────────────────────────────
@@ -125,6 +154,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "%d-thread cutadapt ceiling trim-galore is stuck behind, and on CAMI2 it kept marginally "
         "more bases for less CPU; both are fully supported."
         % (DEFAULT_TRIMMER, FASTP_MAX_THREADS, TRIM_GALORE_MAX_THREADS),
+    )
+    p.add_argument(
+        "--fastp-quality-trim",
+        action="store_true",
+        help="make fastp trim low-quality read ends (%s) instead of only discarding whole "
+        "low-quality reads. Worth setting on older or lower-quality libraries, where fastp's "
+        "defaults throw away most of the data; off by default on purpose, because moving the "
+        "shipped default needs a committed measurement on a benchmark dataset and the two "
+        "behaviours only diverge on low-quality reads the current benchmark set does not "
+        "contain. No effect with --trimmer trim-galore, which already trims." % FASTP_QUALITY_TRIM,
     )
     p.add_argument(
         "--skip-pre-qc-report",
@@ -198,7 +237,9 @@ def _fastqc_report(args, env, name: str, files: List[str]) -> None:
     ensure_dir(outdir)
     run(
         FASTQC.format(
-            threads=args.threads, outdir=outdir, files=" ".join(shlex.quote(f) for f in files)
+            threads=min(args.threads, FASTQC_MAX_THREADS),
+            outdir=outdir,
+            files=" ".join(shlex.quote(f) for f in files),
         ),
         env=env,
         tool="fastqc",
@@ -244,6 +285,9 @@ def _run_fastp(args, env, streams: List[str], trimmed: List[str], paired: bool) 
     trim_threads = min(args.threads, FASTP_MAX_THREADS)
     report_json = os.path.join(args.output, "fastp.json")
     report_html = os.path.join(args.output, "fastp.html")
+    # Appended, never interpolated, so that without --fastp-quality-trim the command is byte for
+    # byte the one this module has always run.
+    extra = " " + FASTP_QUALITY_TRIM if args.fastp_quality_trim else ""
     if paired:
         run(
             FASTP.format(
@@ -254,7 +298,8 @@ def _run_fastp(args, env, streams: List[str], trimmed: List[str], paired: bool) 
                 trim_threads=trim_threads,
                 json=report_json,
                 html=report_html,
-            ),
+            )
+            + extra,
             env=env,
             tool="fastp",
         )
@@ -266,11 +311,180 @@ def _run_fastp(args, env, streams: List[str], trimmed: List[str], paired: bool) 
             trim_threads=trim_threads,
             json=report_json,
             html=report_html,
-        ),
+        )
+        + extra,
         env=env,
         tool="fastp",
     )
     return [trimmed[0]]
+
+
+class _Retention(NamedTuple):
+    """How much of the input the trimmer kept, in pairs (paired) or reads (single-end).
+
+    ``reasons`` is (what dropped them, how many), in the order the retention line prints them.
+    """
+
+    before: int
+    after: int
+    reasons: Tuple[Tuple[str, int], ...]
+
+    @property
+    def kept(self) -> float:
+        """Surviving share of the input, 0.0-1.0."""
+        return self.after / self.before if self.before else 0.0
+
+
+#: fastp's own ``filtering_result`` keys, with the words the retention line uses for them.
+#: ``low_quality_reads`` is the one that matters: it counts reads *discarded whole* because more
+#: than 40% of their bases were under Q15, not reads that were shortened. On the MetaHIT cohort it
+#: was 14,755,926 against too_short_reads of exactly 0, which is what gave the mechanism away.
+_FASTP_FILTER_REASONS = (
+    ("low_quality_reads", "quality filtering"),
+    ("too_short_reads", "too short"),
+    ("too_many_N_reads", "too many Ns"),
+    ("too_long_reads", "too long"),
+)
+#: Trim Galore has no machine-readable report, so these read the human one. The wording has moved
+#: between versions ("Total number of sequences analysed:" vs "...analysed for the length cutoff of
+#: 20 bp:"), hence the loose middles - a pattern that stops matching costs the retention line, and
+#: this line is not worth failing a QC step for.
+_TG_PAIRS_IN = re.compile(r"Total number of sequences analysed[^:\n]*:\s*([\d,]+)")
+_TG_PAIRS_DROPPED = re.compile(r"Number of sequence pairs removed[^:\n]*:\s*([\d,]+)")
+_TG_READS_IN = re.compile(r"([\d,]+) sequences processed in total")
+_TG_READS_DROPPED = re.compile(r"Sequences removed because they became shorter[^:\n]*:\s*([\d,]+)")
+
+
+def _count(text: str) -> int:
+    """A count out of a report, with the thousands separators both tools print stripped."""
+    return int(text.replace(",", ""))
+
+
+def _thousands(value: int) -> str:
+    """12621104 -> "12,621,104". Eight-digit read counts are unreadable without the separators."""
+    return f"{value:,}"
+
+
+def _fastp_retention(path: str, paired: bool) -> Optional[_Retention]:
+    """Retention out of fastp's JSON report, or None if it cannot be read.
+
+    The keys are fastp's own: ``summary.before_filtering.total_reads``,
+    ``summary.after_filtering.total_reads`` and the ``filtering_result`` block. fastp counts reads,
+    so a paired run's numbers are twice the pair count and are halved here. A report that is
+    missing, truncated, or written by some future fastp under other key names returns None rather
+    than raising: the retention line is worth having, not worth failing a finished QC step over.
+    """
+    import json
+
+    unit = 2 if paired else 1
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+        summary = doc["summary"]
+        before = int(summary["before_filtering"]["total_reads"])
+        after = int(summary["after_filtering"]["total_reads"])
+        result = doc.get("filtering_result") or {}
+        reasons = []
+        for key, label in _FASTP_FILTER_REASONS:
+            dropped = int(result.get(key) or 0)
+            if dropped:
+                reasons.append((label, dropped // unit))
+    except (AttributeError, KeyError, OSError, TypeError, ValueError):
+        return None
+    if before <= 0 or after < 0 or after > before:
+        return None
+    return _Retention(before // unit, after // unit, tuple(reasons))
+
+
+def _trim_galore_retention(out_dir: str, paired: bool) -> Optional[_Retention]:
+    """Retention out of Trim Galore's own ``*_trimming_report.txt``, or None if unreadable.
+
+    Every report in the folder is searched rather than one guessed filename: a paired run writes
+    one per mate and only one of the two carries the pair-level totals, and which one that is has
+    not been stable across Trim Galore releases.
+    """
+    text = ""
+    for path in sorted(glob.glob(os.path.join(out_dir, "*_trimming_report.txt"))):
+        try:
+            with open(path, errors="replace") as fh:
+                text += fh.read()
+        except OSError:
+            continue
+    came_in = (_TG_PAIRS_IN if paired else _TG_READS_IN).search(text)
+    lost = (_TG_PAIRS_DROPPED if paired else _TG_READS_DROPPED).search(text)
+    if came_in is None:
+        return None
+    try:
+        before = _count(came_in.group(1))
+        dropped = _count(lost.group(1)) if lost else 0
+    except ValueError:
+        return None
+    if before <= 0 or dropped > before:
+        return None
+    return _Retention(before, before - dropped, (("length filtering", dropped),) if dropped else ())
+
+
+def _retention_advice(trimmer: str) -> str:
+    """What to do about a low-retention run, which differs by which trimmer produced it."""
+    if trimmer == "fastp":
+        return (
+            "fastp's defaults filter a read out whole when more than 40% of its bases fall "
+            "below Q15, and do no quality trimming at all unless asked, so these were discarded "
+            "rather than shortened. On older or lower-quality data - 2010-era 75 bp reads, say - "
+            "use --trimmer trim-galore, which trims the bad tail and keeps the shorter read, or "
+            "keep fastp and add --fastp-quality-trim. A loss this size carries downstream: it "
+            "inflates every coverage, diversity and how-much-more-sequencing estimate computed "
+            "from these reads."
+        )
+    return (
+        "Check the length cutoff and adapter detection in the *_trimming_report.txt files in the "
+        "output folder before using these reads: on older or lower-quality data a short read "
+        "length and an aggressive cutoff can drop most of a library."
+    )
+
+
+def _report_retention(args, paired: bool) -> None:
+    """Say how much of the input survived trimming, and warn when it was too little.
+
+    Always printed, because the number it reports is the one a silent 58.5% loss hid. Both
+    trimmers already write it down; this only reads what they wrote, so an unreadable report is a
+    quiet skip and never an error.
+    """
+    unit = "pairs" if paired else "reads"
+    if args.trimmer == "fastp":
+        retention = _fastp_retention(os.path.join(args.output, "fastp.json"), paired)
+    else:
+        retention = _trim_galore_retention(args.output, paired)
+    if retention is None:
+        return
+    share = 100.0 * retention.kept
+    detail = [
+        ("%.1f%% removed by %s" if i == 0 else "%.1f%% %s")
+        % (100.0 * dropped / retention.before, label)
+        for i, (label, dropped) in enumerate(retention.reasons)
+    ]
+    comm(
+        "Read retention: %s %s in -> %s out (%.1f%%)%s"
+        % (
+            _thousands(retention.before),
+            unit,
+            _thousands(retention.after),
+            share,
+            (": " + ", ".join(detail)) if detail else "",
+        )
+    )
+    if retention.kept < LOW_RETENTION_WARN:
+        warning(
+            "%s kept only %.1f%% of the input %s (%s of %s). %s"
+            % (
+                args.trimmer,
+                share,
+                unit,
+                _thousands(retention.after),
+                _thousands(retention.before),
+                _retention_advice(args.trimmer),
+            )
+        )
 
 
 def _deinterleave_input(args, sample: str) -> List[str]:
@@ -372,6 +586,7 @@ def main(argv: List[str]) -> int:
                     path, "trimmed reads", hint="Check %s's output in run.stderr." % args.trimmer
                 )
             comm("Trimmed reads saved to: %s" % ", ".join(trimmed))
+            _report_retention(args, paired)
             streams = list(trimmed)
             ckpt.done("trimming")
         elif all(os.path.isfile(t) for t in trimmed):

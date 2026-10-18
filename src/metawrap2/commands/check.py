@@ -48,7 +48,13 @@ def main(argv: List[str]) -> int:
     # Refused rather than checked. `check bin_refinement-checkm2` used to print "Preflight OK for:
     # bin_refinement-checkm2" - it matched no module, so it checked nothing and declared success,
     # which is the worst of the three possible answers.
-    unknown = [name for name in modules if resolve_env_name(name) is None]
+    # A module with no conda environment is still a module. `diff_abundance` and
+    # `quantify_function` run in this package's own interpreter, so `resolve_env_name` returns None
+    # for them - and this guard then refused two real modules as "not a module or an environment",
+    # which is the same blind spot that kept them out of the readiness table.
+    from ..cli import MODULES
+
+    unknown = [name for name in modules if resolve_env_name(name) is None and name not in MODULES]
     if unknown:
         for name in unknown:
             for line in explain_unknown_name(name):
@@ -73,6 +79,22 @@ def main(argv: List[str]) -> int:
 
     missing = 0
     missing_tools: List[str] = []
+    # A module can also be gated on one of this package's own Python extras, and until 2.1.3
+    # neither `check` nor `doctor` looked at those - so `diff_abundance`, whose only dependency is
+    # scikit-bio, passed a preflight it was not in and then failed on its first real invocation.
+    # `doctor` owns the probe; this reuses it rather than growing a second, differently-wrong copy.
+    from .doctor import MODULE_EXTRAS, _check_extra
+
+    extra_rows = [
+        _check_extra(module, MODULE_EXTRAS[module]) for module in modules if module in MODULE_EXTRAS
+    ]
+    missing_extras = [row for row in extra_rows if row["status"] != "OK"]
+    if extra_rows:
+        print("\nPython extras:\n")
+        for row in extra_rows:
+            print(
+                "  [%s]  %-18s %s" % (_status(row["status"] == "OK"), row["module"], row["detail"])
+            )
 
     print("\nConda environments:\n")
     for module in modules:
@@ -143,7 +165,14 @@ def main(argv: List[str]) -> int:
             "`metawrap2 install-env %s --force`."
             % (len(missing_tools), ", ".join(missing_tools), " ".join(modules))
         )
-    if missing or missing_dbs or missing_tools:
+    if missing_extras:
+        print(
+            "\n%d module(s) need a Python extra that is not installed: %s"
+            % (len(missing_extras), ", ".join(row["module"] for row in missing_extras))
+        )
+        for row in missing_extras:
+            print("  %s" % row["detail"])
+    if missing or missing_dbs or missing_tools or missing_extras:
         print()
         return 1
     print("\nPreflight OK for: %s\n" % ", ".join(modules))

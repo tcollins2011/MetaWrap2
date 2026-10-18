@@ -182,7 +182,7 @@ def parse_overview(path: str, genome: str) -> List[CazymeCall]:
                     hmm=hmm,
                     subfamily=subfamily,
                     tools=tools,
-                    ec=_clean(row.get(OVERVIEW_COLUMNS["ec"])),
+                    ec=_clean_list(row.get(OVERVIEW_COLUMNS["ec"])),
                     substrate=_clean_list(row.get(OVERVIEW_COLUMNS["substrate"])),
                 )
             )
@@ -195,17 +195,23 @@ def _clean(value: Optional[str]) -> str:
 
 
 def _clean_list(value: Optional[str]) -> str:
-    """Clean a field that can be a list with empty members, e.g. ``-;peptidoglycan``.
+    """Clean a field that can be a list with empty members, e.g. ``-;peptidoglycan`` or ``-|-``.
 
-    dbCAN joins a multi-domain protein's per-domain substrates, and writes ``-`` for a domain it has
-    no mapping for - so the lone-dash check is not enough: real output carries ``-;peptidoglycan``
-    for a protein with two domains, one of them unmapped. Left in, that dash becomes a substrate
-    named "-" in any count.
+    dbCAN joins a multi-domain protein's per-domain annotations, and writes ``-`` for a domain it
+    has no mapping for - so the lone-dash check is not enough: real output carries
+    ``-;peptidoglycan`` for a protein with two domains, one of them unmapped. Left in, that dash
+    becomes a substrate named "-" in any count.
+
+    ``|`` is a separator here too, and that one bit the EC column. dbCAN writes ``-|-`` for a
+    two-domain gene with no EC number on either domain; splitting only on ``;`` and ``,`` left that
+    string intact, so `ec` came back as ``-|-`` - a non-empty EC annotation for a gene that has
+    none. Measured on the vendored fixture: 2 of 11 rows. The trailing dash of a partial EC number
+    (``3.2.1.-``) must survive, which is why whole members are dropped rather than dashes stripped.
     """
     text = _clean(value)
     if not text:
         return ""
-    parts = [part.strip() for part in re.split(r"[;,]", text)]
+    parts = [part.strip() for part in re.split(r"[;,|]", text)]
     kept = [part for part in parts if part and part != EMPTY]
     return ";".join(dict.fromkeys(kept))
 

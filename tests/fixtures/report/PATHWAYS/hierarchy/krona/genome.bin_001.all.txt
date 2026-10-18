@@ -1,0 +1,5 @@
+40	Metabolism	Carbohydrate metabolism	Glycolysis / Gluconeogenesis
+25	Metabolism	Carbohydrate metabolism	Citrate cycle (TCA cycle)
+15	Metabolism	Amino acid metabolism	Lysine biosynthesis
+12	Not Included in Pathway or Brite
+8	Genetic Information Processing	Translation	Ribosome

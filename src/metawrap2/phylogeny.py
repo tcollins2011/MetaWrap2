@@ -63,6 +63,11 @@ class Alignment:
     columns: int
     #: Per-taxon fraction of non-gap characters.
     occupancy: Dict[str, float]
+    #: ``"nucleotide"`` or ``"protein"``, measured from the residues. Which one decides the
+    #: substitution model, and getting it wrong is not a subtle error: FastTree run with ``-nt``
+    #: over a protein alignment reads every residue that is not A, C, G or T as ambiguous and
+    #: returns a tree built from almost no information.
+    kind: str = "protein"
 
     @property
     def size(self) -> int:
@@ -86,6 +91,28 @@ class Alignment:
         return self.size >= MIN_TAXA
 
 
+#: Residues counted as nucleotide when deciding an alignment's type: the four bases, U for RNA,
+#: N for an unknown base, and the IUPAC ambiguity codes. T and N are also amino acids, which is why
+#: the test is a *fraction* rather than a membership check.
+NUCLEOTIDE_CHARS = frozenset("ACGTUNRYSWKMBDHV")
+
+#: How much of an alignment has to be nucleotide-like to call it nucleotide. A protein alignment
+#: reaches roughly 20-30% of this set by chance (A, C, G, T, N, W, Y, K, M, H, R, S, V, D are all
+#: amino-acid codes too), and a real nucleotide alignment is above 99%, so anything in between is
+#: unlike both and treated as protein - the safer default, since a protein alignment is what every
+#: aligner upstream of this module writes.
+NUCLEOTIDE_FRACTION = 0.9
+
+
+def alignment_kind(counts: Dict[str, int]) -> str:
+    """``"nucleotide"`` or ``"protein"``, from a residue histogram."""
+    total = sum(counts.values())
+    if not total:
+        return "protein"
+    nucleotide = sum(n for char, n in counts.items() if char.upper() in NUCLEOTIDE_CHARS)
+    return "nucleotide" if nucleotide / total >= NUCLEOTIDE_FRACTION else "protein"
+
+
 def read_alignment(path: str) -> Alignment:
     """Measure a FASTA alignment: its taxa, its width, and how much of each row is sequence.
 
@@ -98,6 +125,7 @@ def read_alignment(path: str) -> Alignment:
 
         opener = gzip.open
     names: List[str] = []
+    histogram: Dict[str, int] = {}
     residues: Dict[str, int] = {}
     lengths: Dict[str, int] = {}
     current: Optional[str] = None
@@ -116,6 +144,9 @@ def read_alignment(path: str) -> Alignment:
                 raise ValueError("%s does not start with a FASTA header" % path)
             lengths[current] += len(line)
             residues[current] += sum(1 for char in line if char not in "-.~?")
+            for char in line:
+                if char not in "-.~?":
+                    histogram[char] = histogram.get(char, 0) + 1
     if not names:
         raise ValueError("%s holds no sequences" % path)
     width = max(lengths.values())
@@ -124,6 +155,7 @@ def read_alignment(path: str) -> Alignment:
         taxa=tuple(names),
         columns=width,
         occupancy={name: (residues[name] / width if width else 0.0) for name in names},
+        kind=alignment_kind(histogram),
     )
 
 

@@ -4,11 +4,37 @@
 
 import os
 import sys
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 
 plt.switch_backend("agg")
+
+
+#: Printed once per panel for a bin set that has nothing in it, instead of raising. This script is
+#: the last thing ``reassemble_bins`` does - the chosen bins and every .stats.tsv table are already
+#: written when it starts - so a figure it cannot draw must not fail the step.
+_EMPTY_SERIES_NOTE = "No bin in %s passes -c/-x, so it is left out of the %s panel."
+
+
+def _label_y(values: Sequence[float], index: int) -> Optional[float]:
+    """The y a bin set's label sits at on its own curve, or ``None`` if the series has no points.
+
+    Each panel below picks the x it wants to write the label at (a quarter, a third or half of the
+    way along the curve) and reads the y off the series there. Two things that x cannot be trusted
+    to be, both of which happened:
+
+    * out of range, because the series is empty. ``original_bins.stats.tsv`` is header-only whenever
+      no ``.orig`` candidate was scored, and ``[]`` raised IndexError for both index conventions used
+      here - ``values[x_pos]`` and the N50 panel's ``values[x_pos - 1]``, which is ``values[-1]``.
+      That ended a reassembly 62m53s in, with every bin already on disk.
+    * negative, for the N50 panel, whenever fewer than 4 bins pass the thresholds: ``len // 4 - 1``
+      is ``-1`` there, which wrapped to the *last* point of a descending series, so the label was
+      drawn at x=0 carrying the smallest N50 in the set. Clamping puts it on the point at that x.
+    """
+    if not values:
+        return None
+    return values[min(max(index, 0), len(values) - 1)]
 
 
 max_contamination = int(sys.argv[3])
@@ -159,7 +185,10 @@ for rank, bin_set in enumerate(labels):
 
     # add bin set label to plot
     x_pos = len(data[bin_set]) // 4
-    y_pos = data[bin_set][x_pos - 1]
+    y_pos = _label_y(data[bin_set], x_pos - 1)
+    if y_pos is None:
+        print(_EMPTY_SERIES_NOTE % (bin_set, "N50"))
+        continue
     plt.text(x_pos, y_pos, bin_set, fontsize=18, color=c)
 
 # add plot and axis titles and adjust edges
@@ -285,7 +314,10 @@ for rank, bin_set in enumerate(labels):
     x_pos = len(data[bin_set]) // 2
     if "reasse" in bin_set:
         x_pos = len(data[bin_set]) // 3
-    y_pos = data[bin_set][x_pos]
+    y_pos = _label_y(data[bin_set], x_pos)
+    if y_pos is None:
+        print(_EMPTY_SERIES_NOTE % (bin_set, "completion"))
+        continue
     plt.text(x_pos, y_pos, bin_set, fontsize=18, color=c)
 
 # add plot and axis titles and adjust edges
@@ -391,7 +423,10 @@ for rank, bin_set in enumerate(labels):
     # add plot label
     # x_pos = len(data[bin_set])-1-20*(len(rank_order)-rank_order[bin_set]-1)
     x_pos = len(data[bin_set]) // 3
-    y_pos = data[bin_set][x_pos]
+    y_pos = _label_y(data[bin_set], x_pos)
+    if y_pos is None:
+        print(_EMPTY_SERIES_NOTE % (bin_set, "contamination"))
+        continue
     plt.text(x_pos + 1, y_pos, bin_set, fontsize=18, color=c)
 
 # add plot and axis titles and adjust the edges
