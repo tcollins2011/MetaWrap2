@@ -1,10 +1,7 @@
 """Regression tests for bugs found reviewing the initial MetaWrap2 import.
 
-Each test here pins down behaviour that was previously wrong, so the fix cannot silently
-regress. They are grouped by the bug they cover, with the original symptom noted.
-
-This is a curated subset: one strong test per distinct past bug / invariant, rather than the
-full set of near-duplicate permutations that all re-assert the same code path.
+Each test covers behaviour that was previously wrong, grouped by bug, with the original symptom
+noted. One test per bug or invariant.
 """
 
 import os
@@ -16,8 +13,8 @@ from metawrap2.modules import _common, binning, read_qc
 
 def test_finalize_copies_rather_than_moves_raw_input(tmp_path, monkeypatch):
     """--skip-trimming --skip-bmtagger used to os.replace() the user's raw FASTQ away."""
-    # Every stage is skipped, so no tool runs - but env_for checks the env manager is findable
-    # before the module does any work, and mamba is not on PATH in the shell pytest runs in.
+    # Every stage is skipped, so no tool runs, but env_for checks the env manager is on PATH
+    # first, and mamba is not on PATH in the shell pytest runs in.
     monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
 
     raw1 = tmp_path / "sample_1.fastq"
@@ -41,7 +38,7 @@ def test_finalize_copies_rather_than_moves_raw_input(tmp_path, monkeypatch):
         ]
     )
     assert rc == 0
-    # The originals must still be there, untouched.
+    # The originals are still there, unchanged.
     assert raw1.is_file() and raw1.read_text() == "@r1\nACGT\n+\nIIII\n"
     assert raw2.is_file()
     assert (out / "final_pure_reads_1.fastq").is_file()
@@ -67,7 +64,7 @@ def test_concoct_split_keeps_dotted_contig_names(tmp_path):
 
     assert (out / "bin_001.fasta").read_text() == ">NODE_1_length_5000_cov_3.5\nAAAA\n"
     assert (out / "bin_002.fasta").read_text() == ">NODE_2_length_4000_cov_3.9\nCCCC\n"
-    # The contig absent from the clustering is unbinned, not silently dropped.
+    # The contig absent from the clustering is unbinned, not dropped.
     assert ">NODE_3_length_3000_cov_7.1" in (out / "unbinned.fasta").read_text()
 
 
@@ -75,7 +72,7 @@ def test_concoct_split_keeps_dotted_contig_names(tmp_path):
 
 
 def test_install_db_untar_refuses_a_member_that_escapes_the_destination(tmp_path):
-    """These are archives off the public internet, and extractall writes where a member says to."""
+    """Downloaded archives with members that escape the target directory are rejected."""
     import io
     import tarfile
 
@@ -113,7 +110,7 @@ def test_install_db_untar_refuses_a_member_that_escapes_the_destination(tmp_path
 
 
 def test_dereplicate_tolerates_a_bin_missing_from_stats(tmp_path, capsys):
-    """This used to raise KeyError and abort the whole refinement."""
+    """A bin without a stats row no longer raises KeyError and aborts the refinement."""
     from metawrap2 import refinement
 
     bins = tmp_path / "binsM"

@@ -1,23 +1,23 @@
 # Tutorial
 
-A first end-to-end run on the benchmark data. Because the expected result is known, a low count
-points to the installation and not the sample.
+An end-to-end run on benchmark data with a known expected result, so a low MAG count indicates a
+problem with the installation.
 
-1. A smoke test on the committed fixture. Nothing is downloaded; it checks that the install works.
+1. A smoke test on the committed fixture, with no download, to check the installation.
 2. Three CAMI2 gastrointestinal samples, from download to MAGs, abundance, taxonomy and KEGG
    modules.
 
-The CAMI2 data is simulated from known genomes, with a published contig-to-genome truth table. The
-expected result is committed here ([Checking your results](#checking-your-results)). All benchmark
-and tutorial datasets in this project come from CAMI for this reason.
+The CAMI2 data is simulated from known genomes and has a published contig-to-genome truth table.
+All benchmark and tutorial datasets in this project come from CAMI. The expected result is in
+[Checking your results](#checking-your-results).
 
 Run commands from a clone of the repository. Install first: [Installation](installation.md).
 
 ## Part 1: smoke test on the shipped fixture
 
 `benchmarks/fixtures/tiny` is three synthetic genomes split into a few hundred contigs, with one
-pair of read files (4,000 read pairs) and a gold standard. It lets the pipeline and benchmark harness run without the 95 GB
-download of Part 2. It is too small to measure binner accuracy.
+pair of read files (4,000 read pairs) and a gold standard. It runs the pipeline and the benchmark
+harness without the 95 GB download of Part 2, and is too small to measure binner accuracy.
 
 ```bash
 metawrap2 doctor binning                      # env, tools and databases for one module
@@ -33,13 +33,11 @@ holds the unbinned contigs). `metabat2_bins/` is empty and the run exits 0 after
 `0 bins (0 bases in total) formed`.
 
 The run covers mapping, the depth table, metaBAT2 in its environment, filtering of non-genome files,
-and the provenance record. A failure in any of them gives a non-zero exit and names the step. It
-takes about 25 seconds at `-t 4`.
+and the provenance record. A failing step gives a non-zero exit and is named. The run takes about
+25 seconds at `-t 4`. `--metabat2` runs one binner and does not need pytorch, so
+`metawrap2-learned` is not needed yet.
 
-`--metabat2` runs one binner and does not need pytorch, so `metawrap2-learned` does not have to be
-built yet.
-
-The same fixture runs the benchmark harness, if you plan to run benchmarks:
+To test the benchmark harness on the same fixture:
 
 ```bash
 metawrap2 benchmark run   tiny trimmer        # read_qc with each trimmer, on the fixture
@@ -52,14 +50,14 @@ runs, at 0.003 CPU-hours. `doctor` is not timed. It starts every tool and runs t
 
 ## Part 2: three CAMI2 samples
 
-### What you need installed
+### Requirements
 
 | | Why | Install |
 |---|---|---|
 | `metawrap2-reads`, `metawrap2-bins`, `metawrap2-learned` | read_qc, assembly, binning (SemiBin2 is in `learned`) | `metawrap2 quickstart -t 8` |
-| `metawrap2-binqc` | bin_refinement: CheckM, GUNC | as above |
+| `metawrap2-binqc`, `metawrap2-checkm2` | bin_refinement: GUNC, CheckM2 | as above |
 | `metawrap2-taxonomy`, `metawrap2-annotate` | classify_bins, annotate, pathways | as above |
-| `checkm` 1.4 GB, `gunc` 6.7 GB (~13 GB installed) | bin_refinement scores bins and checks chimerism | `metawrap2 install-db checkm gunc -t 2` |
+| `checkm2` 1.7 GB (~3 GB installed), `gunc` 6.7 GB (~13 GB installed) | bin_refinement scores bins and checks chimerism | `metawrap2 install-db checkm2 gunc -t 2` |
 | `kofam` 1.5 GB, `kegg` 4 MB | `annotate --kofam`, `pathways` | `metawrap2 install-db kofam kegg -t 2` |
 | `blast` ~2 GB with `--small`, `taxdump` 550 MB | `classify_bins` without GTDB-Tk | `metawrap2 install-db blast taxdump --small -t 2` |
 
@@ -129,9 +127,9 @@ MEGAHIT is the default and produced the committed results. `--metaspades` gives 
 assemblies but was measured at 244.6 CPU-hours against MEGAHIT's 77.3 on the three-sample
 co-assembly (`cami2_gi.tsv`, `assembler/*`), and at about 140 GB of resident memory.
 
-Cost: assembly is the most expensive step, and its cost does not depend on later choices.
-Assembling these three samples separately is 83 CPU-hours, about 65% of a default run
-([Benchmarks](benchmarks.md) §2). In the co-assembly arm of the assembler comparison, MEGAHIT took
+Cost: assembly is the most expensive step and does not depend on later choices. Assembling these
+three samples separately is 83 CPU-hours, about 65% of a default run ([Benchmarks](benchmarks.md)
+§2). In the co-assembly arm of the assembler comparison, MEGAHIT took
 77.3 CPU-hours and 62 minutes of wall time (`cami2_gi.tsv`).
 
 ### Step 3: binning
@@ -145,15 +143,14 @@ for S in 0 1 10; do
 done
 ```
 
-Reads are positional and go before the flags, so no read path follows a flag that takes a value.
-`--preset default` runs metaBAT2 and SemiBin2, giving `INITIAL_BINNING/sample_$S/metabat2_bins` and
+Reads are positional and go before the flags. `--preset default` runs metaBAT2 and SemiBin2, giving `INITIAL_BINNING/sample_$S/metabat2_bins` and
 `semibin2_bins`. Each binner gets one coverage column per read set passed. For a real cohort,
 `metawrap2 coverage` builds one depth table across all samples with N alignments instead of N²
 ([Usage](usage.md)).
 
 Cost: binning and refinement together are 43.8 CPU-hours plus 0.6 GPU-hours for `--preset default`
-over these three samples ([Benchmarks](benchmarks.md) §2). The committed table does not split the
-two. metaBAT2 takes about 1.3 CPU-hours of this, since it reuses SemiBin2's depth table (§3).
+over these three samples ([Benchmarks](benchmarks.md) §2); the committed table does not split the
+two. metaBAT2 takes about 1.3 CPU-hours of this because it reuses SemiBin2's depth table (§3).
 
 ### Step 4: bin_refinement
 
@@ -165,20 +162,18 @@ for S in 0 1 10; do
 done
 ```
 
-This step determines the MAG count. It hybridises the two bin sets, uses CheckM to choose which
-version of each bin to keep, then runs GUNC on the kept bins to flag chimeras of two genomes, which
-CheckM scores as complete and clean. The result is
+This step sets the MAG count. It hybridises the two bin sets, uses CheckM2 to choose which version
+of each bin to keep, then runs GUNC on the kept bins to flag chimeras of two genomes (CheckM2 scores
+these as complete and clean). The result is
 `BIN_REFINEMENT/sample_$S/metawrap_70_10_bins` with `metawrap_70_10_bins.stats.tsv` beside it: one
 row per bin with completeness, contamination, GC, lineage, N50, size and the two GUNC columns.
 
-`--checkm2` scores with CheckM2 instead of CheckM1. It needs much less memory (CheckM1's pplacer
-stage needs roughly 40 GB per thread). The committed numbers were scored with CheckM2, so use it
-when comparing with them. It is opt-in, with its own environment and database:
-`metawrap2 install-env checkm2 && metawrap2 install-db checkm2`.
+The committed numbers were scored with CheckM2, the default. `--checkm1` scores with CheckM1 on its
+reduced tree, which needs about 16 GB of memory per call (40 GB with `--full-tree`) and its own
+database (`metawrap2 install-db checkm`).
 
 Cost: included in the 43.8 CPU-hours above. The consolidator comparison measured 4.52 CPU-hours to
-refine one sample's bins with CheckM
-([Benchmarks](benchmarks.md) §5).
+refine one sample's bins ([Benchmarks](benchmarks.md) §5).
 
 ### Step 5: quant_bins
 
@@ -192,7 +187,7 @@ done
 ```
 
 Output: `QUANT_BINS/sample_$S/bin_abundance_table.tsv`, plus a clustered heatmap when there is more
-than one sample. The default quantifier, sylph, uses k-mer sketches and does no alignment. Numbers
+than one sample. The default quantifier, sylph, uses k-mer sketches and does no alignment. Values
 differ between quantifiers. A sylph zero means "not detected above `--min-ani`"
 ([Benchmarks](benchmarks.md) §6).
 
@@ -211,8 +206,8 @@ done
 
 Output: `CLASSIFY/sample_$S/bin_taxonomy.tsv`, one consensus taxonomy per bin. With the `--small`
 BLAST database (a representative-prokaryote set instead of nt) the taxonomy is coarse. `--gtdbtk`
-is preferred: taxator-tk has had no upstream release since 2015, and the MAG literature uses GTDB.
-It is not the default because it needs `metawrap2 install-env gtdbtk` plus
+is recommended: taxator-tk has had no upstream release since 2015, and the MAG literature uses
+GTDB. It is not the default because it needs `metawrap2 install-env gtdbtk` plus
 `metawrap2 install-db gtdbtk`, which fetches about 110 GB of reference data and records it as
 `GTDBTK_DATA_PATH`.
 
@@ -236,23 +231,24 @@ Outputs:
 
 - `ANNOTATION/sample_$S/genes.tsv`: every called gene. `kos.tsv`: the KEGG ortholog per gene, with
   the evidence for it. On one CAMI2 sample's refined bins, `annotate` called 14,171 genes and 5,827
-  took a curated KO, 2,008 of them distinct ([2.1.2 release notes](releases/2.1.2.md) §1).
+  took a curated KO, 2,008 of them distinct ([2.1.2 release notes](https://github.com/ursky/MetaWrap2/blob/main/releases/2.1.2.md) §1).
 - `PATHWAYS/sample_$S/modules.tsv`: KEGG module completeness per genome, under both the `pathwise`
   and `stepwise` definitions, with seven flags for known cases where completeness is misleading.
   `-a` weights the per-genome rows by abundance into a community profile, so `quant_bins` must run
   first.
 
-Incomplete genomes lose a larger share of module completeness. In the degradation experiment
-([2.1.2 release notes](releases/2.1.2.md) §1.2), a 70%-complete MAG, which passes the high-quality
-tier, had lost 59% of the modules the intact genome completes. `modules.tsv` includes each genome's
-completeness for this reason.
+`modules.tsv` includes each genome's completeness, because incomplete genomes lose a larger share
+of module completeness. In the degradation experiment
+([2.1.2 release notes](https://github.com/ursky/MetaWrap2/blob/main/releases/2.1.2.md) §1.2), a
+70%-complete MAG, which passes the high-quality tier, had lost 59% of the modules the intact genome
+completes.
 
 Cost: `annotate --kofam` took 76 seconds per bin on one CAMI2 sample's bins (§1).
 `pathways` is not measured; it only computes over a KO table.
 
-### All three samples with `cohort`
+### Running all samples with `cohort`
 
-`metawrap2 cohort` runs all of the above from a sample sheet, which also serves as the record of
+`metawrap2 cohort` runs all of the above from a sample sheet, which is also kept as the record of
 the run. Fill in the timestamped directory names from `ls`:
 
 ```toml
@@ -311,19 +307,18 @@ done
 The loop prints one count per sample. The sum is comparable with 53 if:
 
 - The samples are 0, 1 and 10 and the preset is `--preset default`. Other presets give 36
-  (`very-fast`), 41 (`fast`) and 60 (`slow`) (§2).
-- Bins are scored with CheckM2. The committed counts come from CheckM2; `bin_refinement` uses CheckM1
-  unless you pass `--checkm2`. The two report different completeness for the same genome
-  ([Benchmarks](benchmarks.md), Methods).
+  (`very-fast`), 41 (`fast`) and 60 (`gpu`) (§2).
+- Bins are scored with CheckM2 (the default), as the committed counts were. CheckM1 (`--checkm1`)
+  reports different completeness for the same genome ([Benchmarks](benchmarks.md), Methods).
 - The count is summed over the three samples. The same organism binned in two samples is two bins
   and one genome; in a cohort run, `dereplicate` handles this.
 
-Then:
+Comparing the sum with 53:
 
 - Within a few MAGs of 53: normal. Bin counts vary with thread count, tool versions and which reads
   pass trimming.
 - Far below, or zero: usually an environment that did not build (`metawrap2 doctor`), a missing
-  GUNC or CheckM database (`bin_refinement` reports this before CheckM starts), or binning raw
+  GUNC or CheckM2 database (`bin_refinement` reports this before CheckM2 starts), or binning raw
   instead of QC'd reads.
 - Empty `metawrap_70_10_bins`: check `metawrap2.log` and `run_commands.txt` in the output
   directory. Every run records the commands it ran and the tool versions.

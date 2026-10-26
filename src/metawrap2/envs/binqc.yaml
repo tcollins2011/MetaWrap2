@@ -1,12 +1,11 @@
 # Scoring and consolidating bins: CheckM1, GUNC chimerism, and the DAS Tool consolidator.
 #
-# One env rather than three. GUNC runs by default in bin_refinement (unless --skip-gunc), so it was
-# never really optional, and DAS Tool belongs to the same step as the consolidator it replaces.
-# CheckM2 is the one that will not join them - it cannot be solved alongside these at all - so it
-# keeps its own file; see checkm2.yaml.
+# One env instead of three. GUNC runs by default in bin_refinement (unless --skip-gunc), and DAS
+# Tool belongs to the same step as the consolidator it replaces. CheckM2 cannot be solved with
+# these, so it has its own file; see checkm2.yaml.
 #
 # CheckM1 imports pkg_resources, which setuptools removed in 81, and does not run on 3.12. Without
-# both pins the solver happily installs versions that make `checkm` fail on import.
+# both pins the solver installs versions that make `checkm` fail on import.
 name: metawrap2-binqc
 channels:
   - conda-forge
@@ -16,8 +15,7 @@ dependencies:
   - setuptools <81
   - checkm-genome >=1.2.0
   - pplacer
-  # >=1.1.1, not >=1.0.6: `gunc merge_checkm` and the summarise path in 1.0.6 label every genome as
-  # passing, so a chimerism column produced with it says nothing. The floor has to exclude it rather
-  # than merely allow something newer, because a solver is free to pick the floor.
+  # >=1.1.1, not >=1.0.6: in 1.0.6 `gunc merge_checkm` and the summarise path label every genome
+  # as passing. A solver may pick the floor, so the floor excludes it.
   - gunc >=1.1.1
   - das_tool >=1.1.7

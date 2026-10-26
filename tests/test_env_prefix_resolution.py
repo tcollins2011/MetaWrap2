@@ -1,20 +1,15 @@
-"""One environment, one prefix: how `doctor` selects an env, and what it says when it cannot.
+"""Tests for how `doctor` selects an env by prefix and reports a failed probe.
 
-From a bug report against a fresh install. Existence and execution were answered against different
-sets of conda installations:
+Guards against a bug where env existence and execution were checked against different conda
+installations:
 
-* ``config.conda_env_exists`` tested every directory ``config.env_dirs`` could name, which includes
-  every installation listed in ``~/.conda/environments.txt`` - a machine-global registry - plus five
-  hardcoded ``~/miniforge3/envs``-style guesses that were appended unconditionally, although
-  ``env_dirs``' own docstring said they were a fallback for a machine with no conda on PATH.
-* ``doctor._env_run`` then ran ``mamba run -n <name>``, and ``-n`` resolves only against the active
-  conda root.
+* ``config.conda_env_exists`` searched every directory ``config.env_dirs`` returned: all
+  installations in ``~/.conda/environments.txt`` plus five hardcoded ``~/miniforge3/envs``-style
+  guesses, which were meant only as a fallback when no conda is on PATH.
+* ``doctor._env_run`` ran ``mamba run -n <name>``, and ``-n`` resolves only in the active root.
 
-So an env built by a second conda install was reported as existing and refused to run, `quickstart`
-built nothing, and `doctor` reported every module broken. What the user actually saw was
-``amrfinder MISSING "not on PATH"``, because ``_probe_tool`` turned every nonzero return into that
-one message and discarded the output - which said ``The given prefix does not exist`` and named the
-path. The wrong diagnosis cost the reporter 50 minutes.
+An env from a second conda installation was then reported as present but failed to run, and
+``_probe_tool`` reported ``not on PATH`` instead of libmamba's ``The given prefix does not exist``.
 """
 
 from __future__ import annotations
@@ -27,7 +22,7 @@ import pytest
 from metawrap2 import config
 from metawrap2.commands import doctor
 
-#: A prefix under a conda installation that is not the active one - the reporter's case.
+#: A prefix under a conda installation that is not the active one.
 FOREIGN_PREFIX = "/opt/shared/miniforge3/envs/metawrap2-amr"
 ACTIVE_ROOT = "/home/someone/miniforge3"
 
@@ -36,13 +31,10 @@ ACTIVE_ROOT = "/home/someone/miniforge3"
 
 @pytest.fixture
 def no_real_conda(monkeypatch):
-    """Keep every test here off the conda installation this machine happens to have.
+    """Isolate the tests from the host's conda installation.
 
-    ``doctor`` resolves a prefix through ``config.env_prefix``, which shells out to
-    ``conda env list``; left alone, these tests would assert about the developer's own envs and
-    give a different answer on CI. The per-process prefix cache is cleared on the way in *and* on
-    the way out: it is module state, so a fake prefix left in it would be read by any later test
-    that probes a tool.
+    ``config.env_prefix`` runs ``conda env list``, so it is stubbed. The module-level prefix cache
+    is cleared before and after, so a fake prefix does not leak into later tests.
     """
     doctor._PREFIX_CACHE.clear()
     monkeypatch.setattr(doctor, "env_prefix", lambda env: None)
@@ -70,10 +62,9 @@ def mamba_argv(monkeypatch, no_real_conda):
 
 
 def test_env_run_enters_the_env_by_prefix(monkeypatch, mamba_argv):
-    """``-p <prefix>``, never ``-n <name>``, whenever a prefix resolves.
+    """When a prefix resolves, the env is entered with ``-p <prefix>``, not ``-n <name>``.
 
-    If this regresses, every env belonging to another conda installation goes back to being
-    reported present and failing to run: ``-n`` looks only in the active root.
+    ``-n`` looks only in the active root, so envs from other installations would fail to run.
     """
     monkeypatch.setattr(doctor, "env_prefix", lambda env: FOREIGN_PREFIX)
     doctor._env_run("metawrap2-amr", "command -v amrfinder")
@@ -83,11 +74,10 @@ def test_env_run_enters_the_env_by_prefix(monkeypatch, mamba_argv):
 
 
 def test_env_run_falls_back_to_the_name_when_no_prefix_resolves(mamba_argv):
-    """With nothing on disk to point at, ``-n`` is still better than refusing to run.
+    """With no resolved prefix, the env is entered with ``-n <name>``.
 
-    An env that resolves to no prefix may still exist somewhere ``env_dirs`` cannot see (a
-    ``envs_dirs`` entry only the manager's own config knows about), and ``-n`` is what finds it.
-    Dropping this fallback would turn that into a hard failure.
+    The env may be in a directory ``env_dirs`` cannot see, such as an ``envs_dirs`` entry in the
+    manager's own config, which ``-n`` still finds.
     """
     doctor._env_run("metawrap2-amr", "command -v amrfinder")
     cmd = mamba_argv[0]
@@ -96,11 +86,10 @@ def test_env_run_falls_back_to_the_name_when_no_prefix_resolves(mamba_argv):
 
 
 def test_the_prefix_is_resolved_once_and_reused_for_every_probe(monkeypatch, no_real_conda):
-    """One resolution per env, handed to each command that acts on it.
+    """The prefix is resolved once per env and passed to each command in the probe.
 
-    Resolving walks ``env_dirs``, which runs ``conda env list``; a full `doctor` probes ~90 tools
-    with up to three commands each. Resolving per command is both slow and a chance for two
-    commands in one probe to disagree about which env they are in.
+    Resolving runs ``conda env list``, and a full `doctor` probes about 90 tools with up to three
+    commands each. One resolution also keeps all commands in a probe on the same env.
     """
     resolved = []
 
@@ -125,12 +114,7 @@ def test_the_prefix_is_resolved_once_and_reused_for_every_probe(monkeypatch, no_
 
 
 def test_a_nonexistent_prefix_is_reported_as_such_not_as_not_on_path(monkeypatch, no_real_conda):
-    """The message libmamba prints names the problem; it must reach the user instead of a guess.
-
-    ``MISSING  not on PATH`` for a tool that is installed and on PATH inside its env is a wrong
-    answer that sends the user looking at their env's contents rather than at which env was
-    entered.
-    """
+    """libmamba's "prefix does not exist" error is reported as such, with the path."""
     message = (
         "critical libmamba The given prefix does not exist: "
         '"/opt/shared/miniforge3/envs/metawrap2-amr"\n'
@@ -142,11 +126,10 @@ def test_a_nonexistent_prefix_is_reported_as_such_not_as_not_on_path(monkeypatch
 
 
 def test_a_failed_probe_keeps_what_the_subprocess_said(monkeypatch, no_real_conda):
-    """Any other failure carries its last line of output, rather than discarding it.
+    """Other failures include the last line of the subprocess output in the detail.
 
-    The output is the only evidence of what went wrong, and it is already captured. Dropping it
-    again would mean every unforeseen failure - no mamba, a timeout, a broken wrapper script -
-    reads identically and reads as a statement about PATH.
+    Without it, failures such as a missing mamba, a timeout or a broken wrapper script would all
+    read as "not on PATH".
     """
     monkeypatch.setattr(doctor, "_env_run", lambda *a, **kw: (127, "mamba not found"))
     status, detail = doctor._probe_tool("metawrap2-amr", "amrfinder")
@@ -155,11 +138,7 @@ def test_a_failed_probe_keeps_what_the_subprocess_said(monkeypatch, no_real_cond
 
 
 def test_a_tool_that_is_genuinely_absent_still_says_not_on_path(monkeypatch, no_real_conda):
-    """`command -v` failing silently is the ordinary case and must stay a one-word answer.
-
-    The extra detail added above has to be conditional: appending an empty parenthesis to every
-    missing tool would make the common row harder to read than it was.
-    """
+    """A failure with no output (`command -v` not finding the tool) reports "not on PATH"."""
     monkeypatch.setattr(doctor, "_env_run", lambda *a, **kw: (1, ""))
     status, detail = doctor._probe_tool("metawrap2-amr", "amrfinder")
     assert (status, detail) == (doctor.MISSING, "not on PATH")
@@ -169,11 +148,10 @@ def test_a_tool_that_is_genuinely_absent_still_says_not_on_path(monkeypatch, no_
 
 
 def test_an_env_outside_the_active_root_is_named_in_the_detail(monkeypatch, no_real_conda):
-    """Probing it by prefix makes it work; the user still has to be told it is not theirs.
+    """An env outside the active conda root gets a note naming its prefix and the active root.
 
-    `install-env` builds into the active root. If `doctor` silently reports on an env from another
-    installation, the two commands discuss different environments under one name, and rebuilding
-    changes nothing the status table shows.
+    `install-env` builds into the active root, so without the note `doctor` and `install-env`
+    could refer to different envs with the same name.
     """
     monkeypatch.setenv("MAMBA_ROOT_PREFIX", ACTIVE_ROOT)
     monkeypatch.setattr(doctor, "env_prefix", lambda env: FOREIGN_PREFIX)
@@ -183,17 +161,16 @@ def test_an_env_outside_the_active_root_is_named_in_the_detail(monkeypatch, no_r
 
 
 def test_an_env_in_the_active_root_gets_no_such_note(monkeypatch, no_real_conda):
-    """The normal install must stay quiet, or the note is noise everybody learns to ignore."""
+    """An env inside the active root gets no note."""
     monkeypatch.setenv("MAMBA_ROOT_PREFIX", ACTIVE_ROOT)
     monkeypatch.setattr(doctor, "env_prefix", lambda env: ACTIVE_ROOT + "/envs/metawrap2-amr")
     assert doctor._foreign_prefix_note("metawrap2-amr") == ""
 
 
 def test_the_active_root_is_derived_from_the_active_env(monkeypatch, no_real_conda):
-    """``CONDA_PREFIX`` points at the active *env*; the root is two levels up from a named one.
+    """The active root is two levels above ``CONDA_PREFIX`` when that is a named env.
 
-    Comparing a prefix against CONDA_PREFIX directly would call every env except the currently
-    activated one foreign, which is the same false alarm in the other direction.
+    Comparing against CONDA_PREFIX directly would mark every env except the active one as foreign.
     """
     monkeypatch.setenv("CONDA_PREFIX", ACTIVE_ROOT + "/envs/metawrap2-reads")
     assert config.active_conda_root() == ACTIVE_ROOT
@@ -203,14 +180,13 @@ def test_the_active_root_is_derived_from_the_active_env(monkeypatch, no_real_con
 
 # ── which directories are searched at all ────────────────────────────────────────────────────
 
-#: The five install locations env_dirs guesses at. Named here so the assertions below are about
-#: the guesses rather than about whatever happens to be in the list.
+#: The five install locations that env_dirs guesses.
 GUESSES = ("miniforge3", "miniconda3", "mambaforge", "anaconda3", "micromamba")
 
 
 @pytest.fixture
 def fake_home(monkeypatch, tmp_path):
-    """A HOME with no conda installs in it, so an expanded guess is a path this test controls."""
+    """A HOME with no conda installs, so expanded guesses point under tmp_path."""
     monkeypatch.setenv("HOME", str(tmp_path))
     for var in ("CONDA_PREFIX", "CONDA_ROOT", "MAMBA_ROOT_PREFIX"):
         monkeypatch.delenv(var, raising=False)
@@ -218,11 +194,9 @@ def fake_home(monkeypatch, tmp_path):
 
 
 def test_env_dirs_omits_the_hardcoded_guesses_when_conda_can_be_asked(monkeypatch, fake_home):
-    """With an authoritative listing available, the guesses add nothing but other installations.
+    """When conda can list its envs, the hardcoded guesses are not added.
 
-    They are what made ``conda_env_exists`` answer for a conda installation the user never chose:
-    five directories searched that nobody asked about, on top of a listing that already covers
-    every env the manager knows.
+    The guesses made ``conda_env_exists`` find envs in other conda installations.
     """
     root = fake_home / "conda"
     (root / "envs" / "metawrap2-bins").mkdir(parents=True)
@@ -242,10 +216,9 @@ def test_env_dirs_omits_the_hardcoded_guesses_when_conda_can_be_asked(monkeypatc
 
 
 def test_env_dirs_uses_the_hardcoded_guesses_when_no_manager_is_on_path(monkeypatch, fake_home):
-    """With nothing to ask, the guesses are the only answer there is.
+    """With no conda or mamba on PATH, env_dirs returns the hardcoded guesses.
 
-    This is the case the docstring was always describing: a container or a batch node where conda
-    exists on disk but is not on PATH until an activation script runs.
+    This covers containers and batch nodes where conda is on disk but not on PATH until activated.
     """
     monkeypatch.setattr(config.shutil, "which", lambda prog: None)
     dirs = config.env_dirs()

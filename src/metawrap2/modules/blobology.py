@@ -8,8 +8,7 @@ This is a MetaWrap2 port of a pipeline derived from BLOBOLOGY (Sujai Kumar,
 github.com/blaxterlab/blobology); the heavy lifting lives in metawrap2.scripts.blobology.
 
 This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
-block below, and the tunable numbers in the CONSTANTS block. Change a flag there and it
-takes effect — no need to follow the orchestration logic underneath.
+block below, and the tunable numbers in the CONSTANTS block.
 """
 
 from __future__ import annotations
@@ -58,15 +57,15 @@ BLASTN = (
     "blastn -task megablast -query {query} -db {blastdb} -evalue 1e-5"
     " -num_threads {threads} -max_target_seqs 1 -outfmt '6 qseqid staxids'"
 )
-#: The aligner streams into the BAM conversion, so no SAM is ever written. pipefail matters here:
-#: the conversion exits 0 on a truncated stream and leaves a short but perfectly valid BAM, so
-#: without it an aligner that died halfway would show up as a blobplot built on partial coverage.
+#: The aligner streams into the BAM conversion, so no SAM is written. pipefail is needed because the
+#: conversion exits 0 on a truncated stream and leaves a short valid BAM, which would otherwise hide
+#: an aligner failure.
 #:
-#: No sort, deliberately. gc_cov_annotate reads this with a plain ``samtools view`` and sums aligned
-#: span per contig, so record order is irrelevant and sorting it would be work spent on nothing.
+#: Not sorted: gc_cov_annotate reads it with ``samtools view`` and sums aligned span per contig, so
+#: record order does not matter.
 ALIGN_BAM = "set -o pipefail; {align} | samtools view -O BAM -b -@ {threads} - > {bam}"
-# Runs in the host interpreter (it imports metawrap2) but shells out to samtools, which only
-# exists inside this module's conda env - hence --samtools with an absolute path.
+# Runs in the host interpreter (it imports metawrap2) but calls samtools, which is only in this
+# module's conda env, so --samtools gets an absolute path.
 GC_COV_ANNOTATE = (
     PY + " -m metawrap2.scripts.blobology.gc_cov_annotate --blasttaxid {megablast}"
     " --assembly {assembly} --bam {bams} --out {out} --taxdump {taxdump}"
@@ -144,8 +143,8 @@ def _annotate_with_bins(blobplot: str, binned_blobplot: str, bin_folder: str) ->
         binned = [ln for ln in fh if "Unbinned" not in ln]
     if len(binned) < 2:
         warning(
-            "No contig matches were found in the bins provided. This may be because the "
-            "contigs in the %s folder are not the same as the contigs in the assembly. "
+            "No contig in the bins matches the assembly. Check that the contigs in the %s "
+            "folder come from this assembly. "
             "The blobplot will not be annotated with bins." % bin_folder
         )
         os.remove(tmp)
@@ -198,8 +197,8 @@ def main(argv: List[str]) -> int:
         blastdb = _blastdb.db_path(settings)
         if not os.path.isfile(os.path.join(taxdump, "citations.dmp")):
             error(
-                "The file %s/citations.dmp does not exist, which likely means the NCBI taxonomy "
-                "database path (TAXDUMP) is not set correctly or is not downloaded." % taxdump
+                "The file %s/citations.dmp does not exist. Check that TAXDUMP points at the NCBI "
+                "taxonomy database and that the database is downloaded." % taxdump
             )
 
         try:

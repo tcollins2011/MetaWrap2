@@ -1,4 +1,4 @@
-"""DEREPLICATE, QUANT_BINS, CLASSIFY_BINS, APPRAISE and BLOBOLOGY: from bins to a described catalogue."""
+"""DEREPLICATE, QUANT_BINS, CLASSIFY_BINS, APPRAISE and BLOBOLOGY: bins to a catalogue."""
 
 from _grid import BLUE, GREEN, PURPLE, RED, YELLOW, W, x, y
 from drawio import Diagram

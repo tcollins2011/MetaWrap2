@@ -4,16 +4,13 @@ The long-read counterpart of :mod:`metawrap2.scripts.filter_reads_for_bin_reasse
 SAM stream on stdin (``minimap2 -ax map-ont`` against all bins concatenated) and writes one
 ``<bin>.nanopore.fastq`` per bin containing the reads that aligned to that bin's contigs.
 
-There is no strict/permissive split here: long reads carry far more mismatches than a
-short-read SNP cutoff would tolerate, so any aligned read is recruited and the mismatch count
-is not used. ``reassemble_bins`` passes these to SPAdes as ``--nanopore`` alongside the
-short-read pairs.
+There is no strict/permissive split: long reads carry more mismatches than a short-read SNP
+cutoff would allow, so every aligned read is recruited regardless of mismatch count.
+``reassemble_bins`` passes these to SPAdes as ``--nanopore`` alongside the short-read pairs.
 
-Only primary alignments are recruited, which this did not previously enforce. ``minimap2 -ax map-ont``
-emits secondary alignments by default and writes their SEQ as ``*``, so every repeat a long read
-crosses added a one-base read to the FASTQ that SPAdes was handed. The old test for "did this align"
-was the presence of an ``NM`` tag, which minimap2 puts on secondary records too, so it did not catch
-them; alignment status now comes off the FLAG, where SAM puts it.
+Only primary alignments are recruited, judged from the FLAG. ``minimap2 -ax map-ont`` emits
+secondary alignments by default, with SEQ written as ``*`` and an ``NM`` tag, so an NM-presence
+test let them through as one-base reads in the FASTQ given to SPAdes.
 
 Usage (``reassemble_bins`` does this for you)::
 
@@ -21,10 +18,9 @@ Usage (``reassemble_bins`` does this for you)::
       | python -m metawrap2.scripts.filter_nanopore_reads_for_bin_reassembly \\
             original_bins/ reads_for_reassembly/
 
-Rewritten from the original tab-indented script. As with the short-read version, SAM flags are
-now tested with a bitwise mask instead of by indexing into ``bin(flag)`` (which the original
-had to wrap in ``try/except IndexError`` precisely because it broke on small flags), and
-contigs are matched on their id rather than their whole header.
+Rewritten from the original tab-indented script. As in the short-read version, SAM flags are
+tested with a bitwise mask instead of indexing into ``bin(flag)`` (which needed a ``try/except
+IndexError`` for small flags), and contigs are matched on their id, not their whole header.
 """
 
 from __future__ import annotations
@@ -55,11 +51,9 @@ def _records(stream: Iterator[str], contig_bins: Dict[str, str]) -> Iterator[Lis
             continue
         if fields[2] not in contig_bins:
             continue
-        # Secondary and supplementary alignments are dropped here, and this is the path where it
-        # matters most: `minimap2 -ax map-ont` emits secondary alignments by default, writes SEQ as
-        # `*` on every one of them, and sets NM on them - so the old NM-presence test let them
-        # through and each became a one-base read in the FASTQ handed to SPAdes. A long read
-        # crossing a repeat produces several.
+        # Drop secondary and supplementary alignments. minimap2 -ax map-ont emits secondary
+        # alignments by default with SEQ `*` and an NM tag; each would become a one-base read in
+        # the FASTQ given to SPAdes, several per read crossing a repeat.
         try:
             if int(fields[1]) & EXTRA_ALIGNMENT_FLAGS:
                 continue

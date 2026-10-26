@@ -1,29 +1,25 @@
-"""`metawrap2 calibrate <study_dir>...` - check the built-in estimates against real runs.
+"""`metawrap2 calibrate <study_dir>...` - compare the built-in estimates with recorded runs.
 
-Two sets of numbers in MetaWrap2 are asserted rather than measured:
+Two sets of numbers in MetaWrap2 are configured, not measured:
 
 * :data:`metawrap2.scratch.SPACE_MULTIPLIERS` - peak disk need as a multiple of input size;
 * the memory and thread budget from ``[limits]``, divided between concurrent steps.
 
-Every run records, per step, the size of each input, the size of each output, peak RSS, CPU time,
-and the share of the budget the step was granted (see :mod:`metawrap2.limits`). So the observed
-values can be compared against the constants instead of the constants being trusted - and, for the
-budget, against what the step was actually allowed rather than only against itself.
+Every run records, per step, input and output sizes, peak RSS, CPU time, and the share of the
+budget the step was granted (see :mod:`metawrap2.limits`). This command compares those
+observations with the constants and with each step's grant.
 
     metawrap2 calibrate study1/ study2/          # table per module
     metawrap2 calibrate study*/ --suggest        # constants that fit the observations
     metawrap2 calibrate study/ --json
 
-**What this can and cannot measure.** Output-to-input ratio is measurable and is a *lower bound*
-on the disk multiplier - scratch is deleted when a step finishes, so no manifest can say how large
-it got at its peak. A multiplier below the observed output ratio is therefore definitely wrong; one
-above it may still be too low. Peak memory, by contrast, is measured exactly. The report says which
-is which rather than presenting both as equally solid, because a confidently wrong disk estimate is
-how a run fills a filesystem four hours in.
+The output-to-input ratio is a lower bound on the disk multiplier, because scratch is deleted when
+a step finishes and its peak size is not recorded. A multiplier below the observed ratio is wrong;
+one above it may still be too low. Peak memory is measured directly, and the report labels which
+figures are bounds.
 
-The budget table is measured on both sides - grant and peak - so it carries no such caveat. What it
-cannot tell you is whether a tool *would* have used more had it been offered more; a step at 30% of
-its grant is evidence the grant is generous, not proof the tool cannot use memory it was given.
+The budget table compares two measured values (grant and peak). It cannot show whether a tool
+would use more memory if granted more.
 """
 
 from __future__ import annotations
@@ -38,8 +34,7 @@ from ..scratch import SPACE_MULTIPLIERS, human
 from ..usage import human as human_bytes
 from .status_cmd import manifest_path
 
-#: A step whose inputs total less than this tells us nothing about scaling: fixed overheads
-#: dominate, and dividing by a tiny denominator produces meaningless ratios.
+#: Steps with smaller total input are skipped: fixed overheads dominate and the ratios are noise.
 MIN_INPUT_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
@@ -54,17 +49,15 @@ def _total(entries: List[Dict[str, Any]]) -> int:
         if entry.get("kind") == "file":
             total += int(entry.get("size") or 0)
         elif entry.get("kind") == "directory":
-            # Only the entry count was recorded, not the bytes. Skipping is honest; guessing a
-            # per-file size would put invented numbers into a calibration report.
+            # Only the entry count is recorded, not the bytes, so directories are not counted.
             continue
     return total
 
 
 def _cores_busy(usage: Dict[str, Any], wall: Optional[float]) -> Optional[float]:
-    """Cores actually busy over the step's wall time, or None if it was not measured.
+    """Return the mean number of busy cores over the step's wall time, or None if not measured.
 
-    Read against the thread grant this is the answer to "did it thread at all": a step given 24
-    threads and busy on 1.2 cores will not go faster for being given 48.
+    Compared with the thread grant, this shows whether a step used its threads.
     """
     user, system = usage.get("user_seconds"), usage.get("system_seconds")
     if user is None or system is None or not wall:
@@ -73,7 +66,7 @@ def _cores_busy(usage: Dict[str, Any], wall: Optional[float]) -> Optional[float]
 
 
 def observations(study_dirs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-    """Per-module observations gathered from each study's manifest."""
+    """Return per-module observations gathered from each study's manifest."""
     found: Dict[str, List[Dict[str, Any]]] = {}
     for study in study_dirs:
         path = manifest_path(study)
@@ -97,7 +90,7 @@ def observations(study_dirs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
                     "output_bytes": _total(step.get("outputs") or []),
                     "peak_rss_bytes": usage.get("peak_rss_bytes"),
                     "wall_seconds": step.get("duration_seconds"),
-                    # What the step was allowed, so the measurement can be read against it.
+                    # The step's grant, to compare the measurement against.
                     "granted_memory_gb": grant.get("memory_gb"),
                     "granted_threads": grant.get("threads"),
                     "cores_busy": cores_busy,
@@ -111,14 +104,13 @@ def _ratio(entry: Dict[str, Any]) -> float:
 
 
 def summarise(found: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """One row per module: observed ratios and memory, against the configured multiplier."""
+    """Return one row per module: observed ratios and memory, and the configured multiplier."""
     rows = []
     for module in sorted(found):
         entries = found[module]
         ratios = [_ratio(e) for e in entries]
         memories = [e["peak_rss_bytes"] for e in entries if e["peak_rss_bytes"]]
-        # Only steps that recorded both a grant and a measurement can be compared. Runs made
-        # before the budget existed have no grant, and are simply not counted here.
+        # Only steps with both a grant and a measured peak are compared. Older runs have no grant.
         against_grant = [
             e for e in entries if e.get("granted_memory_gb") and e.get("peak_rss_bytes")
         ]
@@ -145,12 +137,11 @@ def summarise(found: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
                 "max_granted_memory_gb": (
                     max(e["granted_memory_gb"] for e in against_grant) if against_grant else None
                 ),
-                #: Peak RSS as a fraction of the memory the step was granted. Above 1 means the
-                #: grant was exceeded (the kernel allowed it; a tool that honoured -m would not
-                #: have), well below it means the grant was never the constraint.
+                #: Peak RSS as a fraction of the memory granted. Above 1 means the tool did not
+                #: honour -m; well below 1 means memory was not the constraint.
                 "max_memory_used_fraction": max(used) if used else None,
-                #: Cores actually busy as a fraction of the threads granted. A step at 0.1 is not
-                #: threading, and giving it more threads will not make it finish sooner.
+                #: Busy cores as a fraction of the threads granted. A low value means more threads
+                #: will not speed the step up.
                 "max_thread_used_fraction": max(threaded) if threaded else None,
             }
         )
@@ -158,7 +149,7 @@ def summarise(found: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
 
 
 def _verdict(row: Dict[str, Any]) -> str:
-    """Whether the configured multiplier is contradicted by what was observed."""
+    """Return whether the observations contradict the configured multiplier."""
     configured = row["configured_multiplier"]
     observed = row["max_output_ratio"]
     if configured is None:
@@ -193,15 +184,14 @@ def _print_table(rows: List[Dict[str, Any]]) -> None:
         )
     print("  " + "-" * 104)
     print(
-        "  out/in is a LOWER BOUND on the disk multiplier: scratch is deleted when a step\n"
-        "  finishes, so no manifest records how large it got at its peak. A multiplier below\n"
-        "  the observed ratio is definitely wrong; one above it may still be too low.\n"
-        "  Peak memory is measured exactly.\n"
+        "  out/in is a lower bound on the disk multiplier: scratch is deleted when a step\n"
+        "  finishes, so its peak size is not recorded. A multiplier below the observed ratio\n"
+        "  is too low; one above it may still be too low. Peak memory is measured.\n"
     )
 
 
 def _budget_verdict(row: Dict[str, Any]) -> str:
-    """How the budget the steps were granted compares with what they went on to use."""
+    """Return how the steps' peak memory compares with their grant."""
     used = row["max_memory_used_fraction"]
     if used is None:
         return "no grant recorded"
@@ -215,12 +205,12 @@ def _budget_verdict(row: Dict[str, Any]) -> str:
 
 
 def _print_budget_table(rows: List[Dict[str, Any]]) -> None:
-    """Granted versus used, which is the question `-m` and `[limits]` are answers to."""
+    """Print granted versus used memory and threads per module."""
     measured = [r for r in rows if r["runs_with_grant"]]
     if not measured:
         print(
-            "  No step recorded the budget it was granted, so there is nothing to compare peak\n"
-            "  memory against. Runs made by `metawrap2 run` record it from now on.\n"
+            "  No step recorded its granted budget, so peak memory cannot be compared.\n"
+            "  Runs made by `metawrap2 run` record the budget.\n"
         )
         return
     print(
@@ -247,23 +237,23 @@ def _print_budget_table(rows: List[Dict[str, Any]]) -> None:
         )
     print("  " + "-" * 104)
     print(
-        "  'granted' is the largest -m any of these steps was given, 'peak' the largest peak RSS\n"
-        "  measured, 'used' the second as a fraction of the first, and 'threads' how much of the\n"
-        "  thread grant was actually busy. A module well under its grant can have [limits]\n"
-        "  max_memory_fraction lowered (or -j raised to run more steps at once); one over it\n"
-        "  is not honouring -m, and only a smaller grant or fewer concurrent steps will help.\n"
+        "  'granted' is the largest -m given to any of these steps, 'peak' the largest peak RSS,\n"
+        "  'used' peak as a fraction of granted, and 'threads' the fraction of the thread grant\n"
+        "  that was busy. For a module well under its grant, lower [limits] max_memory_fraction\n"
+        "  (or raise -j to run more steps at once). A module over its grant is not honouring\n"
+        "  -m; give it a smaller grant or run fewer steps at once.\n"
     )
 
 
 def _print_suggestions(rows: List[Dict[str, Any]]) -> None:
-    """Print a SPACE_MULTIPLIERS block that is at least consistent with what was seen."""
-    print("\n  A SPACE_MULTIPLIERS block no observation here contradicts:\n")
+    """Print a SPACE_MULTIPLIERS block that no observation contradicts."""
+    print("\n  SPACE_MULTIPLIERS block consistent with these observations:\n")
     print("  SPACE_MULTIPLIERS = {")
     for row in rows:
         configured = row["configured_multiplier"] or 2.0
         observed = row["max_output_ratio"] or 0.0
-        # Keep the configured value unless it is below what was actually produced; then raise it
-        # with headroom, because the real peak includes scratch this cannot see.
+        # Keep the configured value unless it is below the observed ratio; then double the
+        # observed ratio, since the real peak also includes scratch.
         suggested = configured if configured >= observed else round(observed * 2, 1)
         note = "" if suggested == configured else "  # raised: observed %.2fx output" % observed
         print('      "%s": %.1f,%s' % (row["module"], suggested, note))
@@ -295,8 +285,8 @@ def main(argv: List[str]) -> int:
     if not found:
         print(
             "\nNothing to calibrate from. Looked for run manifests in: %s\n"
-            "A study contributes only completed steps whose inputs total at least %s - a step\n"
-            "smaller than that says nothing about how the estimates scale.\n"
+            "Only completed steps whose inputs total at least %s are used; smaller steps\n"
+            "do not show how the estimates scale.\n"
             % (", ".join(args.studies), human(MIN_INPUT_BYTES))
         )
         return 1

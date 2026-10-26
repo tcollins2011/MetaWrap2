@@ -24,12 +24,10 @@ def test_skip_validation_flag_bypasses_input_checks():
 
 
 def test_an_interrupt_between_spawning_and_waiting_still_kills_the_tool(monkeypatch):
-    """The window was two statements wide, and cost a whole machine when it was hit.
+    """An interrupt after Popen returns but before the guarded wait still terminates the tool.
 
-    The tool runs in its own process group, so only this process kills it. An interrupt arriving
-    after Popen returned but before the wait it was guarded around left the tool running with every
-    thread it had been granted, orphaned by the run that was exiting - and whatever the user started
-    next then fought it for the machine.
+    The tool runs in its own process group, so only this process can kill it; otherwise it would
+    keep running, orphaned, with all its threads.
     """
     import threading
 

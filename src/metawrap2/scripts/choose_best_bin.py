@@ -1,21 +1,18 @@
 """Pick the best version of each bin from a reassembly ``.stats`` file.
 
-``reassemble_bins`` produces up to three versions of every bin - the original (``.orig``) and
-the two reassemblies (``.strict`` and ``.permissive``) - scores all of them with CheckM in one
-go, and then has to choose one per bin. This module makes that choice.
+``reassemble_bins`` produces up to three versions of every bin (the original ``.orig`` and the
+reassemblies ``.strict`` and ``.permissive``), scores them with CheckM, and uses this module to
+choose one per bin.
 
-The score deliberately weights contamination more heavily than completeness, because a
-slightly less complete genome is usually more useful than a slightly more contaminated one::
+Contamination is weighted more heavily than completeness, because a slightly less complete genome
+is usually more useful than a slightly more contaminated one::
 
     score = completeness + 5 * (100 - contamination)
 
-Ties are broken by N50, preferring the less fragmented assembly. Versions failing the
-requested completeness/contamination thresholds are not considered at all, so a bin whose
-every version is poor simply drops out.
+Ties are broken by higher N50. Versions failing the completeness/contamination thresholds are
+excluded, so a bin with no passing version is dropped.
 
-The ranking is identical to the original ``choose_best_bin.py``; this is a rewrite of
-that script's structure (module-level ``sys.argv`` parsing, tab indentation, mutable
-three-element lists) into something testable and readable.
+The ranking is the same as in metaWRAP's original ``choose_best_bin.py``.
 """
 
 from __future__ import annotations

@@ -1,9 +1,8 @@
 """Tests for the committed conda lockfiles and `metawrap2 doctor --fix`.
 
-Neither of these may talk to conda in a test, so the package manager is stubbed. What is worth
-pinning is the contract around it: lockfile naming and content, that a lockfile that fell back to
-human-readable output is refused, restoring from a lockfile, and that ``--fix`` rebuilds exactly
-the broken environments and nothing else.
+The package manager is stubbed. Checked: lockfile naming and content, refusal of a lockfile that
+fell back to human-readable output, restoring from a lockfile, and that ``--fix`` rebuilds only the
+broken environments.
 """
 
 from __future__ import annotations
@@ -55,11 +54,10 @@ def _queue_bins(envs_dir, monkeypatch, with_lock: bool):
 
 
 def test_from_lock_installs_the_committed_lockfile(envs_dir, monkeypatch):
-    """--from-lock was parsed and never used: every "reproducible" install solved the yaml.
+    """--from-lock passes the environment's lockfile to the build.
 
-    The lockfile reader had its own unit test, which passed, and nothing called it. So this goes
-    through the command: naming the module (`binning`) must find the environment's lockfile
-    (`bins.linux-64.lock`) and hand it to the build.
+    Tested through the command, since --from-lock was once parsed but never used: naming the module
+    (`binning`) must find the environment's lockfile (`bins.linux-64.lock`).
     """
     built = _queue_bins(envs_dir, monkeypatch, with_lock=True)
     assert ie.main(["binning", "--from-lock", "--no-test"]) == 0
@@ -67,7 +65,7 @@ def test_from_lock_installs_the_committed_lockfile(envs_dir, monkeypatch):
 
 
 def test_a_lockfile_is_named_after_the_environment_not_the_name_typed(envs_dir, monkeypatch):
-    """`--lock binning` wrote binning.linux-64.lock, which --from-lock (keyed on bins) never reads."""
+    """`--lock binning` writes the lockfile under the env name (bins), which --from-lock reads."""
     monkeypatch.setattr(ie, "conda_env_exists", lambda env: True)
     written = []
     monkeypatch.setattr(

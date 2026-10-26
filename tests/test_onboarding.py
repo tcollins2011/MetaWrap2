@@ -1,11 +1,9 @@
-"""Tests for the things a first-time or migrating user hits: quickstart, config migration,
-retired names, and the disk-space check's severity.
+"""Onboarding: quickstart, config migration, retired names, and the disk-space check's severity.
 
-The property that matters most here is the one about databases. They run from 550 MB to ~300 GB
-and take hours to days, so `quickstart` must never start one without being told to - and in
-particular must never be able to do so on a non-interactive run, where nobody is there to say no.
+Databases range from 550 MB to ~300 GB, so `quickstart` must not download one unless asked, and
+never on a non-interactive run.
 
-This is a curated subset: one strong test per distinct onboarding contract.
+One test per onboarding behaviour.
 """
 
 from __future__ import annotations
@@ -45,13 +43,13 @@ def calls(monkeypatch):
 
 
 def test_no_database_is_downloaded_by_default(calls, monkeypatch):
-    """The whole point: an unattended quickstart installs environments and nothing else."""
+    """An unattended quickstart installs environments and no databases."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert quickstart.main(["--binning-only"]) == 0
     assert calls["env"] is not None, "environments should still be created"
     assert calls["db"] is None, "no database download may be started without being asked"
 
-    # A batch script or CI job must not be able to trigger a 300 GB download.
+    # Without a terminal there is no prompt and no download.
     monkeypatch.setattr(
         "builtins.input", lambda *a: pytest.fail("must not prompt without a terminal")
     )
@@ -64,8 +62,7 @@ def test_no_database_is_downloaded_by_default(calls, monkeypatch):
 def test_the_example_config_matches_the_starter_config():
     """`metawrap2.toml.example` is generated from DEFAULT_CONFIG.
 
-    They were once two hand-maintained copies and the example fell behind, which is worse than
-    having no example at all: a user pastes a section that no longer exists.
+    They used to be maintained separately, and the example went out of date.
     """
     import pathlib
 

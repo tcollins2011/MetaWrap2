@@ -1,16 +1,12 @@
-"""``assembly --keep-graph``: the one output a graph-aware binner needs, and its disk cost.
+"""``assembly --keep-graph``: keeping the assembly graph for graph-aware binners, and its cost.
 
-PlasMAAG, GraphMB and Hi-C placement all read the assembly graph rather than the contigs, and
-until this flag the graphs sat inside the assemblers' own directories under three different names -
-with none at all for MEGAHIT, which writes no graph and only leaves the per-k contigs a FASTG can be
-built from. These tests pin the three things that makes usable: the flag is opt-in, the kept file
-lands at a path a downstream tool can be told rather than have to glob for, and an assembler that
-left no graph is reported instead of ending the run.
+PlasMAAG, GraphMB and Hi-C placement read the assembly graph. metaSPAdes and metaFlye write graphs
+under different names in their own directories; MEGAHIT writes none, only the per-k contigs a FASTG
+can be built from. Tested: the flag is opt-in, the graph is kept at a fixed path, and a missing
+graph is reported without ending the run.
 
-Note on what is *not* here: nothing in this module deletes an assembly graph, and these tests pin
-that too (``test_a_run_without_keep_graph_keeps_and_deletes_nothing``). metaSPAdes' and metaFlye's
-graphs have always survived in their own directories, as has MEGAHIT's ``intermediate_contigs``;
-what was missing was a named path and, for MEGAHIT, a graph at all.
+The module never deletes an assembly graph or MEGAHIT's ``intermediate_contigs``
+(``test_a_run_without_keep_graph_keeps_and_deletes_nothing``).
 """
 
 from __future__ import annotations
@@ -21,12 +17,12 @@ from typing import List, Optional, Tuple
 
 from metawrap2.modules import assembly
 
-#: A MEGAHIT contig long enough to survive the module's 1 kb length filter, in MEGAHIT's own header
-#: layout - the formatting step parses ``len=``/``multi=`` out of it.
+#: A MEGAHIT contig long enough to pass the module's 1 kb length filter, in MEGAHIT's header
+#: layout (the formatting step parses ``len=``/``multi=``).
 MEGAHIT_CONTIG = ">k59_0 flag=1 multi=5.0000 len=2000\n%s\n" % ("ACGT" * 500)
 
-#: The ks a real auto-k MEGAHIT run leaves behind. 59 is the largest, and is where final.contigs.fa
-#: came from; a measured reference assembly stopped at exactly this k under a k_max of 141.
+#: The ks a real auto-k MEGAHIT run leaves. 59 is the largest and produced final.contigs.fa; a
+#: reference assembly stopped at this k with a k_max of 141.
 MEGAHIT_KS = (21, 39, 59)
 
 
@@ -41,10 +37,9 @@ def _reads(tmp_path) -> Tuple[str, str]:
 def _fake_megahit_run(
     monkeypatch, tmp_path, intermediates: bool = True
 ) -> List[Tuple[str, Optional[str]]]:
-    """Stand in for MEGAHIT, its toolkit and QUAST: record each call, write what it promises.
+    """Fake MEGAHIT, its toolkit and QUAST: record each call and write its expected outputs.
 
-    The history file is redirected because ``main`` records a real run when it finishes, and a test
-    has no business appending to the developer's ``~/.metawrap2/history.jsonl``.
+    The history file is redirected so the test does not append to ``~/.metawrap2/history.jsonl``.
     """
     calls: List[Tuple[str, Optional[str]]] = []
 
@@ -89,10 +84,10 @@ def _assemble(
 
 
 def test_keep_graph_is_off_by_default():
-    """Opt-in, or every run pays for a graph most runs never read.
+    """--keep-graph is off by default.
 
-    Regresses: a default-on flag would add a FASTG conversion and (measured on an oral
-    sample) 235 MB of disk to every single-sample MEGAHIT assembly in a cohort.
+    When on, it adds a FASTG conversion and (on an oral sample) 235 MB of disk per MEGAHIT
+    assembly.
     """
     args = assembly._parse_args(["-1", "a_1.fq", "-2", "a_2.fq", "-o", "out"])
     assert args.keep_graph is False
@@ -100,12 +95,7 @@ def test_keep_graph_is_off_by_default():
 
 
 def test_a_run_without_keep_graph_keeps_and_deletes_nothing(tmp_path, monkeypatch):
-    """Without the flag the assembler's output directory is exactly what it always was.
-
-    Regresses both directions of the same change: no graph may appear at the kept path, and the
-    material the graph would be built from - MEGAHIT's ``intermediate_contigs``, which this module
-    has never deleted - must still be there untouched.
-    """
+    """Without the flag, no graph is written and MEGAHIT's ``intermediate_contigs`` are kept."""
     out, calls = _assemble(tmp_path, monkeypatch)
     assert not [name for name in os.listdir(out) if name.startswith("assembly_graph")]
     assert [tool for _cmd, tool in calls if tool == "megahit_toolkit contig2fastg"] == []
@@ -114,30 +104,24 @@ def test_a_run_without_keep_graph_keeps_and_deletes_nothing(tmp_path, monkeypatc
 
 
 def test_keep_graph_names_the_kept_megahit_graph_and_its_size(tmp_path, monkeypatch, capsys):
-    """The kept graph is at a fixed path and that path is in the run's own output.
-
-    Regresses the whole point of the flag: a downstream tool has to be able to be *told* where the
-    graph is, and a user has to be able to see what keeping it cost, without globbing an assembler's
-    directory or knowing which assembler ran.
-    """
+    """The kept graph is at a fixed path, and the path and its size are printed."""
     out, calls = _assemble(tmp_path, monkeypatch, "--keep-graph")
     graph = os.path.join(out, assembly.KEPT_GRAPHS["megahit"])
     assert os.path.getsize(graph)
-    # Built from the largest k MEGAHIT actually wrote, not from options.json's k_max.
+    # Built from the largest k MEGAHIT wrote, not options.json's k_max.
     cmd = next(cmd for cmd, tool in calls if tool == "megahit_toolkit contig2fastg")
     assert cmd == assembly.MEGAHIT_CONTIG2FASTG.format(
         k=59, contigs=os.path.join(out, "megahit", assembly.MEGAHIT_INTERMEDIATES, "k59.contigs.fa")
     )
     printed = capsys.readouterr().out
     assert assembly.KEPT_GRAPHS["megahit"] in printed
-    assert "6.0 B" in printed  # the size of what was kept, not just that something was
+    assert "6.0 B" in printed  # the size of the kept graph
 
 
 def test_an_existing_graph_is_kept_without_a_second_copy_of_it(tmp_path, capsys):
-    """metaSPAdes' and metaFlye's graphs are linked, not copied, so keeping one costs no disk.
+    """metaSPAdes' and metaFlye's graphs are hard-linked, not copied.
 
-    Regresses a copy creeping back in: the metaSPAdes GFA measured 121 MB against a 54 MB assembly,
-    and a flag whose cost is "the graph twice" is a flag nobody can afford to use.
+    A metaSPAdes GFA measured 121 MB for a 54 MB assembly.
     """
     src = tmp_path / "metaspades" / assembly.SPADES_GRAPH
     src.parent.mkdir()
@@ -151,11 +135,10 @@ def test_an_existing_graph_is_kept_without_a_second_copy_of_it(tmp_path, capsys)
 
 
 def test_the_largest_k_megahit_wrote_is_the_one_converted(tmp_path):
-    """MEGAHIT's auto-k stops early, so the k to convert is the largest one on disk.
+    """The k converted is the largest non-empty one on disk, not k_max from options.json.
 
-    Regresses reading k_max out of options.json: the measured TEST leftover assembly ran k21..k59
-    under a k_max of 141, so converting 141 would have read a file that does not exist. An empty
-    k file is the same case - MEGAHIT touches one per k it starts and does not finish.
+    MEGAHIT's auto-k can stop early (k21..k59 with a k_max of 141), and it leaves an empty file
+    for a k it started but did not finish.
     """
     intermediates = tmp_path / assembly.MEGAHIT_INTERMEDIATES
     intermediates.mkdir()
@@ -169,16 +152,11 @@ def test_the_largest_k_megahit_wrote_is_the_one_converted(tmp_path):
 
 
 def test_an_assembler_that_left_no_graph_is_reported_not_fatal(tmp_path, monkeypatch, capsys):
-    """A missing graph warns and the run finishes; it does not throw the assembly away.
-
-    Regresses turning an optional extra into a run-ending failure. By the time this runs the
-    assembly is finished and correct, and hours of it are on disk - the graph is a convenience that
-    nothing downstream has consumed yet, so "there is no graph" is news, not a failure.
-    """
-    # A MEGAHIT that produced contigs and left no per-k intermediates: nothing to convert.
+    """A missing graph gives a warning and the run finishes with its assembly."""
+    # MEGAHIT produced contigs but no per-k intermediates, so there is nothing to convert.
     out, calls = _assemble(tmp_path, monkeypatch, "--keep-graph", intermediates=False)
     assert not os.path.exists(os.path.join(out, assembly.KEPT_GRAPHS["megahit"]))
     printed = capsys.readouterr().out
     assert "no k*.contigs.fa" in printed
     assert os.path.getsize(os.path.join(out, "final_assembly.fasta"))
-    assert [tool for _cmd, tool in calls if tool == "quast"]  # the run carried on to the end
+    assert [tool for _cmd, tool in calls if tool == "quast"]  # the run continued to the end

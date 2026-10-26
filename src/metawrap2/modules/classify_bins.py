@@ -5,9 +5,8 @@ pruned to ranked tax ids, then taxator-tk (megan-lca) assigns per-contig taxonom
 consolidated per contig with binner/taxknife. Finally each bin's consensus taxonomy is
 called by building a length-weighted taxonomy tree and following the majority path.
 
-This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
-block below, and the tunable numbers in the CONSTANTS block. Change a flag there and it
-takes effect — no need to follow the orchestration logic underneath.
+Tool commands are in the COMMANDS block below and tunable numbers in the CONSTANTS block; edit
+flags there.
 """
 
 from __future__ import annotations
@@ -54,9 +53,9 @@ BLASTN = (
     "-query {query}"
 )
 # taxator/binner/taxknife read stdin and are chained through pipes, so they run via bash -c.
-# All three are taxator-tk tools and all three need TAXATORTK_TAXONOMY_NCBI - only taxator
-# had it set, so `binner` failed with "Specify the folder containing the NCBI taxonomy dump
-# files as TAXATORTK_TAXONOMY_NCBI environment variable" after the slow megablast finished.
+# All three taxator-tk tools need TAXATORTK_TAXONOMY_NCBI; without it `binner` fails after
+# megablast with "Specify the folder containing the NCBI taxonomy dump files as
+# TAXATORTK_TAXONOMY_NCBI environment variable".
 _TAXONOMY_ENV = "TAXATORTK_TAXONOMY_NCBI={taxdump}"
 TAXATOR = (
     _TAXONOMY_ENV
@@ -98,9 +97,9 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--gtdbtk",
         action="store_true",
-        help="classify with GTDB-Tk against GTDB instead of MEGABLAST+taxator-tk. Preferred: "
-        "taxator-tk has had no upstream release since 2015, and GTDB taxonomy is what the MAG "
-        "literature uses. Needs `metawrap2 install-env gtdbtk` and GTDBTK_DATA_PATH (~110 GB)",
+        help="classify with GTDB-Tk against GTDB instead of MEGABLAST+taxator-tk (recommended; "
+        "taxator-tk has had no upstream release since 2015, and MAG studies use GTDB "
+        "taxonomy). Needs `metawrap2 install-env gtdbtk` and GTDBTK_DATA_PATH (~110 GB)",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -109,9 +108,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 def _concat_all_contigs(bin_folder: str, all_contigs: str) -> None:
     """Merge every bin's contigs into one fasta (supports .gz bins).
 
-    The unbinned catch-all is not one of the bins, so taxator is not asked to place it: it would be
-    classified and reported alongside the bins, which reads as a taxonomy for a genome that no binner
-    proposed.
+    The unbinned file is skipped, so it is not classified and reported as a bin.
     """
     if os.path.isfile(all_contigs):
         os.remove(all_contigs)
@@ -124,7 +121,7 @@ def _concat_all_contigs(bin_folder: str, all_contigs: str) -> None:
 
 
 def _write_pruned_columns(pruned: str, tab_out: str) -> None:
-    """Drop the staxids column (keep cols 1-5,7-12) — the input taxator consumes."""
+    """Drop the staxids column (keep cols 1-5,7-12), giving the input taxator reads."""
     with open(pruned) as fh, open(tab_out, "w") as out:
         for line in fh:
             cols = line.rstrip("\n").split("\t")
@@ -142,10 +139,8 @@ def _write_mapping(pruned: str, mapping_out: str) -> None:
 def _classify_with_gtdbtk(args, settings, ckpt) -> None:
     """Classify bins with GTDB-Tk, writing the same bin_taxonomy.tab contract.
 
-    GTDB-Tk already does the marker placement and taxonomy call, so none of the
-    megablast/taxator-tk chain is needed. Its ``classify_wf`` writes per-domain summary
-    files; we merge them into the single two-column bin_taxonomy.tab the rest of MetaWrap2
-    (and users' downstream scripts) expect from this module.
+    GTDB-Tk replaces the megablast/taxator-tk chain. Its ``classify_wf`` per-domain summary files
+    are merged into the two-column bin_taxonomy.tab this module always writes.
     """
     env = optional_env_for("gtdbtk", settings, "--gtdbtk")
     ensure_dir(args.output)
@@ -227,21 +222,17 @@ def main(argv: List[str]) -> int:
             announcement("BIN CLASSIFICATION PIPELINE FINISHED SUCCESSFULLY!!!")
             return 0
 
-        # The default path, and it is the deprecated one. Said once per run rather than left in the
-        # help, because a user who never reads --help still needs to know that the taxonomy they are
-        # about to get comes from a tool with no upstream maintainer.
+        # The default path is deprecated; warn on every run, not only in --help.
         #
-        # The default has not been flipped to --gtdbtk, which would be the obvious fix, for two
-        # reasons. Flipping it turns a working install into a failing one for everyone without
-        # GTDB's reference data, and this project only moves a default on a benchmark measurement - which would need both NCBI nt and GTDB R2xx present at once to
-        # produce. Neither is a reason the default is right; both are reasons it has not moved yet.
+        # The default stays MEGABLAST + taxator-tk because switching to --gtdbtk would break
+        # installs without GTDB reference data, and defaults change only after a benchmark, which
+        # here needs both NCBI nt and GTDB R2xx installed.
         warning(
             "the MEGABLAST + taxator-tk path is deprecated: taxator-tk has had no upstream release "
-            "since 2015. It still runs and its output is unchanged, but --gtdbtk is the maintained "
-            "route and gives GTDB taxonomy, which is what the MAG literature uses.\n"
-            "Database cost either way: this path needs NCBI nt (BLASTDB, hundreds of GB) and a "
-            "taxdump; --gtdbtk needs GTDB reference data (~110 GB) and classify_wf wants a lot of "
-            "RAM. Neither is the cheap option."
+            "since 2015. It still runs with unchanged output; --gtdbtk is maintained and gives "
+            "GTDB taxonomy, which MAG studies use.\n"
+            "Databases: this path needs NCBI nt (BLASTDB, hundreds of GB) and a taxdump; "
+            "--gtdbtk needs GTDB reference data (~110 GB), and classify_wf needs a lot of RAM."
         )
 
         blastdb = settings.db("BLASTDB")
@@ -264,10 +255,7 @@ def main(argv: List[str]) -> int:
         if not dry_run():
             _concat_all_contigs(args.bins, all_contigs)
             if not (os.path.isfile(all_contigs) and os.path.getsize(all_contigs)):
-                error(
-                    "something went wrong with joining files in %s into %s"
-                    % (args.bins, all_contigs)
-                )
+                error("could not concatenate the bins in %s into %s" % (args.bins, all_contigs))
 
         raw = os.path.join(args.output, "megablast_out.raw" + TSV_SUFFIX)
         tab = os.path.join(args.output, "megablast_out" + TSV_SUFFIX)
@@ -277,9 +265,8 @@ def main(argv: List[str]) -> int:
                 comm("megablast alignment already done. Skipping...")
             else:
                 comm(
-                    "aligning %s to %s database with MEGABLAST. This is the longest step - please "
-                    "be patient. You may look at the classification progress in %s"
-                    % (all_contigs, blastdb, raw)
+                    "aligning %s to %s database with MEGABLAST. This is the longest step; "
+                    "progress is written to %s" % (all_contigs, blastdb, raw)
                 )
                 run(
                     BLASTN.format(threads=args.threads, blastdb=blastdb, query=all_contigs),
@@ -289,7 +276,7 @@ def main(argv: List[str]) -> int:
                     hint="Failed to run megablast.",
                 )
 
-            comm("removing unnecessary lines that lead to bad tax IDs (without a proper rank)")
+            comm("removing hits whose tax IDs have no proper rank")
             pruned = os.path.join(args.output, "megablast_out.pruned" + TSV_SUFFIX)
             if not dry_run():
                 with open(pruned, "w") as out:

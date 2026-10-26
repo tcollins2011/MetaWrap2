@@ -26,15 +26,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]" pytest-cov
 
-      # Gating, not advisory: the codebase is clean, so any new finding is a real regression.
-      # If a rule genuinely does not suit the project, silence it in pyproject.toml's
-      # [tool.ruff.lint] with a comment saying why - do not put "|| true" back here.
+      # Gating: the codebase is clean, so any new finding is a regression. If a rule does not
+      # suit the project, ignore it in pyproject.toml's [tool.ruff.lint] with a comment saying
+      # why; do not add "|| true" here.
       - name: Lint (ruff)
         run: ruff check .
 
-      # Formatting is checked, never applied, in CI: a job that rewrites your code and then
-      # passes teaches you nothing. Run `black . && isort .` locally (or let the pre-commit
-      # hook do it) and commit the result.
+      # Formatting is checked, not applied, in CI. Run `black . && isort .` locally (or let the
+      # pre-commit hook do it) and commit the result.
       - name: Format check (black)
         run: black --check --diff .
 
@@ -44,25 +43,25 @@ jobs:
       - name: Type check (mypy)
         run: mypy
 
-      # No METAWRAP2_CONFIG here on purpose: tests/conftest.py pins use_conda_envs per test, so
-      # the suite no longer depends on the config the machine happens to have. Writing one here
-      # instead hid that - the suite passed in CI and failed on a developer's machine.
-      # Through the same small-machine wrapper the pre-push hook uses, so a push that passed
-      # locally cannot fail here because the runner has fewer cores or less disk than a laptop.
+      # No METAWRAP2_CONFIG here: tests/conftest.py pins use_conda_envs per test, so the suite does
+      # not depend on the machine's config. (Writing one here once let the suite pass in CI and fail
+      # on a developer's machine.)
+      # Uses the same small-machine wrapper as the pre-push hook, so a push that passed locally does
+      # not fail here because the runner has fewer cores or less disk.
       - name: Unit tests (pytest + coverage)
         run: python tests/run_on_small_machine.py -q --cov=metawrap2 --cov-report=term-missing
 
       - name: Byte-compile the metawrap2 package
         run: python -m compileall -q src/metawrap2
 
-      # Every module must be able to print its own help and plan a whole run without any
-      # external tool installed. This is what catches wiring mistakes (a bad command
-      # template, a missing argument) that unit tests cannot see.
+      # Every module must print its help and plan a whole run with no external tool installed.
+      # This catches wiring mistakes (a bad command template, a missing argument) that unit tests
+      # do not.
       - name: Smoke-test the CLI
         run: |
           metawrap2 --version
           metawrap2 --help
-          # Read from the CLI's own tables, so a new module is smoke-tested the day it is added.
+          # Module names come from the CLI's tables, so new modules are tested automatically.
           modules=$(python -c "import metawrap2.cli as c; print(' '.join(c.MODULES))")
           utilities=$(python -c "import metawrap2.cli as c; print(' '.join(c.UTILITIES))")
           for module in $modules; do

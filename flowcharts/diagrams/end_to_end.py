@@ -1,4 +1,4 @@
-"""A whole study, end to end: reads, two ways to recover genomes, and everything after."""
+"""End-to-end diagram: read processing, the two genome recovery routes, and later steps."""
 
 from _grid import BLUE, GREEN, PURPLE, RED, YELLOW, W, x, y
 from drawio import Diagram

@@ -40,10 +40,9 @@ def test_consolidate_picks_higher_scoring_overlapping_bin(tmp_path):
 
 # --- the single-bin-set path -----------------------------------------------------------------
 #
-# With two or more bin sets the thresholds are applied as a side effect of consolidating. With exactly
-# one there is nothing to consolidate, and the final folder - named metawrap_70_10_bins - was being
-# filled with every input bin. On a COMEBin run that meant 376 bins in a folder claiming 70/10, of
-# which 178 actually passed.
+# With two or more bin sets, consolidation applies the thresholds. With one set there is nothing
+# to consolidate, so select_passing applies them. Without it, a COMEBin run put all 376 bins into
+# metawrap_70_10_bins, of which 178 passed 70/10.
 
 
 def test_select_passing_keeps_only_bins_over_the_threshold(tmp_path):

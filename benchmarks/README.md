@@ -25,7 +25,7 @@ metawrap2 benchmark score cami2_gi binner_set
 Nothing is downloaded on import, `list` or `run`. `fetch` downloads only after you confirm the size
 with `--yes`.
 
-## The results TSV
+## Results TSV
 
 One long-format table per dataset:
 
@@ -44,9 +44,9 @@ Scoring prints `N metric(s)` per variant. If an assessor failed, a comparison ha
 it declared; check the count before reading a ranking. After fixing the cause, `--reassess` fills
 in the missing metrics.
 
-`benchmark score --checkm2` scores bin quality with CheckM2 instead of CheckM1, for machines that
-cannot give CheckM1's pplacer stage about 40 GB per thread. Install it with
-`metawrap2 install-env checkm2`. AMBER metrics are scored against the gold standard and are not
+`benchmark score` scores bin quality with CheckM2 (`metawrap2 install-env checkm2`). `--checkm1`
+(deprecated) scores with CheckM1 on its full genome tree, whose pplacer stage needs about 40 GB per
+thread. AMBER metrics are scored against the gold standard and are not
 affected.
 
 ## Adding a dataset

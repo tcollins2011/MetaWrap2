@@ -20,14 +20,14 @@ python -m pytest -q tests/test_x.py       # one file, while you work
 metawrap2 doctor                          # check conda envs, tools and databases
 ```
 
-The suite needs no bioinformatics tools installed, and gives the same result on every machine:
+The suite needs no bioinformatics tools and gives the same result on every machine:
 
 - `tests/conftest.py` gives every test the same simulated machine (32 cores, 128 GB, no GPU, plenty
   of free disk) and the same `use_conda_envs` setting. If a test needs a different machine,
   monkeypatch `limits.machine_cores`, `limits.machine_memory_bytes` or `shutil.disk_usage` in that
   test. Mark a test that measures the real host with `@pytest.mark.real_machine`.
-- `tests/run_on_small_machine.py` runs the suite as a 2-core, 4 GB machine with a 95%-full disk, so
-  a test that passes only on a large machine fails before the push.
+- `tests/run_on_small_machine.py` runs the suite as a 2-core, 4 GB machine with a 95%-full disk. A
+  test that passes only on a large machine fails here, before the push.
 
 Two kinds of test compare outputs with recorded results:
 
@@ -60,20 +60,20 @@ new output.
 
 ## Guidelines
 
-- Keep modules flat and readable. Avoid abstractions that hide what a module runs.
+- Keep modules flat. Avoid abstractions that hide which commands a module runs.
 - A scientific default changes only on a benchmark: add the comparison to
   `benchmarks/configurations.toml`, commit the result, and record the change in the release notes.
   Open an issue first if you are unsure.
 - Add or update tests for every change.
 - Name bins with `constants.bin_filename()` and match them with `constants.BIN_EXTENSION`. The `-x`
-  flag passed to CheckM or GTDB-Tk is derived from it. With a wrong extension, zero bins are scored.
+  flag passed to CheckM or GTDB-Tk is derived from it; with a wrong extension no bins are scored.
 - `black` formats, `isort` orders imports, `ruff` lints and `mypy` type-checks. These four and
   `pytest` must pass before a push; the pre-push hook runs them, and CI runs them on Python 3.10 to
   3.14. CI checks formatting but does not reformat.
 - The hook and CI use the same tool versions, pinned in `pyproject.toml`'s dev extras and in
   `.pre-commit-config.yaml`. A test fails if the two disagree; bump both together.
-- Documentation is written plainly: present tense, one reason where a choice is surprising, and
-  no paired "X rather than Y" unless a reader would otherwise do the wrong thing.
+- Write documentation in the present tense. Give one reason where a choice is surprising. Avoid
+  paired "X rather than Y" unless a reader would otherwise do the wrong thing.
 - Every module-level import must be a declared dependency, in both `pyproject.toml` and
   `conda_pkg/meta.yaml`, which a test checks. Import an optional dependency inside the function
   that needs it.
@@ -84,9 +84,9 @@ A release updates two documents:
 
 - `CHANGELOG`: one entry per change, grouped as New, Changed, Fixed, Removed and Known issue. A
   changed default states the old value and how to get it back.
-- `docs/releases/<version>.md`, for users upgrading: what the version adds, which defaults changed
-  and the measurement behind each, and what is still open. Add the page to
-  `docs/releases/index.md` and to the `mkdocs.yml` nav in the same change.
+- `releases/<version>.md`, for users upgrading: what the version adds, which defaults changed and
+  the measurement behind each, and what is still open. Add the page to `releases/index.md` in the
+  same change.
 
 Bump the version in `pyproject.toml`, `src/metawrap2/__init__.py`, `CITATION.cff` and
 `conda_pkg/meta.yaml`. A test checks they match.

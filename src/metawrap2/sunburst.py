@@ -1,28 +1,15 @@
-"""A static wheel of the functional hierarchy, drawn from the same table Krona is given.
+"""A static PNG sunburst of the functional hierarchy, drawn from the Krona input table.
 
-``ktImportText`` writes one thing: an interactive HTML file whose wheel is drawn by JavaScript in
-the browser. Nothing on disk is an image. So a run's functional hierarchy could not appear in a
-report, a release note, a paper figure or a Slack message - the only way to look at it was to open a
-browser, and the only way to rasterise it would be to drive a headless browser, which is not a
-dependency worth taking for a picture.
+``ktImportText`` writes only an interactive HTML file drawn by JavaScript, so there is no image
+for reports or figures. This draws the same input file with matplotlib (already a dependency),
+one PNG per Krona HTML.
 
-This draws the same data with matplotlib, which is already a hard dependency (the bundled plotting
-helpers need it). One PNG per Krona HTML, from the identical input file, so the two can never
-disagree. The interactive wheel stays: it is better for exploring, this is better for showing.
-
-Three deliberate choices, each of which is a way this plot could lie:
-
-* **Scaffolding branches are kept.** BRITE's non-pathway branches - "Brite Hierarchies", "Not
-  Included in Pathway or Brite" - are the largest in the file, and dropping them to make a prettier
-  wheel would inflate every remaining percentage. The pathway-only wheel exists for readability and
-  is written as a separate file, exactly as Krona's is.
-* **Wedges are not reordered between plots.** Level A is drawn in a fixed order with a fixed colour
-  per branch name, so two samples' wheels can be put side by side and the same colour means the
-  same branch. Sorting each wheel by its own weights would make two wheels of the same cohort
-  incomparable at a glance, which is the main thing anybody wants to do with them.
-* **Small wedges are drawn but not labelled**, and the caption says how many were left unlabelled
-  and what share they hold. A wheel with 570 pathway labels is unreadable, and one that silently
-  omits the long tail misrepresents the distribution.
+* BRITE's non-pathway branches ("Brite Hierarchies", "Not Included in Pathway or Brite") are
+  kept, since dropping them would inflate the other percentages. The pathway-only wheel is a
+  separate file, as for Krona.
+* Level A is drawn in a fixed order with a fixed colour per branch, so wheels from different
+  samples can be compared side by side.
+* Small wedges are drawn without labels, and the caption gives their count and total share.
 """
 
 from __future__ import annotations
@@ -31,10 +18,8 @@ import csv
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
-#: KEGG BRITE's eight top-level branches, in KEGG's own order, each with a fixed colour. Fixed so
-#: that the same branch is the same colour in every wheel this project draws - a reader comparing
-#: two samples should not have to re-read a legend. Anything outside this list (a different
-#: hierarchy, a future BRITE revision) falls through to the overflow cycle below.
+#: KEGG BRITE's top-level branches in KEGG's order, each with a fixed colour used in every wheel.
+#: Other names (another hierarchy, a later BRITE revision) use the overflow colours below.
 LEVEL_A_COLOURS: Dict[str, str] = {
     "Metabolism": "#1f6fb4",
     "Genetic Information Processing": "#e07b39",
@@ -47,30 +32,26 @@ LEVEL_A_COLOURS: Dict[str, str] = {
     "Not Included in Pathway or Brite": "#b9bec6",
 }
 
-#: For a branch name the palette above does not know.
+#: Colours for branch names not in the palette above.
 OVERFLOW_COLOURS: Tuple[str, ...] = ("#5b8ff9", "#f6bd16", "#5ad8a6", "#945fb9", "#e8684a")
 
-#: A wedge smaller than this share of the total is drawn without a label. 2% of a 3,000-gene
-#: distribution is 60 genes: worth drawing, too small to label legibly at this figure size.
+#: Wedges below this share of the total are drawn without a label (2% of 3,000 genes is 60).
 LABEL_THRESHOLD = 0.02
 
-#: The outer ring needs a higher bar than the middle one. BRITE has 570 pathways and a real genome
-#: touches a few hundred of them, so labelling everything above 2% there still produces overlapping
-#: text; 3% keeps the ring readable. Measured on one CAMI2 bin: 228 of 251 pathway wedges fall below
-#: 2%, and they hold the long tail rather than the signal.
+#: Label threshold for the outer (pathway) ring. BRITE has 570 pathways and a genome touches a
+#: few hundred, so labels at 2% still overlap. On one CAMI2 bin, 228 of 251 pathway wedges were
+#: below 2%.
 OUTER_LABEL_THRESHOLD = 0.03
 
-#: Rings, outermost last. Three is what BRITE gives: branch -> chemical process -> pathway.
+#: Number of rings, as in BRITE: branch -> chemical process -> pathway.
 MAX_DEPTH = 3
 
 
 def read_krona_text(path: str) -> List[Tuple[float, Tuple[str, ...]]]:
     """Read ``ktImportText``'s input: a weight, then one column per level.
 
-    The same file :func:`metawrap2.hierarchy.write_krona_input` writes, read back rather than
-    recomputed, so the picture cannot drift from the wheel beside it. Rows whose weight does not
-    parse are skipped rather than treated as zero: a zero is a statement that a branch is absent,
-    and a malformed line is not.
+    This is the file :func:`metawrap2.hierarchy.write_krona_input` writes. Rows whose weight does
+    not parse are skipped.
     """
     rows: List[Tuple[float, Tuple[str, ...]]] = []
     with open(path) as fh:
@@ -92,19 +73,16 @@ def read_krona_text(path: str) -> List[Tuple[float, Tuple[str, ...]]]:
 def collapse_ring(
     rows: Sequence[Tuple[float, Tuple[str, ...]]], depth: int
 ) -> List[Tuple[Tuple[str, ...], float]]:
-    """Total weight per distinct path prefix of length *depth*, in parent order.
+    """Return the total weight per path prefix of length *depth*, in parent order.
 
-    Parent order, not weight order: a child wedge has to sit inside the parent it belongs to, so the
-    rings are built by walking the level-A order once and nesting beneath each branch. Sorting each
-    ring independently by weight would draw children under the wrong parents - the classic way a
-    hand-rolled sunburst ends up decorative rather than true.
+    Sorted by parent so each child wedge is drawn inside its parent; sorting each ring by weight
+    would misplace children.
     """
     totals: Dict[Tuple[str, ...], float] = {}
     for weight, labels in rows:
         if len(labels) < depth:
-            # A path that stops short of this ring: counted at the depth it reaches, so the ring
-            # totals still sum to the whole. Without this, every ring below the shallowest path
-            # would silently total less than the one above it.
+            # A path shorter than this ring is padded with blank labels, so every ring sums to
+            # the same total.
             key = labels + ("",) * (depth - len(labels))
         else:
             key = labels[:depth]
@@ -119,7 +97,7 @@ def _branch_rank(name: str) -> int:
 
 
 def colour_for(name: str, used: Optional[Dict[str, str]] = None) -> str:
-    """A stable colour per level-A branch name."""
+    """Return a stable colour for a level-A branch name."""
     if name in LEVEL_A_COLOURS:
         return LEVEL_A_COLOURS[name]
     table = used if used is not None else {}
@@ -129,7 +107,7 @@ def colour_for(name: str, used: Optional[Dict[str, str]] = None) -> str:
 
 
 def _shade(colour: str, ring: int) -> str:
-    """Lighten a branch's colour for each ring outwards, so nesting reads without a legend."""
+    """Lighten a branch's colour for each ring outwards."""
     colour = colour.lstrip("#")
     rgb = [int(colour[i : i + 2], 16) for i in (0, 2, 4)]
     fraction = 0.0 if ring == 0 else 0.22 * ring
@@ -145,9 +123,7 @@ def draw(
 ) -> Optional[str]:
     """Draw the wheel to *out_path*. Returns the path written, or None for an empty distribution.
 
-    Returns rather than raises on an empty distribution: a genome with no KO at all is a real
-    result, and the module that calls this should report it as such rather than treat a blank wheel
-    as a failure.
+    An empty distribution (a genome with no KO) is a valid result, so this does not raise.
     """
     rows = [(weight, labels) for weight, labels in rows if weight > 0 and labels]
     if not rows:
@@ -173,9 +149,7 @@ def draw(
         for key, weight in wedges:
             name = key[-1]
             share = weight / total
-            # The innermost ring is never labelled in place: all eight branch names would be drawn
-            # at the centre on top of each other. They go in the legend, which also fixes the
-            # colours in one place for a reader comparing two wheels.
+            # The innermost ring's names would overlap at the centre, so they go in the legend.
             if ring == 0 or not name or share < _threshold(ring):
                 if ring == MAX_DEPTH - 1 and name:
                     outer_unlabelled += 1
@@ -220,8 +194,7 @@ def draw(
         )
     note = "%s %s; rings: branch, chemical process, pathway" % (_number(total), unit_label)
     if outer_unlabelled:
-        # Counted on the outer ring only. Summing unlabelled wedges across rings would count the
-        # same weight up to three times and report a share above 100%.
+        # Counted on the outer ring only; summing across rings would count weight repeatedly.
         note += "\n%d pathway wedge(s) under %.0f%% are drawn unlabelled (%.1f%% of the total)" % (
             outer_unlabelled,
             100.0 * _threshold(MAX_DEPTH - 1),
@@ -243,7 +216,7 @@ def draw_from_krona_text(path: str, out_path: str = "", title: str = "") -> Opti
 
 
 def _threshold(ring: int) -> float:
-    """The share a wedge needs before it is labelled, which is higher on the crowded outer ring."""
+    """Return the share a wedge needs to be labelled; higher on the outer ring."""
     return OUTER_LABEL_THRESHOLD if ring == MAX_DEPTH - 1 else LABEL_THRESHOLD
 
 

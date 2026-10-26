@@ -1,15 +1,13 @@
 # CheckM2, alone, because it cannot be solved with anything else here.
 #
-# Not a size decision: CheckM2 and the CheckM1/GUNC/DAS Tool set have no common solution at all
-# (verified against conda-forge + bioconda), so this is the one split in the bin-QC workflow that is
-# forced rather than chosen. It is also the faster scorer of the two and the one every benchmark in
-# this repo uses, so it is worth the second install.
+# CheckM2 and the CheckM1/GUNC/DAS Tool set have no common solution (checked against conda-forge
+# + bioconda), so the solver forces this split. CheckM2 is also the faster scorer and the one every
+# benchmark in this repo uses.
 name: metawrap2-checkm2
 channels:
   - conda-forge
   - bioconda
 dependencies:
-  # >=1.1.0, not >=1.0.2: in 1.0.2 and earlier the per-genome score depends on what else was in the
-  # batch, so the same bin scores differently depending on the company it kept. Every quality number
-  # this pipeline reports comes from here, which makes that floor the wrong one to allow.
+  # >=1.1.0, not >=1.0.2: in 1.0.2 and earlier a genome's score depends on the other genomes in the
+  # batch. Every quality number this pipeline reports comes from here.
   - checkm2 >=1.1.0

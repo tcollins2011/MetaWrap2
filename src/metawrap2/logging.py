@@ -3,21 +3,18 @@
 Everything MetaWrap2 says goes through the ``metawrap2`` logger. It carries two handlers:
 
 **the console** (stdout)
-    renders banner-boxed messages in the established MetaWrap2 style, so the on-screen output a
-    user recognises is unchanged;
+    renders banner-boxed messages in the MetaWrap2 style;
 
 **the run log** (``<output>/metawrap2.log``)
     the same messages as plain timestamped lines, plus every line of every external tool's
-    stdout and stderr - so one file tells the whole story of a run in order, which neither
-    ``run.stdout`` nor ``run.stderr`` does on its own.
+    stdout and stderr, in order.
 
-``run.stdout`` / ``run.stderr`` are still written separately, because a tool's stdout is
-sometimes voluminous and it is useful to have the raw streams unmixed.
+``run.stdout`` / ``run.stderr`` are still written separately, so the raw tool streams are
+available unmixed.
 
-Why a Logger rather than ``print``: levels (a tool's chatter is DEBUG, a module's progress is
-INFO, a problem is WARNING/ERROR) mean the console can stay readable while the file keeps
-everything; and anything that wants to add a destination - a syslog, a GUI, a test capture -
-attaches a handler instead of patching print.
+A Logger is used instead of ``print`` so that levels (tool output is DEBUG, progress INFO,
+problems WARNING/ERROR) keep the console readable while the file keeps everything, and other
+destinations can be added as handlers.
 
 The banner helpers are the module's public interface and are used everywhere:
 
@@ -44,13 +41,12 @@ LOGGER_NAME = "metawrap2"
 #: Name of the combined log written into a run's output directory.
 RUN_LOG_NAME = "metawrap2.log"
 
-#: Cap on the run log before it rolls over to metawrap2.log.1, .2, ... A normal run produces a
-#: few hundred KB, so this is reached only by a tool whose output has gone wrong - which is
-#: exactly when an unbounded log turns a failed step into a full filesystem.
+#: Size at which the run log rolls over to metawrap2.log.1, .2, ... A normal run writes a few
+#: hundred KB, so this only applies to a tool with runaway output, which could otherwise fill the
+#: filesystem.
 MAX_LOG_BYTES = 256 * 1024 * 1024  # 256 MB
 
-#: How many rolled-over logs to keep. The oldest output of a runaway tool is the interesting
-#: part (where it started going wrong), but keeping the whole thing defeats the cap.
+#: How many rolled-over logs to keep.
 LOG_BACKUPS = 3
 
 #: A message's banner delimiter travels as a logging "extra" so the console handler can draw
@@ -73,8 +69,7 @@ _file_handler: Optional[logging.Handler] = None
 #: width is border rather than text.
 _EDGE = 5
 
-#: The space that actually exists between the two borders. Text wider than this cannot be padded
-#: into the box at all, so it is the hard ceiling on the wrap column whatever the style says.
+#: The space between the two borders, and so the upper limit on the wrap column.
 _INNER = WIDTH - 2 * _EDGE
 
 #: The column the text is wrapped to: the style's line length, clamped to what fits.
@@ -84,28 +79,22 @@ _WRAP = min(MAX_LINE, _INNER)
 def wrap_banner_text(message: str) -> List[str]:
     """Break *message* into the lines that go inside the banner, each at most :data:`_WRAP` wide.
 
-    Explicit newlines are honoured as line breaks, because every caller that writes one means one:
-    a sentence, then a command to copy, then a closing sentence. Each of those segments is then
-    wrapped to the text column.
+    Explicit newlines are kept as line breaks, and each segment is then wrapped to the text
+    column.
 
-    The wrapping has to happen *before* the padding, which is what this exists to guarantee.
-    The previous rendering padded each line to the box width first, measuring it with
-    ``len(segment)`` while the segment still had the author's newlines inside it - so the right
-    border was positioned from the full length of a multi-line segment and ended up printed after
-    the first break, on a line of its own. Three of the four lines of `quickstart`'s closing
-    banner came out malformed that way, and that banner is the last thing a first install prints.
+    Wrapping happens before padding. Padding first, measured on a segment that still contained
+    newlines, misplaced the right border (it broke three of four lines in `quickstart`'s closing
+    banner).
     """
     lines: List[str] = []
     for segment in message.split("\n"):
         text = segment.strip()
         if not text:
-            # An intentional blank line between paragraphs; kept so the box keeps the author's
-            # spacing rather than running two paragraphs together.
+            # Keep intentional blank lines between paragraphs.
             lines.append("")
             continue
-        # break_long_words and break_on_hyphens are both off: the long tokens in these messages
-        # are paths, URLs and commands the user is meant to copy, and a copy with a line break
-        # through the middle of it does not run.
+        # break_long_words and break_on_hyphens are off: long tokens are paths, URLs and commands
+        # the user copies, which must not be split.
         lines.extend(
             textwrap.wrap(text, width=_WRAP, break_long_words=False, break_on_hyphens=False)
         )
@@ -115,13 +104,11 @@ def wrap_banner_text(message: str) -> List[str]:
 def format_comment(message: str, delim: str) -> str:
     """Return the banner-boxed rendering of *message*.
 
-    Historically this lived in ``print_comment.py`` (Python 2), where ``/2`` was integer
-    division; ``str.center`` reproduces that spacing exactly (the odd space goes to the right)
-    without the float that crashed under Python 3.
+    Ported from ``print_comment.py`` (Python 2), where ``/2`` was integer division;
+    ``str.center`` gives the same spacing (the odd space goes to the right).
 
-    A single word longer than the text column is left to overrun the right border rather than be
-    cut in two: an unbreakable token here is a path or a command, and a user who pastes half of
-    one gets a confusing error instead of an ugly line.
+    A single word longer than the text column overruns the right border instead of being split,
+    because such tokens are paths or commands the user may copy.
     """
     border = delim * _EDGE
     out = ["\n" + delim * WIDTH]
@@ -134,11 +121,9 @@ def format_comment(message: str, delim: str) -> str:
 class ConsoleHandler(logging.StreamHandler):
     """A stream handler that resolves ``sys.stdout`` at emit time, not at construction.
 
-    ``logging.StreamHandler(sys.stdout)`` captures the stream object. Anything that later
-    replaces ``sys.stdout`` - a test harness capturing output, a caller redirecting it - leaves
-    the handler writing to the old object, which at best goes unseen and at worst raises
-    because the stream has been closed. Looking it up per record costs nothing and means the
-    logger always writes wherever stdout currently points.
+    ``logging.StreamHandler(sys.stdout)`` keeps the stream object, so a later replacement of
+    ``sys.stdout`` (test capture, redirection) leaves it writing to an old or closed stream.
+    Looking it up per record avoids that.
     """
 
     @property
@@ -205,10 +190,8 @@ def configure_run_log(path: Optional[str]) -> None:
     if not path:
         return
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    # Rotating, not plain: the log holds every line of every tool, and one pathological tool
-    # (a progress bar that defeats the noise filter, a solver looping on a warning) can write
-    # tens of GB - filling the very filesystem the run needs to finish. The cap is generous
-    # enough that a normal run never rotates, so the common case is still one readable file.
+    # Rotating: one tool with runaway output (a progress bar the noise filter misses, a solver
+    # looping on a warning) can write tens of GB. A normal run never reaches the cap.
     handler = logging.handlers.RotatingFileHandler(
         path, maxBytes=MAX_LOG_BYTES, backupCount=LOG_BACKUPS
     )
@@ -221,8 +204,8 @@ def configure_run_log(path: Optional[str]) -> None:
 def log_tool_output(line: str, stream: str = "stdout") -> None:
     """Record one line of an external tool's output in the run log (not on the console).
 
-    The runner streams tool output to the screen itself, live and unbuffered; duplicating it
-    through the console handler would double every line.
+    The runner already streams tool output to the screen; sending it through the console handler
+    would print every line twice.
     """
     text = line.rstrip("\n")
     if text:

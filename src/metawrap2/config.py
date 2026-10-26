@@ -6,8 +6,8 @@ for the config file: an explicit ``--config`` path, then ``$METAWRAP2_CONFIG``, 
 ``~/.metawrap2/config.toml``, then the packaged default. Values a user does not set fall
 back to the in-code module defaults.
 
-Also provides the preflight check: report missing tools/databases (and whether a module's
-conda env exists) *before* a long run starts, instead of failing hours in.
+Also provides the preflight check, which reports missing tools, databases and conda envs before
+a long run starts.
 """
 
 from __future__ import annotations
@@ -27,132 +27,120 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - exercised on <3.11
     import tomli as _toml
 
-# One conda env per *workflow*, not per module or per tool. Several modules share an env whenever
-# they run the same tools or run in sequence, which is most of them: the alternative - one env per
-# module - meant solving the same aligner/samtools graph five times and keeping five copies of it
-# current, for no benefit a user ever sees.
-#
-# The grouping was chosen by trying it: every combination below was solved against conda-forge +
-# bioconda before being written down, and the two places the pipeline is split in an awkward-looking
-# way (CheckM2 away from CheckM1, GTDB-Tk away from taxator-tk) are splits the solver forced, not
-# preferences. See envs/<name>.yaml, where each file says what it holds and why.
+# One conda env per workflow. Modules that run the same tools or run in sequence share an env, so
+# the aligner/samtools stack is solved once. Every grouping below was solved against conda-forge +
+# bioconda; CheckM2 is split from CheckM1 and GTDB-Tk from taxator-tk because the solver found no
+# common solution. Each envs/<name>.yaml describes its contents.
 MODULE_ENVS: Dict[str, str] = {
-    # Everything that touches reads: QC, assembly, re-assembly, and the blob plot. They share the
-    # aligner stack and SPAdes, and in a normal study they run one after another.
+    # Read-level modules: QC, assembly, re-assembly and the blob plot. They share the aligners and
+    # SPAdes and usually run in sequence.
     "read_qc": "metawrap2-reads",
     "assembly": "metawrap2-reads",
     "reassemble_bins": "metawrap2-reads",
     "blobology": "metawrap2-reads",
-    # Everything that turns contigs into a MAG catalogue: binning, cross-sample coverage,
-    # dereplication, abundance. coverage shares binning's aligner and samtools; dereplicate and
-    # quant_bins add three single static binaries (skani, sylph, salmon) that cost nothing to carry.
+    # Contigs to MAG catalogue: binning, cross-sample coverage, dereplication, abundance. coverage
+    # shares binning's aligner and samtools; dereplicate and quant_bins add three small static
+    # binaries (skani, sylph, salmon).
     "binning": "metawrap2-bins",
     "coverage": "metawrap2-bins",
     "dereplicate": "metawrap2-bins",
     "quant_bins": "metawrap2-bins",
-    # Scoring and consolidating bins: CheckM1, GUNC, DAS Tool. GUNC runs by default here, so it was
-    # never genuinely optional.
+    # Bin consolidation and the CheckM1 scorer (--checkm1): CheckM1, GUNC, DAS Tool. GUNC runs by
+    # default. The default scorer, CheckM2, is in metawrap2-checkm2 (OPTIONAL_ENVS).
     "bin_refinement": "metawrap2-binqc",
     # Read- and bin-level taxonomy.
     "classify_bins": "metawrap2-taxonomy",
     "kraken2": "metawrap2-taxonomy",
     # Gene calling: Prokka and Bakta solve together, so --bakta needs no second install. `annotate`
-    # calls genes in-process with Pyrodigal and only needs this env when --bakta is given.
+    # calls genes in-process with Pyrodigal and needs this env only for --bakta.
     "annotate_bins": "metawrap2-annotate",
     "annotate": "metawrap2-annotate",
-    # Only for Krona's ktImportText, which draws the hierarchy plots. Everything pathways computes
-    # is in-process over vendored KEGG data, so this env is for the picture, not the numbers.
+    # Only for Krona's ktImportText (hierarchy plots). The pathway computation runs in-process over
+    # vendored KEGG data.
     "pathways": "metawrap2-taxonomy",
     # AMRFinderPlus, hAMRonization and argNorm. RGI is not in here; see envs/amr.yaml.
     "amr": "metawrap2-amr",
-    # geNomad and CheckV. One env because they are two halves of one answer and are always run
-    # together; see envs/viruses.yaml for the numpy pin they need.
+    # geNomad and CheckV, which always run together. See envs/viruses.yaml for their numpy pin.
     "viruses": "metawrap2-viruses",
-    # SingleM gets its own env: it pins a narrow dependency set and is the only tool here that
-    # needs the GTDB marker metapackage, so a user who never asks "what did my bins miss" should
-    # not carry it.
+    # SingleM has its own env: it pins a narrow dependency set and is the only user of the GTDB
+    # marker metapackage.
     "appraise": "metawrap2-singlem",
-    # Nonpareil lives with the reads: it is the only other thing in the pipeline that reads a raw
-    # read file and nothing else, and in a study it runs beside read_qc. It brings r-base along
-    # (bioconda builds it against R, which carries its model-fitting package), which costs install
-    # size and nothing else - the estimates here are computed in Python, see metawrap2.nonpareil.
+    # Nonpareil reads only raw reads and runs beside read_qc. Bioconda builds it against R, so it
+    # brings r-base; the estimates themselves are computed in Python (metawrap2.nonpareil).
     "nonpareil": "metawrap2-reads",
-    # Pangenomes and phylogenies over a cohort's MAGs: they share a pipeline (one writes the
-    # alignment the other reads), so they share an env.
+    # Pangenomes and phylogenies over a cohort's MAGs. One writes the alignment the other reads.
     "pangenome": "metawrap2-comparative",
     "phylogeny": "metawrap2-comparative",
-    # inStrain, and the aligners that feed it. Its own env on a pin: inStrain resolves to Python
-    # 3.8, which nothing else here can be built against.
+    # inStrain and its aligners. Separate because inStrain resolves to Python 3.8.
     "strains": "metawrap2-strains",
-    # MMseqs2 comes with the annotate env already - Bakta pulls it in - so the bin-free path needs
-    # no extra install.
+    # MMseqs2 is already in the annotate env (a Bakta dependency).
     "catalogue": "metawrap2-annotate",
 }
 
-#: Every env a full install builds, each once. MODULE_ENVS has more keys than values now, so anything
-#: that iterates it to build or check envs has to go through this or it does the same solve five times.
+#: Every env a full install builds, each listed once. Iterate this, not MODULE_ENVS, when building
+#: or checking envs.
 ALL_MODULE_ENVS = sorted(set(MODULE_ENVS.values()))
 
-# Envs that are still separate, and why each one is. Two of these are forced by the solver and the
-# third by install size; none of them is a second copy of a tool that could have shared a home.
+# Envs kept separate from the module envs, with the reason for each. Most are opt-in; the ones in
+# DEFAULT_OPTIONAL_ENVS are used by a default run.
 OPTIONAL_ENVS: Dict[str, str] = {
-    # Benchmark-only: AMBER is reached by `metawrap2 benchmark score`, never by a module. It also
-    # pins matplotlib below 3.9, which nothing else here wants.
+    # Benchmark-only: AMBER is used by `metawrap2 benchmark score`, not by a module. It pins
+    # matplotlib below 3.9.
     "amber": "metawrap2-benchmark-amber",
-    # Forced. CheckM2 has no common solution with the CheckM1 + GUNC + DAS Tool set.
+    # CheckM2 has no common solution with the CheckM1 + GUNC + DAS Tool set. It is the default bin
+    # scorer, so it is in DEFAULT_OPTIONAL_ENVS.
     "checkm2": "metawrap2-checkm2",
-    # The three learned binners, together, because they are all pytorch and solve as one. Separate
-    # from metawrap2-bins on size: pytorch is ~1.5 GB and nobody who only wants metaBAT2 should wait
-    # for it. The env's pytorch is CUDA-capable, so `--device cuda` needs no second install.
+    # The three pytorch-based binners, which solve together. Separate from metawrap2-bins because
+    # pytorch is ~1.5 GB. The pytorch build is CUDA-capable, so `--device cuda` needs no extra
+    # install.
     "semibin2": "metawrap2-learned",
     "vamb": "metawrap2-learned",
     "comebin": "metawrap2-learned",
-    # TRACS, the second strain backend. Its own env on a pin, like RGI's: it resolves an older
-    # scientific-python stack than inStrain's env holds.
+    # TRACS, the second strain backend. It resolves an older scientific-python stack than
+    # inStrain's env.
     "tracs": "metawrap2-tracs",
-    # eggNOG-mapper 2.1.x imports distutils, which Python 3.12 removed, so it needs a Python
-    # ceiling that the shared annotate env must not inherit on behalf of bakta, dbCAN and GECCO.
+    # eggNOG-mapper 2.1.x imports distutils (removed in Python 3.12). The Python ceiling it needs
+    # is kept out of the annotate env used by bakta, dbCAN and GECCO.
     "eggnog": "metawrap2-eggnog",
-    # Forced. RGI pins older dependencies than AMRFinderPlus and hAMRonization resolve to, so the
-    # three cannot share an env without downgrading the default backend to satisfy the opt-in one.
+    # RGI pins older dependencies than AMRFinderPlus and hAMRonization; sharing an env would
+    # downgrade the default backend.
     "rgi": "metawrap2-rgi",
-    # Forced. GTDB-Tk has no common solution with taxator-tk, and it is the one tool here with a
-    # 100+ GB reference database, so a user who wants it is opting in already.
+    # GTDB-Tk has no common solution with taxator-tk. Its reference database is 100+ GB.
     "gtdbtk": "metawrap2-gtdbtk",
 }
 
-# Tools that live in an OPTIONAL_ENVS environment rather than a module's own, keyed the same way
-# OPTIONAL_ENVS is. Kept separate because `doctor` probes a tool inside the env that is supposed to
-# hold it: listing gunc under bin_refinement would report every healthy install as broken, since
-# bin_refinement's env holds CheckM and nothing else.
+#: OPTIONAL_ENVS keys that a default run uses, and the modules whose default run uses each:
+#: bin_refinement scores bins with CheckM2 unless --checkm1, reassemble_bins always. `quickstart` builds
+#: these with those modules, and `doctor` counts a missing one as a failure. (The learned binners of
+#: the default binning tier are added by quickstart from binning.DEFAULT_PRESET.)
+DEFAULT_OPTIONAL_ENVS: Dict[str, Tuple[str, ...]] = {
+    "checkm2": ("bin_refinement", "reassemble_bins"),
+}
+
+# Tools that live in an OPTIONAL_ENVS env, keyed like OPTIONAL_ENVS. `doctor` probes each tool
+# inside the env that holds it, so these must not be listed under the module's own env.
 OPTIONAL_ENV_TOOLS: Dict[str, List[str]] = {
     "amber": ["amber.py"],
     "checkm2": ["checkm2"],
-    # All three learned binners share one env, so `doctor` probes all three whichever key it is
-    # asked about: a half-built metawrap2-learned should report as broken, not as fine.
-    # "SemiBin2" is capitalised and is the only entry point the 2.5.0 package installs; COMEBin's
-    # entry point is a bash script, name and extension included - there is no "comebin" on PATH.
+    # The learned binners share one env, so every key probes all three and a partly built env
+    # reports as broken. "SemiBin2" is the only entry point the 2.5.0 package installs. COMEBin's
+    # entry point is the bash script run_comebin.sh; there is no "comebin" executable.
     "semibin2": ["SemiBin2", "vamb", "run_comebin.sh"],
     "vamb": ["SemiBin2", "vamb", "run_comebin.sh"],
     "comebin": ["SemiBin2", "vamb", "run_comebin.sh"],
     "gtdbtk": ["gtdbtk"],
     "rgi": ["rgi"],
     "tracs": ["tracs"],
-    # Both, because the downloader is what install-db reaches for and emapper is what annotate
-    # reaches for: an env with only one of them working is broken for whichever comes second.
+    # install-db uses the downloader and annotate uses emapper, so both are required.
     "eggnog": ["emapper.py", "download_eggnog_data.py"],
 }
 
-# The same two tables keyed by the yaml name an opt-in env is built from (`bin_refinement-gunc`)
-# rather than by the module flag. That name is what a user types at `install-env` and `doctor`, and
-# it is not a key of MODULE_ENVS - so without these, both commands fall back to "a module I have
-# never heard of", which for doctor meant reporting a freshly built env as "0/0 tools OK" without
-# probing anything in it.
-#: Which module's flag selects each opt-in env. Stated rather than parsed out of the env name: the
-#: names used to be ``metawrap2-<module>-<tool>``, so `doctor` split on the dash to find the owner,
-#: and consolidating the envs left ``metawrap2-learned`` with no second dash - which did not fail,
-#: it silently reported no opt-in envs at all. An env with no module (AMBER, reached only by
-#: `benchmark score`) maps to None and is skipped.
+# OPTIONAL_ENVS_BY_MODULE and OPTIONAL_TOOLS_BY_MODULE below re-key the two tables above by env
+# base name, which is what a user types at `install-env` and `doctor`. Without them `doctor`
+# reported an opt-in env as "0/0 tools OK" without probing it.
+#: The module whose flag selects each opt-in env. Listed explicitly because the env names no
+#: longer encode the module. An env with no module (AMBER, used only by `benchmark score`) maps to
+#: None and is skipped.
 OPTIONAL_ENV_OWNERS: Dict[str, Optional[str]] = {
     "amber": None,
     "checkm2": "bin_refinement",
@@ -177,28 +165,24 @@ OPTIONAL_TOOLS_BY_MODULE: Dict[str, List[str]] = {
 # External tools each module invokes (used by the preflight check).
 MODULE_TOOLS: Dict[str, List[str]] = {
     "read_qc": ["trim_galore", "fastp", "fastqc", "bmtagger.sh", "bowtie2"],
-    # flye is listed: --long-reads is a documented path of this module, and a check that passes
-    # without it would send a long-read user into a run that dies at the assembler.
+    # flye is needed for --long-reads.
     "assembly": ["metaspades.py", "megahit", "quast", "bwa", "bwa-mem2", "minimap2", "flye"],
-    # bowtie2 was listed here but the module never invoked it, and the aligner benchmark gave no
-    # reason to start: it costs what bwa costs and agrees with it less well than minimap2.
+    # bowtie2 is not used: in the aligner benchmark it cost as much as bwa and agreed with it less
+    # well than minimap2.
     "binning": ["metabat2", "run_MaxBin.pl", "concoct", "minimap2", "bwa", "bwa-mem2", "samtools"],
-    # The binning tools it shares, minus the binners: it measures coverage and nothing else.
-    # fairy moved in with the aligners: it is one static binary and the route it serves
-    # (--coverage fairy) should not need a second install command to try.
+    # binning's aligners without the binners. fairy (--coverage fairy) is a single static binary
+    # installed with them.
     "coverage": ["minimap2", "bwa", "bwa-mem2", "samtools", "fairy"],
-    # gunc and DAS_Tool moved in with CheckM1: GUNC runs by default unless --skip-gunc, and
-    # DAS Tool is an alternative consolidator for this same step.
+    # GUNC runs by default unless --skip-gunc; DAS Tool is an alternative consolidator.
     "bin_refinement": ["checkm", "gunc", "DAS_Tool"],
     "reassemble_bins": ["spades.py", "bwa", "samtools", "minimap2"],
     "quant_bins": ["sylph", "salmon", "coverm"],
     "dereplicate": ["skani"],
     "classify_bins": ["blastn", "taxator", "binner", "taxknife"],
     "annotate_bins": ["prokka", "bakta"],
-    # `annotate` needs nothing external for gene calling - Pyrodigal is a Python dependency - so
-    # only the optional --bakta path has a tool to check for.
-    # run_dbcan (--cazy) and gecco (--bgc) ship in this env too. GECCO needs no database, which is
-    # why it has no DB_KEYS entry: an install of this env can run it immediately.
+    # Gene calling uses Pyrodigal in-process, so only the optional paths need tools: bakta
+    # (--bakta), run_dbcan (--cazy) and gecco (--bgc). GECCO needs no database, so it has no
+    # DB_KEYS entry.
     "annotate": ["bakta", "run_dbcan", "gecco"],
     "nonpareil": ["nonpareil"],
     "strains": ["inStrain", "minimap2", "samtools"],
@@ -207,70 +191,65 @@ MODULE_TOOLS: Dict[str, List[str]] = {
     "appraise": ["singlem"],
     "pathways": ["ktImportText"],
     "amr": ["amrfinder"],
-    # cctyper is in this env too but is not listed: it only runs for --crispr-hosts, and a check
-    # that fails for a user who never asked for host prediction is a check that gets ignored.
+    # cctyper is also in this env but is not listed, because it runs only for --crispr-hosts.
     "viruses": ["genomad", "checkv"],
     "catalogue": ["mmseqs"],
     "kraken2": ["kraken2", "ktImportText"],
-    # Same aligner set as binning, for the same reason: blobology maps reads back only to get
-    # per-contig abundance for the plot's y-axis, so it shares the registry in metawrap2.aligners.
+    # Same aligners as binning: blobology maps reads back for per-contig abundance (the plot's
+    # y-axis), using the registry in metawrap2.aligners.
     "blobology": ["blastn", "minimap2", "bwa", "bwa-mem2", "samtools"],
 }
 
 # Database keys and which module(s) use them.
 DB_KEYS = {
     "KRAKEN2_DB": "kraken2",
-    # The databaseNmers.kmer_distrib files, one per read length. `bracken-build` writes them
-    # into the KRAKEN2_DB directory and they are only valid for that database, so this key
-    # usually repeats it. The pre-built k2_standard download already ships 50 to 300 bp.
+    # The databaseNmers.kmer_distrib files, one per read length. `bracken-build` writes them into
+    # the KRAKEN2_DB directory and they are valid only for that database, so this key usually
+    # repeats it. The pre-built k2_standard download ships 50 to 300 bp.
     "BRACKEN_DB": "kraken2 (--bracken; Bracken k-mer distributions)",
     "BMTAGGER_DB": "read_qc (host removal)",
     "BLASTDB": "blobology / classify_bins",
     "BLASTDB_NAME": "blobology / classify_bins (db name inside BLASTDB; default nt)",
     "TAXDUMP": "blobology / classify_bins",
-    "CHECKM_DB": "bin_refinement (CheckM1 reference data)",
-    "CHECKM2DB": "bin_refinement (--checkm2 DIAMOND reference database)",
+    "CHECKM_DB": "bin_refinement / binning --run-checkm with --checkm1 (CheckM1 reference data)",
+    "CHECKM2DB": "bin_refinement / reassemble_bins (CheckM2 DIAMOND reference database)",
     "GUNC_DB": "bin_refinement (GUNC reference database, unless --skip-gunc)",
     "BAKTA_DB": "annotate / annotate_bins (--bakta)",
-    # The KOfam HMM profiles (profiles.tar.gz, 1.5 GB) and their per-profile thresholds (ko_list),
-    # both from `metawrap2 install-db kofam`. The thresholds decide what counts as a hit.
+    # The KOfam HMM profiles (profiles.tar.gz, 1.5 GB) and per-profile hit thresholds (ko_list),
+    # both from `metawrap2 install-db kofam`.
     "KOFAM_DB": "annotate (--kofam), the KOfam directory: profiles/ and ko_list",
     # BRITE ko00001, projected to one row per (KO, pathway), from `metawrap2 install-db kegg`.
     "KEGG_BRITE": "pathways (the functional hierarchy and Krona plots)",
-    # dbCAN's HMMs, DIAMOND databases and substrate mapping. Fetched from dbCAN's pinned S3 release
-    # rather than its `db_current` HTTP path, which is a moving snapshot: a CAZyme family call is
-    # only reproducible against the release that made it.
+    # dbCAN's HMMs, DIAMOND databases and substrate mapping. Fetched from a pinned dbCAN release
+    # because the `db_current` HTTP path is a moving snapshot and CAZyme calls depend on the
+    # release.
     "DBCAN_DB": "annotate (--cazy), the dbCAN database directory",
-    # Pfam-A's HMMs, for `annotate --pfam`. The release matters: Pfam renumbers and merges families
-    # between releases, so a domain call is only reproducible against the release that made it -
-    # which is why the installer reads the version out of relnotes.txt and the table records it.
+    # Pfam-A's HMMs, for `annotate --pfam`. Pfam renumbers and merges families between releases,
+    # so the installer reads the version from relnotes.txt and the output table records it.
     "PFAM_DB": "annotate (--pfam), the directory holding Pfam-A.hmm",
-    # eggNOG's annotation SQLite and its DIAMOND protein database, for `annotate --eggnog`. About
-    # 50 GB on disk, fetched by `install-db eggnog` from eggnog5.embl.de (not by eggNOG-mapper's own
-    # download_eggnog_data.py, whose hardcoded host no longer answers). The release is part of the answer: an annotation is transferred from
-    # an orthologous group, and eggNOG renumbers groups between releases, so every row records the
-    # database version that produced it.
-    "EGGNOG_DB": "annotate (--eggnog), the eggNOG data directory: eggnog.db and eggnog_proteins.dmnd",
-    # Point this at a dated release rather than the `latest` symlink amrfinder_update writes: an ARG
-    # call is only as datable as its database, and a rerun against a moved symlink is a different
-    # experiment wearing the same name.
+    # eggNOG's annotation SQLite and DIAMOND protein database, for `annotate --eggnog`. About 50 GB,
+    # fetched by `install-db eggnog` from eggnog5.embl.de; eggNOG-mapper's download_eggnog_data.py
+    # uses a hardcoded host that no longer responds. eggNOG renumbers orthologous groups between
+    # releases, so every row records the database version.
+    "EGGNOG_DB": "annotate (--eggnog), the eggNOG data directory: eggnog.db and "
+    "eggnog_proteins.dmnd",
+    # Point this at a dated release, not the `latest` symlink amrfinder_update writes, so reruns
+    # use the same database.
     "AMRFINDER_DB": "amr (AMRFinderPlus reference database)",
-    # geNomad's database also carries its plasmid markers, so `amr`'s mobility work and `viruses`
-    # share this one download rather than needing two.
+    # geNomad's database includes plasmid markers, so `amr` mobility calls and `viruses` share it.
     "GENOMAD_DB": "viruses (geNomad marker database; also plasmid calls for amr)",
     "CHECKV_DB": "viruses (CheckV reference database)",
-    # CARD's data, for `amr --rgi`. Versioned by CARD itself (4.0.2 as of writing) and released
-    # every few months, so the directory name should carry the version rather than say `latest`.
+    # CARD's data, for `amr --rgi`. CARD releases every few months (4.0.2 at the time of writing);
+    # name the directory by version, not `latest`.
     "CARD_DB": "amr (--rgi; CARD data directory holding card.json)",
     "GTDBTK_DATA_PATH": "classify_bins (--gtdbtk)",
     # The GTDB marker metapackage SingleM profiles against: 2.2 GB compressed, 9.7 GB unpacked.
-    # Its release is part of the answer - a per-cell fraction is only as current as the reference
-    # it was measured against - so point this at the versioned directory, not at a `latest` link.
+    # Results depend on its release, so point this at the versioned directory, not a `latest` link.
     "SINGLEM_METAPACKAGE": "appraise (SingleM GTDB marker metapackage)",
 }
 
-# Databases only an opt-in code path needs; absent ones are not counted as a failure by
-# `metawrap2 check` unless that path was actually requested.
+# Databases only an opt-in code path needs. `metawrap2 check` counts an absent one as a failure
+# only when that path was requested.
 OPTIONAL_DB_KEYS = {
     "BAKTA_DB",
     "KOFAM_DB",
@@ -288,16 +267,11 @@ OPTIONAL_DB_KEYS = {
     "BRACKEN_DB",
 }
 
-# Keys whose value is a setting, not a filesystem path - checking them for existence is
-# meaningless and reporting them as MISSING is just confusing.
+# Keys whose value is a setting, not a filesystem path, so they are not checked for existence.
 NON_PATH_DB_KEYS = {"BLASTDB_NAME"}
 
-#: Database keys whose value names a *file*, not a directory holding files.
-#:
-#: GUNC takes ``--db_file`` and nothing else, so install-db correctly points GUNC_DB at the
-#: ``.dmnd`` itself. Everything that checked a configured database assumed a directory, so a perfectly
-#: good GUNC install reported as "MISSING ... not a directory" in `doctor` for as long as it existed -
-#: a false alarm on the one database whose correct value could not be a directory.
+#: Database keys whose value is a file, not a directory. GUNC takes only ``--db_file``, so
+#: install-db points GUNC_DB at the ``.dmnd`` itself.
 FILE_DB_KEYS = {"GUNC_DB"}
 
 
@@ -308,24 +282,29 @@ class ConfigError(Exception):
 @dataclass
 class Settings:
     databases: Dict[str, str] = field(default_factory=dict)
-    #: The per-module default thread count, or None when the config does not set one - in which
-    #: case the answer is the ``[limits]`` budget. This has to be None rather than 1: with 1 as
-    #: the default, "the user did not configure threads" and "the user asked for one thread" are
-    #: the same value, so the budget could never be used as the fallback.
+    #: The per-module default thread count, or None when unset, in which case the ``[limits]``
+    #: budget applies. None (not 1) keeps "unset" distinct from "one thread".
     threads: Optional[int] = None
     use_conda_envs: bool = True
-    #: Where modules put temporary space. Empty means "inside the run's output directory".
-    #: On a cluster this matters: /tmp is often small and node-local, and a metaSPAdes
-    #: intermediate can be hundreds of GB. See metawrap2.scratch.
+    #: Where modules put temporary space. Empty means inside the run's output directory. On a
+    #: cluster /tmp is often small and node-local, and metaSPAdes intermediates can reach hundreds
+    #: of GB. See metawrap2.scratch.
     scratch_dir: str = ""
     #: Set true to skip the pre-flight disk-space estimate.
     skip_space_check: bool = False
-    #: Set true to make a failed disk-space estimate stop the run rather than warn. Worth doing
-    #: on shared infrastructure, where one run filling the filesystem is everyone's problem.
+    #: Set true to make a failed disk-space estimate stop the run instead of warning. Useful on
+    #: shared filesystems.
     strict_space_check: bool = False
-    #: The whole run's resource budget - threads, memory, disk ceiling, GPUs. ``threads`` above is
-    #: still the per-module default a user asks for; this is the ceiling it is capped to, and the
-    #: pool a cohort driver divides among concurrent samples. See metawrap2.limits.
+    #: Seconds of silence before a step prints a progress heartbeat; 0 turns heartbeats off. None
+    #: means unset, and :data:`metawrap2.logfilter.HEARTBEAT_SECONDS` applies.
+    heartbeat_seconds: Optional[float] = None
+    #: How long a step must run before a low CPU-utilisation warning, and the fraction of its thread
+    #: grant below which it warns. 0 seconds turns the warning off. None means the default in
+    #: :mod:`metawrap2.usage`.
+    low_utilisation_after_seconds: Optional[float] = None
+    low_utilisation_fraction: Optional[float] = None
+    #: The run's resource budget: threads, memory, disk ceiling, GPUs. ``threads`` is capped to
+    #: it, and a cohort driver divides it among concurrent samples. See metawrap2.limits.
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     overrides: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
@@ -349,14 +328,18 @@ def find_config(explicit: Optional[str] = None) -> Optional[str]:
     return None
 
 
-#: The keys ``[settings]`` understands. A key not in here was silently ignored before, so a
-#: typo like ``use_conda_env`` looked like it worked and then did nothing.
+#: The keys ``[settings]`` understands. Any other key is reported as an error.
 SETTINGS_KEYS = {
     "threads": "default thread count for every module",
     "use_conda_envs": "run tools inside the metawrap2-* conda envs (true) or off PATH (false)",
     "scratch_dir": "where modules put temporary space",
     "skip_space_check": "skip the pre-flight disk-space estimate",
     "strict_space_check": "let a failed disk-space estimate stop the run, not just warn",
+    "heartbeat_seconds": "seconds of silence before a step says it is still running (0 for never)",
+    "low_utilisation_after_seconds": "how long a step must run before its core usage is worth "
+    "warning about (0 for never)",
+    "low_utilisation_fraction": "the share of its thread grant a step has to keep busy to avoid "
+    "that warning",
 }
 
 #: The top-level tables a config may contain.
@@ -374,32 +357,24 @@ def _did_you_mean(name: str, known: Iterable[str]) -> str:
     return " (did you mean %r?)" % matches[0] if matches else ""
 
 
-#: Database keys that are recognised but no longer used, and what to do instead. These are worth
-#: naming rather than treating as a typo: they are the leftovers in a config carried forward from
-#: an older setup, and they are harmless, so noticing them must not stop a run.
+#: Database keys that are recognised but no longer used, with what to use instead. They come from
+#: older configs, so they produce a note and do not stop a run.
 RETIRED_DB_KEYS = {
-    "KRAKEN_DB": "the KRAKEN1 module no longer exists - use KRAKEN2_DB with the kraken2 module",
+    "KRAKEN_DB": "the KRAKEN1 module was removed; use KRAKEN2_DB with the kraken2 module",
 }
 
 
 def check_config(data: Dict[str, Any], path: str = "") -> Tuple[List[str], List[str]]:
     """Check a parsed config. Returns ``(problems, notes)``.
 
-    *problems* stop a run; *notes* are printed and then ignored. Which is which follows from what
-    the mistake costs:
+    *problems* stop a run; *notes* are printed and ignored.
 
-    * An unknown **table**, or an unknown ``[settings]`` or ``[limits]`` key, is a problem. That
-      namespace is small, entirely MetaWrap2's own, and a typo there means the setting silently
-      does not apply - indistinguishable from never having written it. A did-you-mean makes it a
-      five-second fix. ``[limits]`` values are checked too, not just their names, because a
-      malformed budget is worth catching in the first second rather than the first hour.
-    * An unknown or retired **database** key is only a note. ``[databases]`` is deliberately open,
-      so a locally patched module may look up a key nothing here has heard of; and a leftover key
-      from an older configuration is harmless. Refusing to run ``binning`` because the config
-      still mentions a database that only a removed module ever read would be absurd.
+    * An unknown table, or an unknown ``[settings]`` or ``[limits]`` key, is a problem, reported
+      with a did-you-mean suggestion. ``[limits]`` values are validated as well.
+    * An unknown or retired ``[databases]`` key is a note. That table is open so that locally
+      patched modules can add keys, and retired keys are harmless.
 
-    Reporting everything at once matters for the same reason it does for inputs: one round trip,
-    not one finding per re-run.
+    All findings are returned together.
     """
     problems: List[str] = []
     notes: List[str] = []
@@ -429,8 +404,7 @@ def check_config(data: Dict[str, Any], path: str = "") -> Tuple[List[str], List[
         try:
             config_from_table(limits)
         except LimitsError as exc:
-            # The message already names the key, so the file goes in front rather than trailing
-            # after the offending value, where it reads as part of it.
+            # The message names the key; put the file name in front of it.
             problems.append("%s%s" % (("%s: " % path) if path else "", exc))
     databases = data.get("databases")
     if isinstance(databases, dict):
@@ -456,8 +430,8 @@ def check_config(data: Dict[str, Any], path: str = "") -> Tuple[List[str], List[
 def load_settings(explicit: Optional[str] = None, strict: bool = True) -> Settings:
     """Load Settings from the resolved config file (or defaults if none found).
 
-    With *strict* (the default), a config containing unknown tables or ``[settings]`` keys is an
-    error rather than being silently half-applied. Pass ``strict=False`` to load it anyway.
+    With *strict* (the default), unknown tables or ``[settings]`` keys raise ConfigError. Pass
+    ``strict=False`` to load the config anyway.
     """
     path = find_config(explicit)
     if not path:
@@ -466,8 +440,7 @@ def load_settings(explicit: Optional[str] = None, strict: bool = True) -> Settin
         data = _toml.load(fh)
     problems, notes = check_config(data, path)
     for note in notes:
-        # A note is not worth failing over, but it is worth saying once, where the user will see
-        # it next to the run it affects.
+        # Notes are printed once and do not fail the load.
         print("NOTE: %s" % note, file=sys.stderr)
     if problems and strict:
         raise ConfigError(
@@ -479,11 +452,20 @@ def load_settings(explicit: Optional[str] = None, strict: bool = True) -> Settin
     try:
         limits = config_from_table(dict(data.get("limits", {})))
     except LimitsError:
-        # Only reachable with strict=False, where the problem was already reported above. Falling
-        # back to the default budget is safer than propagating: the caller asked to run anyway,
-        # and the defaults are conservative.
+        # Only reachable with strict=False, after the problem was reported. Use the conservative
+        # default budget.
         limits = LimitsConfig()
     configured_threads = data.get("settings", {}).get("threads")
+    settings_table = data.get("settings", {})
+
+    def optional_float(key: str) -> Optional[float]:
+        """A numeric setting, or None when it is absent.
+
+        0 turns these settings off, so an absent key stays None and the in-code default applies.
+        """
+        value = settings_table.get(key)
+        return None if value is None else float(value)
+
     return Settings(
         databases=dict(data.get("databases", {})),
         threads=int(configured_threads) if configured_threads is not None else None,
@@ -491,6 +473,9 @@ def load_settings(explicit: Optional[str] = None, strict: bool = True) -> Settin
         scratch_dir=str(data.get("settings", {}).get("scratch_dir", "") or ""),
         skip_space_check=bool(data.get("settings", {}).get("skip_space_check", False)),
         strict_space_check=bool(data.get("settings", {}).get("strict_space_check", False)),
+        heartbeat_seconds=optional_float("heartbeat_seconds"),
+        low_utilisation_after_seconds=optional_float("low_utilisation_after_seconds"),
+        low_utilisation_fraction=optional_float("low_utilisation_fraction"),
         limits=limits,
         overrides={k: dict(v) for k, v in data.get("modules", {}).items()},
     )
@@ -499,19 +484,14 @@ def load_settings(explicit: Optional[str] = None, strict: bool = True) -> Settin
 def env_dirs() -> List[str]:
     """Directories conda/mamba keep environments in, most authoritative first.
 
-    Asking the solver (``conda env list``) is the only reliable answer, because envs can
-    live anywhere ``envs_dirs`` points - not just under the active prefix. The path guesses
-    are a fallback for when neither conda nor mamba is on PATH, and they are only appended in
-    that case: the docstring said so for three releases while the code appended them always,
-    which widened every existence check by five directories nobody had asked about. One of
-    them belonged to a second conda installation on the reporter's machine, so
-    ``conda_env_exists('metawrap2-amr')`` answered True for an env ``mamba run -n`` could not
-    enter, and `doctor` reported every tool in it as missing from PATH.
+    ``conda env list`` is the authoritative source, because envs can live anywhere ``envs_dirs``
+    points. The default install locations are added only when no env manager is on PATH; adding
+    them otherwise can pick up envs from a second conda installation that ``mamba run -n`` cannot
+    enter.
     """
     dirs: List[str] = []
-    #: True once an env manager has actually listed its environments. Tracked separately from
-    #: ``dirs`` being non-empty so that "conda is here and has no envs yet" is distinguishable
-    #: from "nothing authoritative answered", which is the only case the guesses are for.
+    #: True once an env manager has listed its environments, even if it listed none. The path
+    #: guesses are used only when this stays False.
     listed = False
     for prog in ("conda", "mamba", "micromamba"):
         exe = shutil.which(prog)
@@ -549,9 +529,7 @@ def env_dirs() -> List[str]:
         if os.path.basename(os.path.dirname(prefix)) == "envs":
             dirs.append(os.path.dirname(prefix))
     if not listed:
-        # Only now, with no manager on PATH to ask: these are the five default install locations,
-        # and on a machine that has an env manager they are at best a slower way to get the same
-        # answer and at worst a different installation's envs.
+        # No env manager on PATH: fall back to the default install locations.
         for guess in (
             "~/miniforge3/envs",
             "~/miniconda3/envs",
@@ -569,10 +547,8 @@ def env_dirs() -> List[str]:
     return unique
 
 
-#: Environment names from MetaWrap2 2.0.x, which had one env per tool rather than one per workflow.
-#: Mapped rather than rejected because they are what the 2.0.x documentation says to type, what a
-#: 2.0.x error message quotes back, and therefore what an upgrading user reaches for. Two issue
-#: reports from 2.0.1 users named the first two of these exactly.
+#: Environment names from MetaWrap2 2.0.x, which had one env per tool. They are mapped to the
+#: current envs because the 2.0.x documentation and error messages use them.
 LEGACY_ENV_ALIASES: Dict[str, str] = {
     "annotate_bins-bakta": "metawrap2-annotate",
     "annotate_bins-prokka": "metawrap2-annotate",
@@ -589,11 +565,9 @@ LEGACY_ENV_ALIASES: Dict[str, str] = {
 def legacy_module_for(name: str) -> Optional[str]:
     """The module a 2.0.x env name belonged to, when that module still exists.
 
-    The 2.0.x names are ``<module>-<tool>`` - ``bin_refinement-checkm2``,
-    ``annotate_bins-bakta`` - so the module is the part before the first dash. Worth recovering
-    because `check` and `doctor` are asked about *modules*: given only the environment, they have no
-    tool list and no databases to look at, and report "OK" having checked nothing. Checking the
-    module the name came from is the answer the user wanted.
+    The 2.0.x names are ``<module>-<tool>`` (``bin_refinement-checkm2``), so the module is the
+    part before the first dash. `check` and `doctor` use it to find the module's tools and
+    databases.
     """
     if name not in LEGACY_ENV_ALIASES:
         return None
@@ -601,21 +575,16 @@ def legacy_module_for(name: str) -> Optional[str]:
     return module if module in MODULE_ENVS else None
 
 
-#: Every registry that maps something a user or a module can name onto a conda env. Listed in one
-#: place because the bug this exists to prevent was caused by there being several, keyed differently,
-#: with each consumer reading a different subset:
+#: ENV_REGISTRIES (below) lists every registry that maps a name onto a conda env:
 #:
 #: * ``MODULE_ENVS`` is keyed by module (``binning``).
-#: * ``OPTIONAL_ENVS`` is keyed by **tool** (``semibin2``, ``vamb``, ``comebin``, ``amber``) and is
+#: * ``OPTIONAL_ENVS`` is keyed by tool (``semibin2``, ``vamb``, ``comebin``, ``amber``) and is
 #:   what ``optional_env_for`` reads at run time.
-#: * ``OPTIONAL_ENVS_BY_MODULE`` is keyed by **env base name** (``learned``, ``benchmark-amber``).
+#: * ``OPTIONAL_ENVS_BY_MODULE`` is keyed by env base name (``learned``, ``benchmark-amber``).
 #: * ``LEGACY_ENV_ALIASES`` is keyed by the 2.0.x per-tool env name.
 #:
-#: ``OPTIONAL_ENVS`` and ``OPTIONAL_ENVS_BY_MODULE`` overlap but do not agree: ``semibin2`` is a key
-#: of the first and not the second, so a resolver reading only the second refused a name the running
-#: pipeline itself uses. That is the same defect as the one 2.0.1 shipped - a name the runtime needs
-#: and the installer cannot reach - and it is why resolution reads all of them rather than whichever
-#: one the author of a given call site happened to remember.
+#: The keys of ``OPTIONAL_ENVS`` and ``OPTIONAL_ENVS_BY_MODULE`` differ (``semibin2`` is only in
+#: the first), so name resolution must read all of them.
 def tools_for_name(name: str) -> List[str]:
     """The executables to verify when a user asks about *name*.
 
@@ -633,10 +602,8 @@ def tools_for_name(name: str) -> List[str]:
     if module:
         return list(MODULE_TOOLS.get(module, []))
 
-    # An env's own base name - "bins", "reads", "binqc", "taxonomy". Several modules share each of
-    # those, so the tools to verify are the union over every module that uses it. Without this,
-    # `check bins` resolved the env, found no tool list and reported OK having verified nothing -
-    # the same vacuous answer a 2.0.x alias used to give.
+    # An env base name ("bins", "reads", "binqc", "taxonomy"): return the union of tools over
+    # every module that uses that env.
     env = resolve_env_name(name)
     if env:
         shared: List[str] = []
@@ -664,8 +631,7 @@ ENV_REGISTRIES: Tuple[Mapping[str, str], ...] = (
 def resolve_env_name(name: str) -> Optional[str]:
     """The conda env *name* refers to, or None if it refers to nothing.
 
-    Five things a user or a module can name, all of which appear in the docs, in a module's own
-    code, or in an older release's output:
+    Accepted names:
 
     * a module - ``binning`` -> ``metawrap2-bins``
     * a tool with its own env - ``semibin2`` -> ``metawrap2-learned``
@@ -673,11 +639,8 @@ def resolve_env_name(name: str) -> Optional[str]:
     * an opt-in env - ``learned`` -> ``metawrap2-learned``
     * a 2.0.x per-tool env name - ``bin_refinement-checkm2`` -> ``metawrap2-checkm2``
 
-    Every command that turns a name into an environment goes through this. Three used to do it
-    themselves and disagreed in three different ways: `install-env` raised KeyError, `doctor`
-    invented ``metawrap2-<whatever was typed>`` and reported it missing, and `check` declared
-    "Preflight OK" having matched nothing. Returning None is what lets all of them refuse a name
-    rather than invent an answer for it.
+    Every command that maps a name to an env uses this, so all of them reject unknown names the
+    same way.
     """
     for registry in ENV_REGISTRIES:
         found = registry.get(name)
@@ -715,12 +678,10 @@ def explain_unknown_name(name: str) -> List[str]:
 def conda_env_exists(env: str) -> bool:
     """True if a conda env named *env* exists in any of conda's environment directories.
 
-    "Any" is deliberate and includes installations other than the active one: ``conda env list``
-    reads ``~/.conda/environments.txt``, a machine-global registry, so an env built by a second
-    conda install is visible here and is perfectly usable - *by prefix*. Anything that then acts
-    on the env must go through :func:`env_prefix` and pass ``-p <prefix>``, because ``-n <name>``
-    resolves only against the active root. Answering existence across all installations and
-    executing against one is what made a fresh install report every module broken.
+    This includes other conda installations: ``conda env list`` reads the machine-wide
+    ``~/.conda/environments.txt``. Such an env is usable only by prefix, so callers that run in it
+    must use :func:`env_prefix` and ``-p <prefix>``; ``-n <name>`` resolves only against the
+    active root.
     """
     return any(os.path.isdir(os.path.join(d, env)) for d in env_dirs())
 
@@ -755,10 +716,8 @@ def active_conda_root() -> Optional[str]:
     """The conda/mamba installation that ``-n <name>`` resolves names against, or None.
 
     ``MAMBA_ROOT_PREFIX`` and ``CONDA_ROOT`` name it outright; otherwise it is derived from
-    ``CONDA_PREFIX``, which is the *active env* - ``<root>/envs/<name>`` for a named env, and the
-    root itself for the base env. Worth knowing because an env under a different root is the one
-    case where existence and executability disagree, and a user cannot tell from the env name
-    that the env they are being shown is not theirs.
+    ``CONDA_PREFIX``, the active env: ``<root>/envs/<name>`` for a named env, the root itself for
+    base. Used to flag envs that belong to a different conda installation.
     """
     for var in ("MAMBA_ROOT_PREFIX", "CONDA_ROOT"):
         value = os.environ.get(var, "")
@@ -777,8 +736,7 @@ def active_conda_root() -> Optional[str]:
 def prefix_in_active_root(prefix: str) -> bool:
     """Whether *prefix* lives under the active conda root, so that ``-n`` could have found it.
 
-    True when there is no active root to compare against: with nothing to contradict, reporting
-    an env as foreign would be a guess, and a wrong guess printed next to a path reads as a fact.
+    True when there is no active root to compare against.
     """
     root = active_conda_root()
     if not root:
@@ -790,9 +748,8 @@ def prefix_in_active_root(prefix: str) -> bool:
 def tool_in_env(tool: str, env: str) -> Optional[bool]:
     """Whether *tool* is executable inside *env*, or None if the env does not exist.
 
-    Looks for ``<prefix>/bin/<tool>`` rather than shelling out to ``mamba run -n env which`` - the
-    answer is the same and a `check` over every module would otherwise pay a conda activation per
-    tool.
+    Looks for ``<prefix>/bin/<tool>`` instead of running ``mamba run -n env which``, which would
+    cost one conda activation per tool.
     """
     prefix = env_prefix(env)
     if prefix is None:
@@ -803,17 +760,9 @@ def tool_in_env(tool: str, env: str) -> Optional[bool]:
 def check_tools(modules: List[str]) -> List[Tuple[str, str, bool]]:
     """Return (tool, module, reachable) for the tools used by the given modules.
 
-    *reachable* means reachable **the way the run will reach it**: inside the module's conda env
-    when envs are in use, and on PATH when they are not. That distinction is the whole point of
-    this function rather than a refinement of it.
-
-    Checking PATH unconditionally is what it used to do, and it produced the worst possible answer
-    for a user with a tool installed system-wide and the env missing: `check` reported the tool
-    present, and the run then died inside ``mamba run`` with "The given prefix does not exist". The
-    check passed on a question nobody had asked.
-
-    An env that does not exist yields False here rather than falling back to PATH, because a run
-    with conda envs enabled will not fall back either.
+    *reachable* means reachable the way the run will look for it: inside the module's conda env
+    when envs are in use, on PATH otherwise. A missing env yields False with no PATH fallback,
+    matching what the run does.
     """
     settings = load_settings()
     results = []

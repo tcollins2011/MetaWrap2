@@ -1,18 +1,13 @@
 """One scratch directory policy, and a disk-space check before a long step starts.
 
-**Scratch.** Modules used to scatter their temporary space: some under the output directory,
-some via a tool's own ``--tmp-dir``, some wherever the system temp happens to be. On a cluster
-that matters - ``/tmp`` is frequently small, node-local, and not where you want a 200 GB SPAdes
-intermediate. ``[settings] scratch_dir`` in ``metawrap2.toml`` (or ``$METAWRAP2_SCRATCH``) now
-decides for every module; unset, it stays inside the run's output directory, which is the safe
-default because that is the one place the user definitely chose.
+Scratch: ``[settings] scratch_dir`` in ``metawrap2.toml`` (or ``$METAWRAP2_SCRATCH``) sets the
+temporary space for every module. On clusters ``/tmp`` is often small and node-local, too small for
+a 200 GB SPAdes intermediate. When unset, scratch goes inside the run's output directory.
 
-**Disk space.** metaSPAdes on 34M read pairs needs far more scratch than its final output, and
-discovering that by filling the filesystem several hours in is expensive. :func:`check_space`
-estimates a step's need from its inputs and refuses to start if the filesystem cannot plausibly
-hold it. The estimates are deliberately rough multipliers of input size - being approximately
-right before the run is worth much more than being exact afterwards - and
-``skip_space_check = true`` under ``[settings]`` overrides them.
+Disk space: metaSPAdes on 34M read pairs needs far more scratch than its final output.
+:func:`check_space` estimates a step's need from its inputs as a rough multiple of input size and
+refuses to start if the filesystem cannot hold it. ``skip_space_check = true`` under
+``[settings]`` turns the check off.
 """
 
 from __future__ import annotations
@@ -21,9 +16,9 @@ import os
 import shutil
 from typing import Dict, Iterable, List, Optional, Tuple
 
-#: Rough peak scratch+output need per module, as a multiple of total input size. Derived from
-#: observed runs (metaSPAdes is by far the worst: error correction writes a corrected copy of
-#: the library, then the graph stages exceed it again).
+#: Rough peak scratch+output need per module, as a multiple of total input size, from observed
+#: runs. metaSPAdes is the largest: error correction writes a corrected copy of the library, and
+#: the graph stages use more again.
 SPACE_MULTIPLIERS: Dict[str, float] = {
     "assembly": 12.0,
     "read_qc": 4.0,
@@ -47,9 +42,8 @@ def scratch_root(settings: object, output_dir: str) -> str:
     """The directory a module should put its temporary space in.
 
     Resolution order: ``$METAWRAP2_SCRATCH``, then ``[settings] scratch_dir``, then a
-    ``.metawrap2_tmp`` directory inside *output_dir*. The output directory is the default
-    because it is the one location the user explicitly chose, and it is therefore the one
-    guaranteed to have been sized for this run.
+    ``.metawrap2_tmp`` directory inside *output_dir*, the one location the user chose for
+    this run.
     """
     configured = os.environ.get(_SCRATCH_ENV) or getattr(settings, "scratch_dir", "") or ""
     if configured:
@@ -116,11 +110,10 @@ def human(size: Optional[float]) -> str:
 
 
 def check_space(module: str, inputs: Iterable[str], targets: Iterable[str]) -> Tuple[bool, str]:
-    """Is there plausibly room for *module*? Returns ``(ok, message)``.
+    """Check that there is likely room for *module*. Returns ``(ok, message)``.
 
     *targets* are the directories that will be written to (output and scratch, which may be on
-    different filesystems). Each is checked against the estimate separately, since the run
-    needs room on whichever is tightest.
+    different filesystems). Each filesystem is checked against the full estimate.
     """
     needed = estimate_bytes(module, inputs)
     problems: List[str] = []

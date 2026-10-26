@@ -1,33 +1,23 @@
-"""MetaWrap2 coverage module: one cross-sample depth table for a whole cohort, in N alignments.
+"""MetaWrap2 coverage module: one cross-sample depth table for a cohort, in N alignments.
 
-Multi-sample binning wants every contig's depth in every sample, and the obvious way to get that
-costs N^2 alignments: map all N samples' reads against each of the N per-sample assemblies. For a
-twenty-sample cohort that is four hundred alignments to produce twenty depth tables.
+Multi-sample binning needs every contig's depth in every sample. Mapping all N samples against
+each of the N per-sample assemblies costs N^2 alignments (400 for a 20-sample cohort).
 
-The multi-split design gets the same tables for N. Concatenate the per-sample assemblies into one
-contig catalogue, map each sample's reads once against that catalogue, build one depth table over
-it, then split the table back into one slice per source assembly. Each sample's binning then runs
-on its own contigs with every sample's coverage, via ``metawrap2 binning --depth``.
+This module does it in N: concatenate the per-sample assemblies into one contig catalogue, map
+each sample's reads once against it, build one depth table, then split the table into one slice
+per source assembly. Each sample is then binned on its own contigs with every sample's coverage,
+via ``metawrap2 binning --depth``.
 
-What makes the split safe is the naming. Contig names collide across assemblies - every assembler
-numbers from one - so each contig is prefixed with its assembly's label before concatenation, and
-the prefix is what the split demultiplexes on. That is only unambiguous if no original name
-contains the separator, so this module refuses to build a catalogue where one does rather than
-guessing later; see SEPARATOR.
+Contig names collide across assemblies, so each contig is prefixed with its assembly's label
+before concatenation and the split demultiplexes on that prefix. A catalogue is refused if any
+original name contains the separator; see SEPARATOR. The slices carry the original contig names,
+because they are used with the original assemblies.
 
-The slices carry the original contig names, not the prefixed ones, because they are handed to a
-binning run over the original assembly. A table of prefixed names against an unprefixed assembly is
-exactly the well-formed-but-wrong input that `binning`'s own check exists to catch.
+``--coverage align`` (default) maps the reads; ``--coverage fairy`` estimates depth from k-mer
+sketches without alignment. fairy writes the same contig x sample layout metaBAT2 reads, so the
+split and everything downstream are the same; see COVERAGE_ROUTES for the accuracy cost.
 
-How the depth itself is measured is a separate choice from all of that: ``--coverage align`` maps
-the reads (the default, and what every binner's published accuracy was measured with), while
-``--coverage fairy`` estimates depth from k-mer sketches and never aligns anything. The table, the
-split and everything downstream are identical either way, because fairy writes the same
-contig x sample layout metaBAT2 reads; see COVERAGE_ROUTES for what the
-cheaper route gives up.
-
-This file is meant to be read and edited: the commands live in the COMMANDS block below and the
-tunable values in the CONSTANTS block.
+Commands are in the COMMANDS block below and tunable values in the CONSTANTS block.
 """
 
 from __future__ import annotations
@@ -70,53 +60,43 @@ from ._common import (
 )
 from .binning import DEPTH_HEADER, SAMTOOLS_INDEX, depth_means
 
-#: Shared with `binning`: the aligner and samtools this needs are
-#: exactly the ones that module installs, and a second environment holding the same four tools would
-#: be a second solve to keep current for no gain. `install-env coverage` therefore builds (or finds)
-#: metawrap2-bins - see _env_yaml, which resolves the yaml from the env name for this reason.
+#: Shared with `binning`, which installs the same aligner and samtools. `install-env coverage`
+#: builds or finds metawrap2-bins (see _env_yaml).
 CONDA_ENV = MODULE_ENVS["coverage"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 #: The k-mer route (--coverage fairy): sketch each sample's reads once, then estimate every contig's
-#: depth from the sketches. ``-S`` names the sketches after the samples, which is what puts sample
-#: names in the table's columns where the alignment route puts BAM paths. Defaults left alone on
-#: purpose: ``-m 95`` is fairy's own warning not to lower it, and ``-c``/``-k`` are what its published
+#: depth from the sketches. ``-S`` names the sketches after the samples, so the table's columns
+#: carry sample names where the alignment route has BAM paths. fairy's defaults are kept: its
+#: documentation warns against lowering ``-m 95``, and ``-c``/``-k`` are the values its published
 #: accuracy was measured at.
 FAIRY_SKETCH_PAIRED = "fairy sketch -1 {r1} -2 {r2} -S {names} -d {sketches} -t {threads}"
 FAIRY_SKETCH_SINGLE = "fairy sketch -r {reads} -S {names} -d {sketches} -t {threads}"
 FAIRY_COVERAGE = "fairy coverage -t {threads} {sketches} {catalogue} -o {depth}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
-#: How coverage is measured. ``align`` maps the reads and reads the alignments, which is what every
-#: binner's published accuracy was measured with. ``fairy`` estimates depth from k-mer sketches
-#: instead and skips alignment entirely - minutes rather than hours for a cohort - at the cost of
-#: resolving nothing below ~95% ANI, so a strain that differs from the contig it came from is
-#: credited to it or to nothing.
+#: How coverage is measured. ``align`` maps the reads, which is how every binner's published
+#: accuracy was measured. ``fairy`` estimates depth from k-mer sketches without alignment (minutes
+#: instead of hours for a cohort) but resolves nothing below ~95% ANI, so a strain that differs
+#: from its contig is credited to that contig or to nothing.
 #:
-#: ``align`` is the default on measurement, not on caution, and the measurement is now the one that
-#: matters. Fed to metaBAT2 on one CAMI2 GI sample, single-sample fairy scored AMBER F1 0.212 against
-#: minimap2's 0.452 - half the bins - and raising its ANI threshold made agreement worse, not better.
-#: What that could not settle was fairy's actual claim, a multi-sample one, which needs the
-#: cross-sample table this module exists to build.
+#: ``align`` is the default on measured results. With metaBAT2 on one CAMI2 GI sample,
+#: single-sample fairy scored AMBER F1 0.212 against minimap2's 0.452, and raising its ANI
+#: threshold made agreement worse. In benchmark B5 (three CAMI2 samples, everything else
+#: identical), fairy built the cohort table for 0.04 CPU-hours against minimap2's 2.26 (57x
+#: cheaper), but the catalogue held 27 high-quality MAGs against 37, with 76% of bins passing GUNC
+#: against 87%.
 #:
-#: Settled by benchmark B5 over three CAMI2 samples, every other token held identical: fairy builds the
-#: cohort table for 0.04 cpu-hours against minimap2's 2.26, 57x cheaper, and the catalogue that comes
-#: out holds 27 high-quality MAGs against 37, with 76% of its bins passing GUNC against 87%. In the
-#: cohort setting it was supposed to win in, it loses 10 genomes out of 37.
-#:
-#: So the route stays, opt-in, and is closed as a default candidate rather than merely unmeasured. Note
-#: what the loss is *not*: the variance ablation showed metaBAT2's variance column carries no signal at
-#: this sample count, so what fairy gets wrong is its mean depths (Pearson 0.237 against bwa), and an
-#: alignment-free estimator with accurate means would still be worth having.
+#: The route remains opt-in. The variance ablation showed metaBAT2's variance column carries no
+#: signal at this sample count, so fairy's loss comes from its mean depths (Pearson 0.237 against
+#: bwa).
 COVERAGE_ROUTES = ("align", "fairy")
 DEFAULT_ROUTE = "align"
 #: Where the fairy route keeps its per-sample sketches, inside the work directory.
 SKETCH_DIR = "sketches"
-#: Separates an assembly's label from the original contig name in the catalogue. ``~`` because it is
-#: legal in a fasta header, has no meaning to any aligner or to samtools, and essentially never
-#: appears in an assembler's contig names - SPAdes, MEGAHIT and Flye all use letters, digits, ``_``
-#: and ``.``. It is a flag rather than a constant only so that a cohort whose names do contain it has
-#: a way out; the names are checked either way, because a separator inside a name would make the
-#: split silently cut in the wrong place.
+#: Separates an assembly's label from the original contig name in the catalogue. ``~`` is legal in
+#: a fasta header, means nothing to aligners or samtools, and does not appear in SPAdes, MEGAHIT or
+#: Flye contig names. It is configurable for cohorts whose names contain it; names are checked
+#: either way, because a separator inside a name would make the split cut in the wrong place.
 SEPARATOR = "~"
 #: What the catalogue and the tables are called inside the output directory.
 CATALOGUE = "catalogue.fa"
@@ -125,8 +105,7 @@ DEPTH_DIR = "depth"
 #: Where --split-bams writes one directory per assembly label.
 BAMS_DIR = "bams"
 WORK_DIR = "work_files"
-#: Written beside the slices so a later run - or a human - can map a prefixed catalogue contig back
-#: to its assembly without re-deriving the labels from the filenames.
+#: Written beside the slices; maps each assembly label to its assembly and depth table.
 ASSEMBLIES_TABLE = "assemblies.tsv"
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -169,7 +148,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         choices=COVERAGE_ROUTES,
         default=DEFAULT_ROUTE,
         help="how depth is measured: align the reads (default) or estimate it from k-mer "
-        "sketches with fairy, which is far faster and resolves nothing below ~95%% ANI",
+        "sketches with fairy (much faster, but does not resolve anything below ~95%% ANI)",
     )
     p.add_argument(
         "--separator",
@@ -187,11 +166,9 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--split-bams",
         action="store_true",
         help="also write one BAM per assembly per sample under <out>/" + BAMS_DIR + "/<label>/, "
-        "with this assembly's contigs named as the assembly names them. That is what the BAM-reading "
-        "binners need - SemiBin2, VAMB, COMEBin and CONCOCT cannot use a depth table - so it is how "
-        "a cohort binned from one set of alignments reaches them (`binning --bams`). Costs about "
-        "what the catalogue BAMs cost in disk; the extraction itself reads each record once, through "
-        "the index",
+        "with contigs named as in that assembly. SemiBin2, VAMB, COMEBin and CONCOCT read BAMs "
+        "and cannot use a depth table; pass these to them with `binning --bams`. Uses about as "
+        "much disk as the catalogue BAMs; extraction reads each record once, through the index",
     )
     p.add_argument(
         "--keep-catalogue",
@@ -204,10 +181,10 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         type=percent(),
         default=_depth.PERCENT_IDENTITY,
         metavar="PERCENT",
-        help="minimum alignment identity for a read to count toward a contig's depth. 90 beats jgi's "
-        "97 on every measure taken: 88 bins against 74, more pure, and 47 clean high-quality MAGs "
-        "against 35 - because on strain-rich data a tight floor removes signal rather than separating "
-        "strains. Pass 97 to reproduce a jgi depth table, or 0 for no filter",
+        help="minimum alignment identity for a read to count toward a contig's depth (default "
+        "90). Against jgi's 97, 90 gave 88 bins instead of 74, purer bins, and 47 clean "
+        "high-quality MAGs instead of 35; on strain-rich data a high cutoff removes signal "
+        "without separating strains. Pass 97 to reproduce a jgi depth table, or 0 for no filter",
     )
     p.add_argument("--single-end", action="store_true", help="reads are single-end (*.fastq)")
     p.add_argument("--interleaved", action="store_true", help="reads are interleaved paired-end")
@@ -226,11 +203,10 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 def parse_assembly(spec: str) -> Assembly:
     """Read one ``-a`` value into a label and a path.
 
-    ``label=path`` is explicit; a bare path is labelled by its filename with the extension taken
-    off, which for a cohort laid out as ``sample_0/final_assembly.fasta`` would label every sample
-    the same - hence the explicit form, and hence the duplicate check in :func:`parse_assemblies`
-    rather than silently appending a number. A label that is wrong is worth an error, because it
-    ends up in the contig names of every table downstream.
+    ``label=path`` is explicit. A bare path is labelled by its filename without extension, so a
+    cohort laid out as ``sample_0/final_assembly.fasta`` gives every sample the same label; the
+    duplicate check in :func:`parse_assemblies` reports that. Labels end up in contig names
+    downstream, so they are not renamed automatically.
     """
     if "=" in spec:
         label, _sep, path = spec.partition("=")
@@ -252,9 +228,8 @@ def parse_assembly(spec: str) -> Assembly:
 def parse_assemblies(specs: Sequence[str], separator: str = SEPARATOR) -> List[Assembly]:
     """Every ``-a`` value, with the labels checked for the things that would break the split.
 
-    Two assemblies sharing a label cannot be told apart afterwards, and a label containing the
-    separator makes the prefix ambiguous in the same way a contig name containing it does. Both are
-    errors here rather than surprises in the split, which would have no way to report them.
+    Duplicate labels, or a label containing the separator, would make the split ambiguous, so
+    both raise ValueError.
     """
     assemblies = [parse_assembly(spec) for spec in specs]
     seen: Dict[str, str] = {}
@@ -283,10 +258,9 @@ def catalogue_name(label: str, contig: str, separator: str = SEPARATOR) -> str:
 def split_catalogue_name(name: str, separator: str = SEPARATOR) -> Tuple[str, str]:
     """Undo :func:`catalogue_name`. Returns ``(label, original contig)``.
 
-    Split on the *first* separator, which is the one this module wrote: a name is only allowed into
-    the catalogue if it does not contain the separator, so everything after the first one belongs to
-    the contig. A name with no separator at all belongs to no label and comes back as ``("", name)``,
-    which the caller reports rather than guesses about.
+    Splits on the first separator. Names containing the separator are not allowed into the
+    catalogue, so everything after it is the contig name. A name with no separator returns
+    ``("", name)``.
     """
     label, sep, contig = name.partition(separator)
     if not sep:
@@ -302,20 +276,14 @@ def write_catalogue(
 ) -> Dict[str, int]:
     """Concatenate *assemblies* into one fasta, prefixing every contig with its label.
 
-    Returns each label's contig count. Prefixing unconditionally, including for a single assembly:
-    the split then has one code path instead of two, and the one-assembly case is the one a test
-    would otherwise never exercise.
+    Returns each label's contig count. Contigs are prefixed even for a single assembly, so the
+    split has one code path.
 
-    A contig name containing the separator is refused, because the split demultiplexes on the first
-    one - a name like ``k99~3`` under label ``s1`` would come back as belonging to label ``s1`` and
-    contig ``k99~3``, which is right, but a name containing it in the *label* position could not be
-    distinguished at all. Checking the names is cheap and the alternative is a depth table quietly
-    attributed to the wrong sample.
+    A contig name containing the separator raises ValueError, because the split demultiplexes on
+    the separator.
 
-    Records with no sequence, and records with no A, C, G, T or U anywhere in them, are left out -
-    the same two classes ``binning.copy_assembly`` drops, for the same reasons, and the agreement is
-    the point. A depth table carrying rows for contigs the binner's own copy of the assembly does not
-    have is a table whose rows do not match its fasta, and every binner reacts to that differently.
+    Records with no sequence, or with no A, C, G, T or U, are skipped. ``binning.copy_assembly``
+    drops the same records, so the depth table rows match the binner's copy of the assembly.
     """
     counts: Dict[str, int] = {}
     with open(out_path, "w") as out:
@@ -349,15 +317,11 @@ def split_depth_table(
 ) -> Dict[str, str]:
     """Write one depth table per label from the catalogue-wide *table*.
 
-    Each slice keeps the header - the sample columns are the whole point, and every slice carries
-    all of them - and restores the original contig names, so the slice describes the assembly it
-    will be binned against rather than the catalogue.
+    Each slice keeps the header (all sample columns) and restores the original contig names.
 
-    Rows are streamed and dispatched by prefix in one pass rather than read per label, because the
-    catalogue table has a row for every contig of every sample and reading it N times is the cost
-    this module exists to avoid. Labels with no rows are reported by the caller: an empty slice
-    means the catalogue did not contain that assembly, which is a real failure and not an empty file
-    to hand to a binner.
+    Rows are dispatched by prefix in a single pass, since the catalogue table has a row for every
+    contig of every sample. A label with no rows raises ValueError: it means the catalogue did not
+    contain that assembly.
     """
     ensure_dir(out_dir)
     handles = {}
@@ -379,7 +343,7 @@ def split_depth_table(
             for label in written:
                 path = os.path.join(out_dir, "%s.txt" % label)
                 paths[label] = path
-                # Held open for the whole pass: the point is one read of the catalogue table.
+                # Held open for the whole pass, so the catalogue table is read once.
                 handles[label] = open(path, "w")  # noqa: SIM115
                 handles[label].write(header)
             unknown = set()
@@ -397,9 +361,8 @@ def split_depth_table(
         for handle in handles.values():
             handle.close()
     if unknown:
-        # Not fatal: a catalogue can legitimately hold more than this run's assemblies if somebody
-        # reused one. Worth saying, because the usual cause is a label typo and the symptom of that
-        # is a slice that is short rather than missing.
+        # Not fatal: a reused catalogue can hold more than this run's assemblies. The usual cause
+        # is a label typo, which shows up as a short slice.
         warning(
             "%d contig(s) in %s carry a label this run does not know (%s) and were not written to "
             "any slice" % (sum(1 for _ in unknown), table, ", ".join(sorted(unknown)[:5]) or "none")
@@ -440,12 +403,11 @@ def sketch_reads(
 ) -> List[str]:
     """Sketch every sample's reads for the fairy route, returning the sketch paths in sample order.
 
-    One invocation for every sample rather than one each: fairy sketches samples concurrently, and
-    the names it writes come from ``-S``, which has to list them all in the same order as the reads.
+    One fairy invocation covers all samples: fairy sketches them concurrently, and ``-S`` lists the
+    names in read order.
 
-    An interleaved file is sketched as single-end, which is not a compromise: the sketch is a
-    subsample of the read k-mers, and which mate a k-mer came from is not part of it. The alignment
-    route needs the pairing because an aligner does; this does not.
+    Interleaved files are sketched as single-end. The sketch is a subsample of read k-mers and does
+    not record which mate a k-mer came from.
     """
     ensure_dir(sketch_dir)
     sets = (
@@ -456,8 +418,8 @@ def sketch_reads(
     names = [entry[0] for entry in sets]
     sketches = [os.path.join(sketch_dir, "%s.paired.bcsp" % name) for name in names]
     if single_end or interleaved:
-        # fairy names a single-end sketch differently from a paired one, and the coverage call takes
-        # the paths rather than the directory, so the two cases cannot share one suffix.
+        # fairy names single-end and paired sketches differently, and the coverage call takes the
+        # sketch paths, so each case needs its own suffix.
         sketches = [os.path.join(sketch_dir, "%s.single.bcsp" % name) for name in names]
         command = FAIRY_SKETCH_SINGLE.format(
             reads=" ".join(entry[1] for entry in sets),
@@ -485,8 +447,8 @@ def _bams(work: str) -> List[str]:
 def plain_header(header: str, label: str, separator: str) -> Tuple[str, int]:
     """*header* with ``label<sep>`` stripped from every ``@SQ SN:``. Returns it and the count.
 
-    Only the SN field, and only that one prefix: a read name or a program's command line in @PG can
-    legitimately contain the same text, and rewriting those would corrupt provenance to fix a name.
+    Only SN fields with that prefix are changed. Read names and @PG command lines can contain the
+    same text and are left alone.
     """
     prefix = label + separator
     out: List[str] = []
@@ -506,9 +468,8 @@ def plain_header(header: str, label: str, separator: str) -> Tuple[str, int]:
 def _index_kept_bams(bams: Sequence[str], threads: int, env: Optional[str]) -> None:
     """Index the BAMs that are being kept.
 
-    They are sorted already, and every tool that reads a BAM - the BAM binners, `samtools view` on
-    a region, any inspection - wants the index. Doing it here rather than leaving `samtools index`
-    as a step to remember costs a fraction of what the alignment cost.
+    The BAMs are already sorted, and BAM readers (the BAM binners, region queries with
+    `samtools view`) need the index. Indexing is cheap compared with alignment.
     """
     for bam in bams:
         if os.path.isfile(bam + ".bai"):
@@ -536,10 +497,9 @@ def bam_references(bam: str, env: Optional[str]) -> List[Tuple[str, int]]:
 def write_region_bed(references: Sequence[Tuple[str, int]], prefix: str, path: str) -> int:
     """Write a BED of every reference starting with *prefix*. Returns how many it held.
 
-    A BED rather than regions on the command line: a catalogue label can carry hundreds of
-    thousands of contigs, and that argument list does not fit in ARG_MAX. `samtools view -M -L`
-    takes the file and uses the index, so each record is read once even though the extraction runs
-    once per label.
+    A BED file is used because a label can have hundreds of thousands of contigs, more than fits
+    in ARG_MAX on a command line. `samtools view -M -L` uses the index with it, so each record is
+    read once across all labels.
     """
     kept = 0
     with open(path, "w") as handle:
@@ -560,30 +520,23 @@ def split_bams(
 ) -> Dict[str, List[str]]:
     """Write one BAM per assembly per sample, named as that assembly names its contigs.
 
-    This is the piece that lets a cohort's single alignment pass reach the binners that read
-    alignments rather than a table. SemiBin2, VAMB, COMEBin and CONCOCT are refused `--depth` by
-    name, so before this they could only be run by aligning each sample against its own assembly -
-    which is the cost the catalogue exists to avoid - or not at all. `binning --bams <dir>` takes
-    what this writes.
+    This lets the BAM-reading binners (SemiBin2, VAMB, COMEBin, CONCOCT), which do not accept
+    `--depth`, use the cohort's single alignment pass. `binning --bams <dir>` reads the output.
 
-    Two details that are not obvious:
-
-    * The extraction is by region file, through the index, so the whole set costs about one pass
-      over the catalogue BAMs rather than one pass per label.
-    * Only *this* label's `@SQ` names are de-prefixed. The foreign ones have to stay, and stay
-      prefixed: reference IDs in a BAM are positional, so dropping `@SQ` lines would renumber every
-      record's reference, and stripping the prefix from all of them would collide two assemblies'
-      `k141_1` into one name. The foreign references carry no records in the extracted file, so a
-      binner matching contig names against its assembly ignores them.
+    * Extraction uses a region file and the index, so the whole split costs about one pass over the
+      catalogue BAMs.
+    * Only this label's `@SQ` names are de-prefixed. Other labels' `@SQ` lines must stay: reference
+      IDs are positional, so dropping lines would renumber every record, and de-prefixing them
+      would merge identically named contigs (`k141_1`) from different assemblies. They carry no
+      records in the extracted file, so binners ignore them.
     """
     ensure_dir(out_dir)
     bams = _bams(work)
     written: Dict[str, List[str]] = {}
     if not bams:
         return written
-    # The index is what makes this affordable: `samtools view -M -L` then reads only the records of
-    # the label being extracted, so the whole split costs about one pass over the BAMs rather than
-    # one pass per label. Without it samtools refuses the region file outright.
+    # `samtools view -M -L` needs the index to read only one label's records; without it, samtools
+    # refuses the region file.
     _index_kept_bams(bams, threads, env)
     references = bam_references(bams[0], env)
     for assembly in assemblies:
@@ -639,44 +592,40 @@ def _deprefix_kept_bams(
 ) -> None:
     """Make kept BAMs name contigs the way the assembly does, or say why they cannot.
 
-    The alignment is against the catalogue, whose contigs are ``label<sep>contig``, while the depth
-    table this module splits out is de-prefixed. So the kept BAMs disagreed with both the slice and
-    the assembly, and the consequence was silent: metaBAT2 reads the table and works, while every
-    BAM-reading binner - SemiBin2, COMEBin, VAMB, CONCOCT - matched *zero* contigs against the
-    plain assembly and produced no bins without erroring. Two users hit it independently.
+    The alignment is against the catalogue, whose contigs are ``label<sep>contig``, while the split
+    depth tables and the assemblies use plain names. BAM-reading binners (SemiBin2, COMEBin, VAMB,
+    CONCOCT) then match zero contigs and produce no bins without an error; metaBAT2 reads the table
+    and is unaffected.
 
-    With one assembly the prefix carries no information, so the headers are rewritten and the BAMs
-    become usable as they are. `samtools reheader` streams the records, so this costs a copy of
-    each BAM - which is why it happens only when `--keep-bams` asked for the BAMs at all.
+    With one assembly the headers are rewritten. `samtools reheader` copies each BAM, so this runs
+    only with `--keep-bams`.
 
-    With several, a header rewrite would be wrong rather than slow: two assemblies routinely share
-    contig names (`k141_1` in both), and stripping the prefix would merge references that are
-    different sequences. Those BAMs stay in catalogue space and the run says so, with the command
-    that splits one out.
+    With several assemblies the headers are left in catalogue space, because contig names repeat
+    between assemblies and stripping the prefix would merge different sequences. A warning gives
+    the command to extract one assembly's BAM.
     """
     bams = _bams(work)
     if not bams:
         return
     if len(assemblies) != 1:
         warning(
-            "the kept BAMs are aligned against the catalogue, so a contig in them is named "
-            f"label{separator}contig while the depth tables and the assemblies name it plainly. metaBAT2 "
-            "and MaxBin2 read the table and are unaffected; SemiBin2, VAMB, COMEBin and CONCOCT "
-            "read the BAM and will match zero contigs against a plain assembly.\n"
-            f"The headers are not rewritten here because {len(assemblies)} assemblies share this catalogue and "
-            "contig names repeat between assemblies, so stripping the prefix would merge "
-            "references that are different sequences. To get one assembly's BAM, select its "
-            "contigs first:\n"
+            "the kept BAMs are aligned against the catalogue, so their contigs are named "
+            f"label{separator}contig, while the depth tables and assemblies use plain names. "
+            "metaBAT2 and MaxBin2 read the table and are unaffected; SemiBin2, VAMB, COMEBin and "
+            "CONCOCT read the BAM and will match no contigs in a plain assembly.\n"
+            f"The headers are not rewritten because {len(assemblies)} assemblies share this "
+            "catalogue and contig names repeat between them, so stripping the prefix would merge "
+            "different sequences. To get one assembly's BAM, select its contigs first:\n"
             "  samtools view -b -o <sample>.<label>.bam <sample>.bam $(grep '^>' <assembly> | "
             f"sed 's/^>/<label>{separator}/;s/ .*//')\n"
-            "and reheader that to drop the prefix."
+            "then reheader that file to drop the prefix."
         )
         _index_kept_bams(bams, threads, env)
         return
     label = assemblies[0].label
     comm(
-        "rewriting the kept BAM headers to drop the '%s%s' catalogue prefix, so the BAM-reading "
-        "binners see the same contig names as the assembly and the depth table" % (label, separator)
+        "rewriting the kept BAM headers to drop the '%s%s' catalogue prefix, so BAM-reading "
+        "binners see the contig names of the assembly and depth table" % (label, separator)
     )
     for bam in bams:
         header = capture_in_env(env, ["samtools", "view", "-H", bam])
@@ -693,12 +642,12 @@ def _deprefix_kept_bams(
             tool="samtools reheader",
             stdout_path=plain,
         )
-        # In-place reheader is CRAM-only, so the rewrite is out of place and then moved over the
-        # original - after the new file exists, so an interrupted rewrite leaves the BAM intact.
+        # In-place reheader is CRAM-only, so write a new file and move it over the original once it
+        # exists; an interrupted rewrite leaves the BAM intact.
         fs_move(plain, bam)
         fs_remove(header_path)
     comm("%d BAM(s) now name contigs as the assembly does" % len(bams))
-    # After the rewrite, not before: reheadering writes a new file, which would strand the index.
+    # Index after the rewrite, since reheadering writes a new file.
     _index_kept_bams(bams, threads, env)
 
 
@@ -734,8 +683,7 @@ def main(argv: List[str]) -> int:
         + [(check_fastq, path, "read file") for path in args.reads],
     )
     env = env_for("coverage", settings)
-    # fairy ships in this module's env. It used to have one of its own, which meant the route needed
-    # a second install command to try; it is one static binary, so that bought nothing.
+    # fairy is installed in this module's env.
     fairy_env = env if args.coverage == "fairy" else None
     rec = start_run(
         "coverage",
@@ -789,9 +737,8 @@ def main(argv: List[str]) -> int:
             else:
                 comm("skipping the sketches (already built; --resume)")
                 sketches = _sketches(sketch_dir)
-            # The stage is named for the route rather than shared with the alignment one, so that a
-            # run resumed with the other --coverage rebuilds the table instead of inheriting a table
-            # the new route did not produce.
+            # Checkpoint names differ by route, so resuming with the other --coverage rebuilds the
+            # table.
             if ckpt.todo("fairy_depth_table"):
                 run(
                     FAIRY_COVERAGE.format(
@@ -829,10 +776,9 @@ def main(argv: List[str]) -> int:
 
             if ckpt.todo("depth_table"):
                 announcement("MEASURING EVERY CONTIG'S DEPTH IN EVERY SAMPLE")
-                # One pass over every BAM, producing the one table that is then sliced. No minimum
-                # contig length is applied: filtering belongs to the binning run that reads the slice,
-                # and a contig dropped here could not be recovered by a later run with a lower
-                # threshold. See metawrap2.depth for the algorithm and for why it is not a shell-out.
+                # One pass over every BAM into one table. No minimum contig length is applied here;
+                # the binning run that reads the slice filters, so a later run can use a lower
+                # threshold. See metawrap2.depth for the algorithm.
                 bams = sorted(_bams(work))
                 _depth.write_depth_table(
                     bams,
@@ -877,15 +823,13 @@ def main(argv: List[str]) -> int:
         _write_assemblies_table(assemblies, os.path.join(args.output, ASSEMBLIES_TABLE), paths)
 
         if args.coverage == "fairy":
-            # The sketches are kept: a few MB per sample, and they are not specific to this
-            # catalogue, so a cohort that gains a sample re-sketches one sample rather than all of
-            # them. The BAMs are swept for the opposite reason - gigabytes, and specific to the
-            # catalogue that produced them.
+            # Sketches are kept: a few MB per sample and not specific to this catalogue, so adding
+            # a sample means sketching only that sample. BAMs are large and catalogue-specific, so
+            # they are removed.
             comm("kept the read sketches in %s; they are reusable for another catalogue" % work)
         else:
-            # Split first, while the catalogue BAMs are still here: the per-assembly BAMs are
-            # extracted from them, and --split-bams is what makes this stage usable by the binners
-            # that read alignments rather than a table.
+            # Split before the catalogue BAMs are removed, since the per-assembly BAMs are extracted
+            # from them.
             if args.split_bams:
                 announcement("SPLITTING THE ALIGNMENTS INTO ONE BAM PER ASSEMBLY")
                 split = split_bams(
@@ -909,9 +853,8 @@ def main(argv: List[str]) -> int:
             else:
                 _deprefix_kept_bams(assemblies, work, args.separator, env, args.threads)
         if not args.keep_catalogue:
-            # By suffix rather than by prefix: the index names are known (INDEX_SUFFIXES), and a
-            # sweep of everything starting with the catalogue's name would eventually take something
-            # a later version of this module put beside it.
+            # Remove by known index suffix (INDEX_SUFFIXES), not by name prefix, so unrelated files
+            # beside the catalogue are left alone.
             for path in [catalogue] + [catalogue + suffix for suffix in INDEX_SUFFIXES]:
                 fs_remove(path)
             comm("removed the catalogue and its index (pass --keep-catalogue to keep them)")

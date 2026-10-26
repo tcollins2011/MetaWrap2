@@ -1,13 +1,13 @@
-"""The appraise module's own logic: sample naming, bin extensions, and the read-length guard.
+"""Tests for the appraise module's sample naming, bin extension and read-length handling.
 
-Each of these is a way the module can produce a confident wrong answer rather than an error, which
-is why they are tested separately from the parsing in test_recovery.py:
+These cases produce wrong results without an error, so they are tested apart from the parsing in
+test_recovery.py:
 
-* SingleM labels rows with the read file's basename, so its ``ERR011347_1`` has to become the
-  pipeline's ``ERR011347`` or the appraisal joins to nothing;
-* SingleM's default genome extension is ``fna`` and MetaWrap2 writes ``.fasta``, so a wrong guess
-  appraises zero genomes and reports that none of the community is represented;
-* a read shorter than SingleM's 60 bp window carries no marker, so trimmed reads appraise as an
+* SingleM labels rows with the read file's basename; its ``ERR011347_1`` must map to the
+  pipeline's ``ERR011347`` or the appraisal joins to nothing.
+* SingleM's default genome extension is ``fna`` and MetaWrap2 writes ``.fasta``; a wrong guess
+  appraises zero genomes.
+* A read shorter than SingleM's 60 bp window carries no marker, so trimmed reads appraise as an
   empty community.
 """
 
@@ -24,7 +24,7 @@ def test_singlem_label_and_pipeline_sample_name_are_both_derived(tmp_path):
     ):
         assert appraise._singlem_label(path) == label
         assert appraise._sample_name(path) == sample
-    # SingleM's default extension is `fna`; a wrong guess appraises zero genomes.
+    # The extension is inferred from the bin files, since SingleM defaults to `fna`.
     for name in ("bin.1.fasta", "bin.2.fasta", "notes.txt"):
         (tmp_path / name).write_text(">c\nACGT\n")
     assert appraise._infer_extension(str(tmp_path), None) == "fasta"

@@ -1,3 +1,145 @@
+MetaWrap2 v=2.1.4
+	`metawrap2 score`, a progress heartbeat, a low-utilisation warning, verified multi-connection
+		downloads, a GPU check before learned binners, benchmark arms that run another pipeline,
+		`--preset slow` renamed `--preset gpu`, CheckM2 as the default bin scorer, aligner indexes
+		reused safely, empty bin folders skipped in `dereplicate`, a real-sample benchmark on the
+		metaWRAP 1 paper's datasets, and documentation layout changes.
+	New - `metawrap2 score` for directories of genomes
+		`metawrap2 score -o OUT bins_a bins_b ...` runs CheckM2 (or CheckM1 with `--checkm1`), GUNC and
+			the MIMAG tags, writes the same per-genome table as `bin_refinement`, and prints one comparison
+			table. Use it to compare bin sets from different pipelines with one scorer; metaWRAP 1 refines
+			with CheckM1, which disagrees with CheckM2 most for near-complete bins.
+		`-x` sets the FASTA extension (metaWRAP 1 writes `.fa`). Genomes are symlinked into the output,
+			so the input directories are not written to. See docs/score.md.
+	New - progress heartbeat
+		After 60 s without output, a step prints its elapsed time and the tool's last line, so a long
+			step with no output (COMEBin training, SemiBin2 clustering) can be told from a hung one. Screen only;
+			the log files are unchanged. `heartbeat_seconds` under [settings] or `--heartbeat-seconds N`, 0 to
+			turn it off.
+	New - low-utilisation warning during a step
+		On Linux, a step that has run for five minutes with less than a third of its thread grant busy
+			prints a warning once. More threads will not speed it up; the warning suggests `-j` to run
+			other samples on the idle cores. `low_utilisation_after_seconds` and `low_utilisation_fraction` under
+			[settings]. The `-j` suggestion after a run now uses the same threshold (was a quarter).
+	New - verified downloads; multi-connection downloads with aria2c
+		A download goes to `.part`, is checked, and is renamed only if it passes: md5 when one is
+			published, otherwise a test decompression. Size alone is not accepted. A failed file is deleted before the retry. Errors say which
+			check failed.
+		With aria2c on PATH, files are fetched over 8 connections, several times faster from ENA;
+			otherwise curl, with the same checks. `METAWRAP2_ARIA2C=` (empty) forces curl.
+		`install-db` uses the same downloader, so each database archive is test-decompressed before it
+			is reported installed.
+	New - GPU check before SemiBin2, VAMB and COMEBin
+		Before a learned binner runs on a GPU, MetaWrap2 reports the card, its utilisation, free memory
+			and other processes on it. A `--device cuda:N` the machine does not have stops the run before
+			the step. A busy card prints a warning and the step runs; `--gpu-strict` (or
+			`[limits] gpu_strict`) stops instead. Without a driver it prints a note; `--device cpu` skips
+			the check.
+	New - bin_refinement scores bin sets in parallel
+		The hybrid bin sets are scored with CheckM2 several at a time when memory allows: `--checkm-jobs N`,
+			default as many as fit at 24 GB per CheckM2 call, or with `--checkm1` 16 GB per CheckM1 call
+			on the reduced tree and 40 GB with `--full-tree` (1 = one at a time). Bins are assigned to
+			sets before scoring starts, so results match a sequential run. pplacer is capped at 8
+			threads, past which it gained little. Three-binner refinement: CheckM2 730 s -> 539 s, final
+			bins identical; CheckM1 on the full tree 1,969 s -> 798 s with identical stats.
+		Figure: docs/figures/refine_speedup.png.
+	New - `--checkm2-ttable`
+		`--checkm2-ttable {4,11}` runs CheckM2 under one translation table instead of both; table 4 won
+			for 8 of 6,778 bins in 45 CheckM2 reports.
+	New - benchmark arms can run another pipeline
+		A variant in benchmarks/configurations.toml can declare an `external` command (with its conda
+			env, where its bins land, and its version) instead of `args`. It gets the same inputs, samples
+			and budget as the MetaWrap2 arms, is measured the same way, and its bins are scored by the
+			same scorer. Configuration errors are reported at load time, naming the arm. A commented
+			metaWRAP 1.3.0 example is in the file.
+	Changed - `--preset slow` renamed `--preset gpu`
+		`slow` is still accepted and prints that it is the old name; study sheets accept it too. Same binners: metaBAT2 + SemiBin2 + COMEBin.
+		`--preset gpu` trains SemiBin2 and COMEBin with `--device cuda` unless `--device` is given; the
+			other presets keep `--device cpu`. COMEBin did not finish three CAMI2 samples on CPU in 280
+			CPU-hours. If binners are named explicitly the preset and its device default are ignored.
+	Changed - bin_refinement scores with CheckM2 by default (was CheckM1)
+		`bin_refinement`, `reassemble_bins` and `binning --run-checkm` score bins with CheckM2, as
+			`metawrap2 score` already did. CheckM2 needs less memory than CheckM1 on its full genome tree
+			(pplacer holds about 34 GB per call), is faster, and scored the final bins in the MetaWrap2
+			benchmarks. `--checkm1` scores with CheckM1 in `bin_refinement` and `binning --run-checkm`;
+			it needs `metawrap2 install-db checkm`, and a `--checkm1` run without that database stops at
+			the start and names the command. `--checkm2` is still accepted and changes nothing.
+		The score cache is per scorer and CheckM1 tree (`work_files/checkm_scores.checkm2.json`,
+			`.checkm1_reduced.json`, `.checkm1.json` for the full tree), and `work_files/scorer.txt`
+			records it. A `--resume` with another scorer or tree stops; for a run without that file the
+			scorer is read from the `.stats.tsv` lineage column, and CheckM1 is taken as the full tree.
+	Changed - `--checkm1` uses CheckM1's reduced tree; `--full-tree` added, `--quick` hidden
+		With `--checkm1`, `bin_refinement` and `binning --run-checkm` pass `--reduced_tree`, budgeted at
+			16 GB per call and per pplacer thread. `--full-tree` uses the full genome tree (40 GB), as
+			2.1.3 did. The pplacer-crash fallback to the reduced tree applies only with `--full-tree`.
+		`--quick` is no longer in the help; it is still accepted and prints that the reduced tree is now
+			the default. `--full-tree` under CheckM2 prints a note and is ignored.
+	Changed - `reassemble_bins` scores with CheckM2 only
+		`--checkm1` stops with "reassemble_bins scores bins with CheckM2 only, so --checkm1 is not
+			available." `--checkm2` is accepted and changes nothing. CheckM1's `bin_qa_plot`
+			(`reassembled_bins.png`) is no longer made; `reassembly_results.png` is unchanged.
+	Changed - `benchmark score` scores with CheckM2 by default
+		`--checkm1` (deprecated) scores with CheckM1 on the full tree; `--checkm2` is accepted. The
+			per-set score cache is named after the scorer (`<bin set>.checkm_scores.checkm2.json`,
+			`.checkm1.json`), and a `.stats.tsv` written by the other scorer is scored again and not
+			counted, so earlier CheckM1 scores are not read as CheckM2 scores.
+		Install: `quickstart` builds `metawrap2-checkm2`, and `quickstart --binning-only --databases`
+			fetches `checkm2`, `gunc` and `host` (was `checkm` and `host`). CheckM1's data is opt-in.
+			`doctor` counts a missing `metawrap2-checkm2` as a failure for bin_refinement and
+			reassemble_bins and checks CHECKM2DB in place of CHECKM_DB; `doctor --fix` rebuilds the env.
+	Fixed - full `quickstart` built no environments
+		Without `--binning-only` or `--modules`, quickstart passed an empty list to `install-env`, which
+			exited with "specify one or more modules, or --all". It now passes every module environment
+			plus `checkm2` and `learned`.
+	Fixed - aligner indexes reused when current, built under a lock
+		`align_read_sets` built the index unconditionally, so `--resume` re-indexed an assembly it had
+			already indexed, and parallel mappings against one reference all wrote the same index file.
+		An index is now reused when every file it consists of (`aligners.INDEX_FILES`) exists, is non-empty
+			and is newer than the reference, and a marker written after a successful build records the
+			same index command. A lock around check-and-build makes parallel mappings take turns; the
+			first builds the index and the others reuse it. The marker also stops a short-read minimap2 index from being
+			reused for long reads, which need a different preset.
+	Fixed - `plot_binning_results` with an empty first bin set
+		The label loop left `x_pos` unset for an empty set, so the plot raised NameError and stopped
+			`bin_refinement` after CheckM and GUNC had run. The label now goes at x = 0.
+	Fixed - bin_refinement test with long temporary paths
+		The warning it checks is wrapped by the banner, so a long path split the matched phrase. The
+			test now strips the banner before matching.
+	Fixed - `dereplicate` skips empty bin folders
+		A sample whose binning or refinement found nothing leaves an empty folder, which is common in a
+			cohort. Empty folders are now skipped with a warning; only an all-empty input is an error.
+	Fixed - CAMI2 skin sample composition in benchmarks/datasets.toml
+		The comment said the deposit's airskinurogenital samples are ordered airways, skin, urogenital.
+			They are interleaved. The per-sample assignment is now listed (skin: 1, 13-20, 28; airways: 4,
+			7-12, 23, 26, 27; urogenital: 0, 2, 3, 5, 6, 21, 22, 24, 25), measured against each site's gold
+			standard and the deposit's abundance files. `cami2_skin` (samples 17-19) was already correct.
+	New - real-sample benchmark on four datasets
+		Gut (50 MetaHIT samples) and water (36 Baltic Sea samples) from the metaWRAP 1 paper, one
+		co-assembly each; one deeply sequenced Hadza gut sample (ERR7745335, published assembly); a
+		three-sample faecal-transplant series (one co-assembly). All final sets scored with CheckM2 and
+		GUNC. Clean MAGs (wall-clock, binning + refinement):
+			  pipeline            gut 50        water 36      gut 1         gut 3
+			  metaWRAP 1          94 (36.5 h)   183 (98.5 h)  158 (15.4 h)  72 (5.0 h)
+			  MetaWrap2 default   110 (1.5 h)   184 (2.7 h)   207 (3.0 h)   78 (2.2 h)
+			  MetaWrap2 gpu       125 (6.4 h)   197 (13.3 h)  250 (9.5 h)   111 (4.7 h)
+		On the single and three-sample sets, metaWRAP 1 kept 186 and 87 bins by CheckM1; 174 and 83 meet
+		its thresholds under CheckM2.
+		Figure: docs/figures/real_samples_binning.png.
+	New - CAMI2 and CAMI3 gold-assembly benchmark scored by AMBER
+		Each pipeline bins the dataset's gold assembly; bp-weighted F1 for metaWRAP 1 / very-fast / fast /
+			default / gpu: CAMI2 gastrointestinal 0.67 / 0.54 / 0.67 / 0.75 / 0.85, oral 0.36 / 0.25 / 0.35 /
+			0.39 / 0.53, skin 0.38 / 0.30 / 0.36 / 0.47 / 0.59; CAMI3 toy 0.21 / 0.16 / 0.21 / 0.23 /
+			0.23. Purity is 0.98-1.00 for every pipeline. The metaWRAP 1 arm is its refinement over
+			metaBAT2, MaxBin2 and CONCOCT.
+		Bins >=90% complete and <=5% contaminated against the truth, metaWRAP 1 / very-fast / fast / default /
+			gpu: gastrointestinal 115 / 84 / 109 / 135 / 179, oral 146 / 96 / 134 / 156 / 247, skin 101 / 82 /
+			100 / 135 / 197, CAMI3 toy (prokaryote-only truth) 175 / 124 / 166 / 161 / 215.
+		Figure: docs/figures/synthetic_benchmarks.png (all CAMI2 and CAMI3 results).
+	Changed - documentation
+		The README benchmark section is split into synthetic (CAMI2) and real samples. Release
+			notes moved from docs/releases/ to releases/. Open items from the 2.1.3, functional-annotation
+			and other-modules plans are in PLANNED_FEATURES.md. docs/modules.md is now one reference
+			entry per module.
 MetaWrap2 v=2.1.3
 	CAMI2 oral and skin added to the metaWRAP 1 comparison, binning presets measured on oral,
 		`metawrap2 report` (PDF and per-genome table), MIMAG tags, `kraken2 --bracken`, `annotate
@@ -536,8 +678,8 @@ MetaWrap2 v=2.1.3
 			oral gold standard, against 4-5 in the gastrointestinal one.
 		The deposit's 29 airskinurogenital samples are not labelled by site. 88 of 90, 50 of 52 and 238 of
 			240 of the genomes in samples 17, 18 and 19 are in the skin gold standard, about half that in the
-			airways one and almost none in the urogenital one; checking samples 4, 9 and 24 showed the
-			deposit is ordered airways, skin, urogenital.
+			airways one and almost none in the urogenital one. The sites are interleaved in the deposit;
+			the full per-sample assignment is in benchmarks/datasets.toml.
 MetaWrap2 v=2.1.2`, and the README asks for this
 			string in bug reports. It now prints `MetaWrap2 2.1.3 (git acbd3d1)` from a git checkout and the
 			plain version from a wheel. The git call has a 2 s timeout and a silent fallback, so it cannot fail

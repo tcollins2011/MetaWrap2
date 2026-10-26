@@ -11,7 +11,7 @@ Usage in a module::
         _align_reads(...)
         ckpt.done("align_reads")
 
-Kept tiny and explicit on purpose - a reader sees exactly which stages can be resumed.
+Stages are listed explicitly in each module, so the resumable stages are visible in the code.
 """
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ class Checkpoint:
     def clear(self, step: str) -> None:
         """Forget that *step* finished, so a later --resume runs it again.
 
-        For a stage whose outputs a module deliberately throws away: resuming past it would then
-        feed the next stage files that are no longer there.
+        Used for stages whose outputs a module deletes; otherwise a resume would skip the stage
+        and pass missing files to the next one.
         """
         if os.path.exists(self._marker(step)):
             os.remove(self._marker(step))
@@ -61,8 +61,8 @@ class Checkpoint:
 def make_checkpoint(output_dir: str) -> Checkpoint:
     """Build a Checkpoint honoring the run's --resume / --force state.
 
-    resume -> reuse markers; a fresh run (not resume) starts clean so stale markers from a
-    previous, different run can't cause steps to be wrongly skipped.
+    With --resume, existing markers are reused. A fresh run clears them so markers from a
+    previous run cannot cause steps to be skipped.
     """
     ckpt = Checkpoint(output_dir, resume=command.runner.resume)
     if not command.runner.resume and not command.runner.dry_run:

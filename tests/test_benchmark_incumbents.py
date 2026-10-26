@@ -1,15 +1,12 @@
-"""The variant marked `default = true` is the one the module actually ships.
+"""The variant marked `default = true` matches what the module ships.
 
-`default = true` exists so a proposed default is always read next to the one it would replace. It can
-only do that if it names the right one, and nothing was checking: refinement_completeness carried the
-marker on c50_x10 for as long as it existed, while bin_refinement's DEFAULT_MIN_COMPLETION has always
-been 70. `benchmark list` printed "-c 50 -x 10 <- current default" and a results table would have
-shown the incumbent on a row no user's run produces.
+`default = true` marks the incumbent, which tables show beside the proposed alternatives. This was
+not checked: refinement_completeness marked c50_x10 while bin_refinement's DEFAULT_MIN_COMPLETION
+is 70, so `benchmark list` printed "-c 50 -x 10 <- current default".
 
-The check is to parse the incumbent's own flags with the module's own parser and compare the result
-against parsing nothing: the variant that ships is exactly the one whose flags are a no-op. That
-makes the assertion independent of how a default is spelled, which matters because a default can live
-in a constant, in `add_argument(default=...)`, or in a settings lookup.
+The test parses the incumbent's flags with the module's parser and compares the result with
+parsing no flags: the shipped variant is the one whose flags are a no-op. This works whether a
+default is set in a constant, in `add_argument(default=...)`, or in a settings lookup.
 """
 
 import argparse
@@ -17,21 +14,18 @@ import importlib
 
 from metawrap2.benchmark.registry import load_configurations
 
-# Comparisons whose incumbent cannot be checked this way, with the reason. Kept explicit so a new
-# comparison is checked by default and skipping one is a decision someone wrote down.
+# Comparisons whose incumbent cannot be checked this way, with the reason. New comparisons are
+# checked unless listed here.
 UNCHECKABLE = {
-    # The binner set has no shipped default expressible as a no-op: `metawrap2 binning` requires the
-    # user to name at least one binner, so every variant's flags are load-bearing. What ships is a
-    # recommendation in the docs, not a parser default.
+    # `metawrap2 binning` requires at least one binner, so no variant's flags are a no-op. The
+    # recommended set is in the docs, not a parser default.
     "binner_set": "binning has no default binner - at least one flag is mandatory",
 }
 
 
-#: Modules whose default is resolved in code rather than by the parser, with the resolution written
-#: out so the comparison is against what the module will actually do. assembly's
-#: ``do_megahit = args.megahit or not args.metaspades`` means --megahit parses to a non-default
-#: namespace and is still exactly the shipped behaviour; comparing raw flags would call that a bug.
-#: Each entry has to mirror its module, so it is kept next to the line it mirrors by naming it.
+#: Modules whose default is resolved in code after parsing, with that resolution reproduced here.
+#: assembly's ``do_megahit = args.megahit or not args.metaspades`` means --megahit parses to a
+#: non-default namespace but gives the shipped behaviour. Each entry names the line it mirrors.
 def _assembly_effective(ns):
     """assembly.py: do_metaspades = args.metaspades; do_megahit = args.megahit or not metaspades."""
     out = {k: v for k, v in ns.items() if k not in ("metaspades", "megahit")}
@@ -46,8 +40,8 @@ RESOLVERS = {"assembly": _assembly_effective}
 def _parsed(module, argv):
     """What *module*'s parser makes of *argv*, without running the module.
 
-    The parsers are built inside _parse_args, so the only way to the namespace is to let it parse and
-    stop the module before it acts on the result.
+    The parsers are built inside _parse_args, so the module is allowed to parse and is stopped
+    before it acts on the result.
     """
 
     class _Caught(Exception):
@@ -92,10 +86,9 @@ def _parser(module):
 def _required_args(module):
     """The minimum argv *module*'s parser accepts, derived from the parser rather than listed.
 
-    Required flags say nothing about defaults - they are what the module cannot run without - but
-    every comparison's flags have to be parsed alongside them or argparse refuses before any default
-    is visible. Reading them off the parser means a module that gains a required flag does not
-    silently turn this test into a SystemExit.
+    Every comparison's flags must be parsed together with the required ones, or argparse exits
+    before any default is visible. Reading them from the parser keeps the test working when a
+    module gains a required flag.
     """
     argv = []
     for action in _parser(module)._actions:
@@ -122,10 +115,8 @@ def _effective(module_name, namespace):
 def test_the_incumbent_variants_flags_are_a_no_op():
     """The incumbent parses to the shipped defaults, and every other variant does not.
 
-    The converse is the cheaper half of the same guarantee. A variant whose flags parse to the
-    shipped defaults is not a challenger, it is a duplicate of the incumbent under another name - and
-    it would be recorded as its own row, so the same configuration would appear twice in a results
-    table with two different costs.
+    A non-incumbent variant whose flags parse to the shipped defaults would duplicate the
+    incumbent under another name and appear twice in a results table.
     """
     for name, comparison in sorted(load_configurations().items()):
         if name in UNCHECKABLE:
@@ -135,8 +126,8 @@ def test_the_incumbent_variants_flags_are_a_no_op():
         module = importlib.import_module("metawrap2.modules.%s" % comparison.module)
         base = _required_args(module)
         shipped = _effective(comparison.module, _parsed(module, base))
-        # common_args deliberately are not defaults - they switch off work that is identical across
-        # variants so it cannot bury the difference - so only the variant's own flags are checked.
+        # common_args are not defaults (they disable work that is identical across variants), so
+        # only the variant's own flags are checked.
         claimed = _effective(comparison.module, _parsed(module, base + list(incumbent.args)))
         differing = {k: (shipped[k], claimed[k]) for k in shipped if shipped[k] != claimed[k]}
         assert not differing, "%s: variant %r is marked default but changes %s" % (
@@ -146,6 +137,10 @@ def test_the_incumbent_variants_flags_are_a_no_op():
         )
         for variant in comparison.variants:
             if variant.default:
+                continue
+            if variant.is_external:
+                # An external arm has no MetaWrap2 flags to parse. The registry already rejects an
+                # external arm that declares args or is the default.
                 continue
             got = _effective(comparison.module, _parsed(module, base + list(variant.args)))
             assert got != shipped, "%s: variant %r parses identically to the incumbent" % (

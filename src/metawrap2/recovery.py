@@ -1,26 +1,16 @@
-"""How much of an assembly reached a bin, and what a bin set does not say about itself.
+"""Binned fraction of an assembly, community share of the bins, and the caveats printed with them.
 
-A bin set reports what it found. The two things it does not report are what it missed and how much
-of what it found is one organism, and both have been measured by other people on large numbers of
-samples:
+This module computes the share of assembled sequence that is in a bin and attaches two caveats:
 
-* **Most assembled sequence never reaches a MAG.** Across 92,187 metagenomes in SPIRE, only about
-  10% of assembled base pairs end up in a medium- or high-quality MAG, and the unbinned remainder is
-  not a random sample of the data - it holds an estimated 145 predicted undescribed phyla. A bin set
-  presented without that fraction invites the reading that it describes the sample.
-* **"High-quality" MAGs are chimeric more often than their scores suggest.** Treichel et al. 2026
-  found only 54.5-81.8% of high-quality MAGs represent a single strain, with a mean of 2.3 reference
-  genomes per MAG. CheckM2's completeness and contamination do not measure this; GUNC measures part
-  of it, at the taxonomic level, and this pipeline already runs GUNC.
+* Across 92,187 metagenomes in SPIRE, only about 10% of assembled base pairs reach a medium- or
+  high-quality MAG, and the unbinned remainder is not a random sample: it holds an estimated 145
+  predicted undescribed phyla.
+* Treichel et al. 2026 found that 54.5-81.8% of high-quality MAGs represent a single strain, with
+  a mean of 2.3 reference genomes per MAG. CheckM2 does not measure this; GUNC detects part of it
+  at the taxonomic level and runs by default.
 
-So this computes the first and states the second. Neither changes a bin - they change what a reader
-concludes from one, which is the point. Both are cheap: the binned fraction is a pass over sequence
-already on disk, and the chimerism caveat is a sentence attached to a number GUNC already produced.
-
-The unit is **base pairs, not contigs**. A bin set can hold 2% of the contigs and 60% of the
-sequence, because binners discard short contigs first and short contigs are numerous. Reporting
-contigs would make every bin set look worse than it is and would not answer the question anyone has,
-which is how much of the sample this describes.
+The binned fraction is measured in base pairs. A bin set can hold 2% of the contigs and 60% of the
+sequence, because binners discard short contigs, which are numerous.
 """
 
 from __future__ import annotations
@@ -33,20 +23,19 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .io.seqio import contig_id, iter_fasta
 
-#: Printed with every binned-fraction figure. The number invites a conclusion it cannot support
-#: without this, so the two travel together.
+#: Printed with every binned-fraction figure.
 UNBINNED_CAVEAT = (
-    "the unbinned fraction is not a random sample of the assembly: binners discard what they "
-    "cannot place, which is biased toward short contigs, low coverage and novel lineages. Across "
-    "92,187 metagenomes (SPIRE) only ~10% of assembled bp reach a medium- or high-quality MAG"
+    "the unbinned fraction is not a random sample of the assembly: binners discard contigs they "
+    "cannot place, mostly short, low-coverage and novel ones. Across 92,187 metagenomes "
+    "(SPIRE) ~10% of assembled bp are in a medium- or high-quality MAG"
 )
 
-#: Printed with every quality-tier count. GUNC catches some of this and CheckM2 none of it.
+#: Printed with every quality-tier count.
 CHIMERISM_CAVEAT = (
-    "a 70/10 or 90/5 score says a bin has the markers of one genome, not that it is one: of MAGs "
-    "called high-quality, 54.5-81.8% represent a single strain (mean 2.3 reference genomes per MAG; "
-    "Treichel et al. 2026). GUNC detects the taxonomically incoherent subset, which is why it runs "
-    "by default"
+    "a 70/10 or 90/5 score means a bin has the markers of one genome, which does not show it is "
+    "one genome. Of MAGs called high-quality, 54.5-81.8% represent a single strain (mean 2.3 "
+    "reference genomes per MAG; Treichel et al. 2026). GUNC, which runs by default, detects the "
+    "taxonomically incoherent ones"
 )
 
 
@@ -58,10 +47,8 @@ class Recovery:
     assembly_bp: int
     binned_contigs: int
     binned_bp: int
-    #: Only the bins that pass a quality threshold, which is the number worth quoting: sequence in a
-    #: bin nobody would keep has not really been recovered. None when no such set was given, which
-    #: is distinct from zero - "not measured" and "none of it is clean" are different statements and
-    #: reporting 0.0% for the first reads as the second.
+    #: Contigs and bp in bins that pass the quality thresholds. None when no clean set was given,
+    #: so that "not measured" is not reported as 0.0%.
     clean_contigs: Optional[int] = None
     clean_bp: Optional[int] = None
 
@@ -104,9 +91,8 @@ def binned_contigs(
 ) -> Set[str]:
     """Every contig name appearing in any bin in *bins_dir*.
 
-    A set, because a contig in two bins is still one contig of the assembly. That happens: bin sets
-    from different binners overlap, and a consolidated set can retain a contig that a size filter
-    split out of a restored input.
+    Returned as a set because a contig can appear in more than one bin, for example in overlapping
+    bin sets from different binners.
     """
     found: Set[str] = set()
     if not os.path.isdir(bins_dir):
@@ -126,9 +112,8 @@ def measure(
 ) -> Recovery:
     """How much of *assembly* is in *bins_dir*, and in *clean_bins_dir* if given.
 
-    Lengths come from the assembly rather than from the bins, so a contig a binner trimmed or
-    renamed does not change the denominator - and a contig in a bin that is *not* in the assembly is
-    ignored rather than counted, because it cannot be a share of something it is not part of.
+    Lengths come from the assembly, so trimmed or renamed contigs in a bin do not change the totals.
+    Bin contigs that are not in the assembly are ignored.
     """
     lengths = contig_lengths(assembly)
     binned = binned_contigs(bins_dir) & set(lengths)
@@ -177,16 +162,16 @@ def recovery_row(recovery: Recovery) -> Dict[str, object]:
 
 # ── what fraction of the *community* the bins represent ──────────────────────────────────────
 
-#: Printed with every appraisal. The two fractions answer different questions and are routinely
-#: confused, and the per-cell one is almost always the smaller and the more sobering.
+#: Printed with every appraisal. The community fraction is usually smaller than the binned
+#: fraction of the assembly, and the two are often confused.
 APPRAISAL_CAVEAT = (
-    "this is the fraction of the community's *cells* the genomes represent, estimated from "
-    "single-copy marker reads - not the fraction of assembled base pairs that were binned. A bin "
-    "set can hold 60% of the assembly and represent 30% of the community, because what assembles "
-    "well and what is abundant are different things"
+    "this is the fraction of the community's cells that the genomes represent, estimated from "
+    "single-copy marker reads. It is not the fraction of assembled base pairs that were binned. "
+    "A bin set can hold 60% of the assembly and represent 30% of the community, because the "
+    "genomes that assemble well are not always the abundant ones"
 )
 
-#: SingleM's own summary rows, which are not samples and must not be averaged with them.
+#: SingleM's summary rows, which are skipped when reading samples.
 APPRAISAL_SUMMARY_ROWS = ("total", "average")
 
 
@@ -194,18 +179,16 @@ APPRAISAL_SUMMARY_ROWS = ("total", "average")
 class Appraisal:
     """How much of one sample's community a set of genomes accounts for.
 
-    Coverages rather than counts: SingleM weights each marker sequence by its read coverage, so a
-    genome representing an abundant organism counts for more than one representing a rare one.
-    That is the point - the question is what share of the cells in the sample these genomes stand
-    for, not what share of the lineages.
+    Values are SingleM coverages, weighted by read coverage, so they estimate the share of cells,
+    not of lineages.
     """
 
     sample: str
     domain: str
     binned: float
     not_found: float
-    #: Only present when an assembly was appraised alongside the genomes: sequence that assembled
-    #: but reached no bin. None when no assembly was given, which is a different thing from zero.
+    #: Coverage of sequence that assembled but reached no bin. None when no assembly was
+    #: appraised.
     assembled: Optional[float] = None
 
     @property
@@ -227,11 +210,8 @@ class Appraisal:
 def parse_appraisal(path: str) -> List[Appraisal]:
     """Parse ``singlem appraise``'s summary table.
 
-    Two things about its shape. The columns vary - ``coverage_assembled`` appears only when an
-    assembly was appraised - so columns are read by name and the absent one stays None rather than
-    being read as zero. And the table carries ``total`` and ``average`` rows beside the per-sample
-    ones; those are SingleM's summaries, not samples, and averaging them back in would double-count
-    every sample.
+    Columns are read by name: ``coverage_assembled`` is present only when an assembly was
+    appraised, and stays None otherwise. SingleM's ``total`` and ``average`` rows are skipped.
     """
     rows: List[Appraisal] = []
     with open(path) as handle:
@@ -253,7 +233,7 @@ def parse_appraisal(path: str) -> List[Appraisal]:
 
 
 def _as_coverage(value: Optional[str]) -> float:
-    """SingleM writes `nan` in rows where a domain was not seen; that is zero coverage, not data."""
+    """Parse a coverage value; empty, invalid and `nan` (domain not seen) give 0.0."""
     try:
         number = float(value) if value not in (None, "") else 0.0
     except ValueError:
@@ -305,7 +285,7 @@ class UnrepresentedLineage:
 
     @property
     def rank_reached(self) -> str:
-        """The finest rank SingleM could assign, which bounds what can be said about the lineage."""
+        """The finest rank SingleM could assign."""
         parts = [part.strip() for part in self.taxonomy.split(";") if part.strip()]
         return parts[-1] if parts else "unclassified"
 
@@ -313,10 +293,8 @@ class UnrepresentedLineage:
 def unrepresented_lineages(path: str, limit: Optional[int] = None) -> List[UnrepresentedLineage]:
     """Aggregate ``--output-unaccounted-for-otu-table`` by lineage, most abundant first.
 
-    Aggregated rather than passed through: that table has one row per marker gene per sequence, so
-    a single unrepresented organism appears up to as many times as there are markers, and a reader
-    counting rows counts markers. Summing coverage per lineage and counting the markers behind it
-    gives one row per lineage with the evidence beside it.
+    The table has one row per marker gene per sequence, so coverage is summed per lineage and the
+    number of marker sequences is kept beside it.
     """
     by_taxon: Dict[str, Tuple[float, int]] = {}
     with open(path) as handle:

@@ -1,16 +1,13 @@
-"""`metawrap2 test [module ...]` - check every module's conda env and software, run the
-unit tests, and print a readable installed / missing / broken map.
+"""`metawrap2 test [module ...]`: check each module's conda env and tools, run the unit tests,
+and print an installed / missing / broken table.
 
-For each module it: confirms the module's conda env exists (several modules share one), then
-goes *into* that env and probes each key tool (present on PATH? does it run, or is it broken by e.g. a
-missing shared library / import error?). It also runs the Python unit-test suite (which
-covers the env-independent core). The result is a per-module status table so a user can see
-at a glance what is ready, what needs installing, and what is broken.
+For each module, check that its conda env exists (several modules share one), then probe each key
+tool inside the env: is it on PATH, and does it run or fail with e.g. a missing shared library or
+import error. The Python unit tests cover the env-independent core.
 
-Every module ``metawrap2 -h`` lists gets a row, including the two that own no conda env because
-they run in this package's own interpreter. One of those is gated on a declared Python extra
-(see :data:`MODULE_EXTRAS`), which is probed here too: a dependency this command does not look at
-is a dependency it reports as satisfied.
+Every module ``metawrap2 -h`` lists gets a row, including the two that run in this package's own
+interpreter. One of those depends on a Python extra (see :data:`MODULE_EXTRAS`), which is probed
+as well.
 """
 
 from __future__ import annotations
@@ -76,11 +73,8 @@ _PROBES = {
     "gunc": "gunc --version",
 }
 
-# What conda and libmamba say when the environment they were pointed at is not there. This is the
-# message `doctor` used to throw away: the probe returned nonzero, the output was dropped, and the
-# row read "MISSING  not on PATH" - a diagnosis of the wrong thing entirely, for an env that exists
-# and holds the tool. One report cost the user 50 minutes before the real message was found by
-# running mamba by hand.
+# What conda and libmamba print when the target environment does not exist. Matched so the row
+# reports a missing prefix instead of "not on PATH".
 _NO_SUCH_PREFIX = re.compile(
     r"given prefix does not exist|EnvironmentLocationNotFound|Not a conda environment|"
     r"EnvironmentNameNotFound|Could not find conda environment",
@@ -92,15 +86,14 @@ _PREFIX_IN_MESSAGE = re.compile(r'does not exist:\s*"?([^"\n]+?)"?\s*$', re.MULT
 # Status glyphs / labels.
 OK, MISSING, BROKEN = "OK", "MISSING", "BROKEN"
 
-#: env name -> its prefix on disk (or None), resolved once per process. Resolving walks
-#: :func:`config.env_dirs`, which shells out to ``conda env list``; a full `doctor` probes ~90
-#: tools with up to three commands each, so resolving per call meant hundreds of listings for an
-#: answer that cannot change mid-run.
+#: env name -> its prefix on disk (or None), resolved once per process. Resolving runs
+#: ``conda env list`` (via :func:`config.env_dirs`), and a full `doctor` probes ~90 tools with up
+#: to three commands each.
 _PREFIX_CACHE: Dict[str, Optional[str]] = {}
 
 
 def _resolve_prefix(env: str) -> Optional[str]:
-    """Where *env* lives, or None if it exists nowhere. Resolved once and reused."""
+    """Prefix of *env*, or None if it does not exist. Cached."""
     if env not in _PREFIX_CACHE:
         _PREFIX_CACHE[env] = env_prefix(env)
     return _PREFIX_CACHE[env]
@@ -111,17 +104,13 @@ def _env_run(
 ) -> Tuple[int, str]:
     """Run a shell command inside a conda env via mamba; return (returncode, output).
 
-    Selects the env by ``-p <prefix>`` whenever a prefix resolves, and only falls back to
-    ``-n <env>`` when none does. ``-n`` resolves names against the *active* conda root alone,
-    while existence is answered across every installation on the machine (see
-    :func:`config.conda_env_exists`), so for an env belonging to another conda install the two
-    disagreed: the env was reported present and then every command against it died with
-    ``critical libmamba The given prefix does not exist``. With ``-p`` there is one answer, and it
-    is the path that was checked for existence in the first place.
+    Selects the env with ``-p <prefix>`` when a prefix resolves, else ``-n <env>``. ``-n`` only
+    searches the active conda root, while :func:`config.conda_env_exists` searches every
+    installation, so an env from another conda install would be reported present and then fail
+    with ``The given prefix does not exist``. ``-p`` uses the same path the existence check found.
 
-    Uses ``bash -c``, not ``bash -lc``: a login shell re-reads the user's profile, which
-    rebuilds PATH from scratch and throws away the environment's own bin directory - so every
-    tool probe reported MISSING even for a perfectly good env. Flags for ``run`` come from
+    Uses ``bash -c`` instead of ``bash -lc``: a login shell re-reads the user's profile, which
+    rebuilds PATH and drops the env's bin directory. Flags for ``run`` come from
     :func:`metawrap2.command._run_flags` because ``--no-capture-output`` is conda-only.
     """
     if prefix is None:
@@ -145,7 +134,7 @@ def _env_run(
 
 
 def _one_line(out: str, width: int = 60) -> str:
-    """The last non-empty line of *out*, trimmed - for putting subprocess output in a table cell."""
+    """The last non-empty line of *out*, trimmed, for a table cell."""
     lines = [line.strip() for line in out.strip().splitlines() if line.strip()]
     return lines[-1][:width] if lines else ""
 
@@ -153,12 +142,8 @@ def _one_line(out: str, width: int = 60) -> str:
 def _probe_tool(env: str, tool: str) -> Tuple[str, str]:
     """Return (status, detail) for one tool inside *env*: OK / MISSING / BROKEN.
 
-    A failed probe keeps its output. The first version of this discarded it and reported
-    ``MISSING  not on PATH`` for every nonzero return, which turned "the prefix I was pointed at
-    does not exist" - a message that names the problem exactly - into a statement about PATH that
-    was simply false. The two cases are now distinguished and the captured line is carried into
-    the detail, because a user reading the table should not have to re-run mamba by hand to find
-    out what it actually said.
+    A failed probe distinguishes a missing env prefix from a tool not on PATH, and includes the
+    last line of the captured output in the detail.
     """
     prefix = _resolve_prefix(env)
     rc, out = _env_run(env, "command -v %s" % tool, prefix=prefix)
@@ -169,7 +154,7 @@ def _probe_tool(env: str, tool: str) -> Tuple[str, str]:
             return MISSING, "env prefix does not exist: %s" % path
         detail = _one_line(out)
         return MISSING, ("not on PATH (%s)" % detail if detail else "not on PATH")
-    # present - now see if it actually runs
+    # present: check that it runs
     probe = _PROBES.get(tool)
     probes = [probe] if probe else ["%s --version" % tool, "%s --help" % tool, "%s -h" % tool]
     last = ""
@@ -190,18 +175,14 @@ def _probe_tool(env: str, tool: str) -> Tuple[str, str]:
 def _tools_for(module: str, env: str) -> List[str]:
     """Every tool *module* should be able to run, for a module name or for a bare env name.
 
-    Three ways in, because all three are names a user can type at `doctor` and `install-env`:
+    Accepts any name a user can pass to `doctor` and `install-env`:
 
-    * a module (``binning``) - that module's tools.
-    * an opt-in env's yaml name (``learned``) - the tools that env is supposed to hold.
-    * an env shared by several modules, named by the env (``bins``) - the union of their tools, since
-      the env is only healthy if every module that will reach for it can run.
+    * a module (``binning``): that module's tools.
+    * an opt-in env's yaml name (``learned``): the tools that env should hold.
+    * an env shared by several modules (``bins``): the union of their tools.
 
-    The third case is why this is not a dictionary lookup. Several modules share an env now, so
-    ``bins`` is not a key of MODULE_TOOLS at all, and looking it up directly returned nothing - which
-    `doctor` then reported as "0/0 tools OK": a pass that had probed nothing. install-env runs exactly
-    that check after building an env, so the one command whose job is to verify a build was the one
-    reporting success without looking.
+    A shared env name is not a key of MODULE_TOOLS, so a plain lookup would return no tools and
+    report "0/0 tools OK". install-env runs this check after building an env.
     """
     direct = MODULE_TOOLS.get(module) or OPTIONAL_TOOLS_BY_MODULE.get(module)
     if direct:
@@ -219,12 +200,9 @@ def _tools_for(module: str, env: str) -> List[str]:
 def _foreign_prefix_note(env: str) -> str:
     """A note naming *env*'s prefix when it belongs to a different conda installation, else "".
 
-    Existence is answered machine-wide, so the env `doctor` is reporting on may be one some other
-    conda install built - same name, someone else's directory, possibly someone else's package
-    versions. Probing it by prefix makes it work, which is right, but silently working on an env
-    the user did not build is its own kind of wrong answer: if `install-env` writes to the active
-    root and `doctor` reads a different one, the two commands discuss different environments and
-    agree about nothing. Naming the path is what lets the user see that.
+    Env existence is checked across all conda installations, so the env found may belong to a
+    different install than the one `install-env` writes to. The note names the path so the user
+    can tell.
     """
     prefix = _resolve_prefix(env)
     if not prefix or prefix_in_active_root(prefix):
@@ -233,15 +211,11 @@ def _foreign_prefix_note(env: str) -> str:
 
 
 def _check_module(module: str) -> dict:
-    # An opt-in env is named after its yaml, so `doctor bin_refinement-gunc` (and the verification
-    # install-env runs after building one) lands here with a name MODULE_ENVS does not hold.
-    # config.resolve_env_name, not a fallback to "metawrap2-<whatever was typed>". That fallback is
-    # why `doctor bin_refinement-checkm2` used to invent metawrap2-bin_refinement-checkm2 and report
-    # it MISSING - an environment that never existed, presented as one that failed to install.
-    # No "metawrap2-<whatever was typed>" fallback. That fallback is why this command used to
-    # invent an environment for an unknown name and report it MISSING; main() refuses such names
-    # before reaching here, and anything that still gets through should be visibly wrong rather
-    # than plausibly wrong.
+    # Opt-in envs are named after their yaml (`doctor bin_refinement-gunc`, or install-env's check
+    # after building one), so the name may not be in MODULE_ENVS; config.resolve_env_name handles
+    # it. There is no "metawrap2-<name>" fallback, which used to invent an env for an unknown name
+    # and report it MISSING. main() rejects unknown names first; anything that gets through is
+    # labelled "<unknown: ...>".
     env = resolve_env_name(module) or "<unknown: %s>" % module
     if not conda_env_exists(env):
         return {
@@ -275,35 +249,26 @@ def _check_module(module: str) -> dict:
 #: The distribution the extras below belong to, spelled the way pip names it.
 DISTRIBUTION = "metawrap2"
 
-#: Modules gated on a declared Python extra rather than on a conda env, and the extra each one
-#: needs (a key of ``[project.optional-dependencies]``). What the extra *contains* is deliberately
-#: not written here: the package names and version floors are read back out of the distribution's
-#: own metadata, so this table and ``pip install 'metawrap2[stats]'`` cannot disagree about what
-#: that installs.
-#:
-#: The defect this exists for: `doctor` probed conda envs and databases only, so `diff_abundance` -
-#: whose single dependency is this extra - was neither OK nor broken but *absent from the table*,
-#: and a fresh install reported "22 OK, 0 missing, 0 broken (of 22 modules)" to a user whose next
-#: command died for want of scikit-bio. The module list is now the CLI's own, so a row count that
-#: disagrees with `metawrap2 -h` is no longer possible; this table only says which extra gates what.
+#: Modules that depend on a Python extra instead of a conda env, and the extra each needs (a key of
+#: ``[project.optional-dependencies]``). The extra's package names and version floors are read
+#: from the distribution metadata, so they match what ``pip install 'metawrap2[stats]'`` installs.
+#: Without this, `diff_abundance` (whose only dependency is scikit-bio) had no row in the table.
 MODULE_EXTRAS: Dict[str, str] = {"diff_abundance": "stats"}
 
-#: What the env column says for a module that has no conda env. Two labels rather than one blank,
-#: because "nothing to install" and "install it with pip" need different things from the reader.
+#: Env column labels for modules without a conda env: one needs a pip install, one needs nothing.
 PYTHON_EXTRA = "(python extra)"
 PURE_PYTHON = "(pure Python)"
 
-#: How long to wait for the import probe below. Importing scikit-bio pulls in numpy, scipy and
-#: pandas, which is seconds on a cold page cache and must not be mistaken for a hang.
+#: Timeout for the import probe below. Importing scikit-bio loads numpy, scipy and pandas, which
+#: can take several seconds on a cold page cache.
 _IMPORT_TIMEOUT = 120
 
 
 def _module_names() -> List[str]:
     """Every module `metawrap2 -h` lists, in the order it lists them.
 
-    Read off the CLI's own table rather than from ``MODULE_ENVS``, which is keyed by the modules
-    that own a conda env and therefore holds 22 of the 24. A list derived from `-h` cannot drift
-    from `-h`; a second list written out by hand is exactly how this one drifted.
+    Taken from the CLI's module table. ``MODULE_ENVS`` only holds the 22 of 24 modules that own a
+    conda env.
     """
     from ..cli import MODULES
 
@@ -316,7 +281,7 @@ def _canonical(name: str) -> str:
 
 
 def _requirement_name(requirement: str) -> str:
-    """The distribution name out of a requirement string: ``scikit-bio>=0.7.1`` -> ``scikit-bio``."""
+    """The distribution name in a requirement string: ``scikit-bio>=0.7.1`` -> ``scikit-bio``."""
     for index, char in enumerate(requirement):
         if char in "<>=!~ [(;":
             return requirement[:index].strip()
@@ -340,11 +305,8 @@ def _release(version: str) -> Optional[Tuple[int, ...]]:
 def _version_at_least(installed: str, floor: str) -> bool:
     """Is *installed* at least *floor*?
 
-    Not a PEP 440 implementation and deliberately not one: ``packaging`` is not a dependency of
-    this package, and every floor these extras carry is a plain dotted number. A version on either
-    side that does not parse counts as satisfying the floor, because reporting a module as unusable
-    over a version string we failed to read would be a worse answer than the missing extra this
-    check exists to find.
+    Compares plain dotted numbers only, not full PEP 440 (``packaging`` is not a dependency). A
+    version that does not parse counts as satisfying the floor.
     """
     here, wanted = _release(installed), _release(floor)
     if here is None or wanted is None:
@@ -375,12 +337,9 @@ def _pyproject_extras() -> Dict[str, List[str]]:
 def _extra_requirements(extra: str) -> List[str]:
     """The requirement strings declared under *extra*, e.g. ``["scikit-bio>=0.7.1"]``.
 
-    Taken from the installed distribution's metadata, which is what pip resolved and therefore the
-    only description of the extra that matches this machine. The checkout's pyproject.toml is
-    read as a fallback because an editable install's dist-info is only regenerated on reinstall: in
-    a development tree it can predate the extra entirely and declare no extras at all, and a
-    `doctor` that cannot see an extra reports the module as ready - the defect, again, one layer
-    down.
+    Read from the installed distribution's metadata (what pip resolved). Falls back to the
+    checkout's pyproject.toml, because an editable install's dist-info is only regenerated on
+    reinstall and may predate the extra.
     """
     from importlib import metadata
 
@@ -408,10 +367,10 @@ def _installed_version(dist: str) -> Optional[str]:
 
 
 def _import_names(dist: str) -> List[str]:
-    """The top-level modules *dist* installs, read from the metadata rather than guessed.
+    """The top-level modules *dist* installs, read from the metadata.
 
-    scikit-bio installs ``skbio`` and biom-format installs ``biom``: the import name is not the
-    distribution name, and there is no rule that turns one into the other, so it is looked up.
+    Import names can differ from distribution names (scikit-bio installs ``skbio``, biom-format
+    installs ``biom``).
     """
     from importlib import metadata
 
@@ -426,10 +385,8 @@ def _import_names(dist: str) -> List[str]:
 def _import_probe(dist: str) -> Tuple[int, str]:
     """Import what *dist* installs, in a subprocess; (returncode, output).
 
-    A subprocess because a half-installed extra is one of the things this command exists to find,
-    and an extra that fails at import - scikit-bio built against another numpy's ABI is the usual
-    way - would otherwise raise out of `doctor` itself and report nothing about anything. (0, "")
-    when the metadata names no importable module, which is not evidence either way.
+    Runs in a subprocess so a broken install (commonly scikit-bio built against a different numpy
+    ABI) cannot crash `doctor`. Returns (0, "") when the metadata names no importable module.
     """
     names = _import_names(dist)
     if not names:
@@ -469,9 +426,8 @@ def _check_extra(module: str, extra: str) -> dict:
     install = "pip install '%s[%s]'" % (DISTRIBUTION, extra)
     requirements = _extra_requirements(extra)
     if not requirements:
-        # Nothing on this machine says what the extra holds, so nothing has been checked - and a
-        # row that reports OK having checked nothing is the shape of the defect this command keeps
-        # being bitten by (see `_tools_for`). Reported as missing, with the way out.
+        # The extra's contents are unknown, so nothing could be checked. Report it as missing with
+        # the install command instead of OK.
         return {
             "module": module,
             "env": PYTHON_EXTRA,
@@ -501,15 +457,13 @@ def _check_extra(module: str, extra: str) -> dict:
 def _check_any(module: str) -> dict:
     """The table row for *module*, whichever kind of dependency it has.
 
-    Three kinds, and until now only the first had a row at all:
+    Three kinds:
 
-    * a conda env - 22 of the 24 modules.
-    * a declared Python extra - `diff_abundance` needs scikit-bio and nothing else.
-    * nothing - `quantify_function` runs in this package's own interpreter.
+    * a conda env: 22 of the 24 modules.
+    * a Python extra: `diff_abundance` needs scikit-bio only.
+    * nothing: `quantify_function` runs in this package's own interpreter.
 
-    The last two were indistinguishable from each other *and* from a module that does not exist,
-    because neither appeared in the table. ``conda`` marks the rows ``--fix`` can act on: handing
-    `diff_abundance` to `install-env` would ask it to build an environment that has never existed.
+    ``conda`` marks the rows ``--fix`` can rebuild with `install-env`.
     """
     extra = MODULE_EXTRAS.get(module)
     if extra:
@@ -529,19 +483,24 @@ def _check_any(module: str) -> dict:
 
 
 def _check_optional_envs(modules: List[str]) -> List[dict]:
-    """The opt-in envs belonging to *modules*, probed if they exist.
+    """The separate envs belonging to *modules*, probed if they exist.
 
-    Reported but never counted towards the exit code: an absent opt-in env is a choice, not a
-    fault. A *present but broken* one is worth seeing, which is why they are probed at all - GUNC
-    runs by default in bin_refinement, so "the env is there and gunc does not run" is a failure a
-    user should hear about before a four-hour refinement does.
+    Each row's ``default`` is True for an env a default run of one of *modules* uses (CheckM2, the
+    default bin scorer); only those count towards the exit code, since opt-in envs may be absent.
+    Present envs are probed so a broken one is reported before a long run.
     """
-    from ..config import OPTIONAL_ENV_OWNERS, OPTIONAL_ENV_TOOLS, OPTIONAL_ENVS
+    from ..config import (
+        DEFAULT_OPTIONAL_ENVS,
+        OPTIONAL_ENV_OWNERS,
+        OPTIONAL_ENV_TOOLS,
+        OPTIONAL_ENVS,
+    )
 
     rows: List[dict] = []
     for flag, env in sorted(OPTIONAL_ENVS.items()):
         owner = OPTIONAL_ENV_OWNERS.get(flag)
-        if owner is None or owner not in modules:
+        default = any(module in modules for module in DEFAULT_OPTIONAL_ENVS.get(flag, ()))
+        if not default and (owner is None or owner not in modules):
             continue
         if not conda_env_exists(env):
             rows.append(
@@ -549,8 +508,13 @@ def _check_optional_envs(modules: List[str]) -> List[dict]:
                     "flag": flag,
                     "env": env,
                     "status": MISSING,
-                    "detail": "not created (opt-in)",
+                    "detail": (
+                        "not created; used by default (metawrap2 install-env %s)" % flag
+                        if default
+                        else "not created (opt-in)"
+                    ),
                     "tools": [],
+                    "default": default,
                 }
             )
             continue
@@ -571,6 +535,7 @@ def _check_optional_envs(modules: List[str]) -> List[dict]:
                 "status": BROKEN if unhealthy else OK,
                 "detail": detail,
                 "tools": tools,
+                "default": default,
             }
         )
     return rows
@@ -614,19 +579,14 @@ def repair(
 ) -> int:
     """Recreate the environments that are missing or broken. Returns an exit code.
 
-    Recreating the environment is the only real remedy for a broken one - a half-solved env
-    cannot be patched into a working one - so rather than telling the user to go and do it,
-    ``--fix`` does exactly that, for exactly the environments that are actually broken. Healthy
-    environments are never touched.
+    A broken env cannot be patched reliably, so ``--fix`` rebuilds the missing and broken envs.
+    Healthy envs are left alone.
     """
     from .install_env import main as install_main
 
     damaged = [r["module"] for r in results if r["status"] in (MISSING, BROKEN) and r["conda"]]
-    # Rows with no conda env to rebuild: a module gated on a Python extra is fixed with pip, not by
-    # `install-env`, which would be asked to build an environment that has never existed. They are
-    # still part of the verdict, or `--fix` would report "nothing to fix" and exit 0 over a table
-    # that says MISSING - the same contradiction between a verdict and its own output that this
-    # command keeps being reported for.
+    # Failing rows with no conda env (Python extras) are fixed with pip, not `install-env`. They
+    # still make the exit code nonzero, so `--fix` does not exit 0 over a table showing MISSING.
     unfixable = [r for r in results if r["status"] in (MISSING, BROKEN) and not r["conda"]]
     for r in unfixable:
         print(
@@ -655,25 +615,25 @@ def repair(
     if still_bad:
         print(
             "\n  %d environment(s) are still not healthy: %s\n"
-            "  Their build logs are the next thing to look at; the solver output usually "
-            "names the conflict.\n" % (len(still_bad), ", ".join(still_bad))
+            "  Check their build logs; the solver output usually names the conflict.\n"
+            % (len(still_bad), ", ".join(still_bad))
         )
         return 1
     print("\n  All rebuilt environments are healthy.\n")
     return rc or (1 if unfixable else 0)
 
 
-#: Which database keys each module needs. An environment can be perfectly healthy and the module
-#: still unable to run, because the database it reads is missing or half-downloaded - so checking
-#: envs without checking databases answers only half of "can I run this?".
+#: Database keys each module needs. A module with a healthy env still fails if its database is
+#: missing or incomplete.
 MODULE_DATABASES: Dict[str, List[str]] = {
     "read_qc": ["BMTAGGER_DB"],
     "kraken2": ["KRAKEN2_DB"],
     "blobology": ["BLASTDB", "TAXDUMP"],
     "classify_bins": ["BLASTDB", "TAXDUMP"],
-    "bin_refinement": ["CHECKM_DB", "GUNC_DB"],
-    "reassemble_bins": ["CHECKM_DB"],
-    "binning": ["CHECKM_DB"],
+    # CheckM2 is the default scorer; CHECKM_DB (CheckM1) is only needed for --checkm1.
+    "bin_refinement": ["CHECKM2DB", "GUNC_DB"],
+    "reassemble_bins": ["CHECKM2DB"],
+    "binning": ["CHECKM2DB"],
     "annotate_bins": [],
     "assembly": [],
     "quant_bins": [],
@@ -683,9 +643,8 @@ MODULE_DATABASES: Dict[str, List[str]] = {
 def _report_databases(modules: List[str], config: Optional[str], verbose: bool = False) -> int:
     """Print the state of every database the given modules need. Returns how many are unusable.
 
-    Optional databases (the opt-in CheckM2/GTDB-Tk/Bakta paths, and CheckM's data when only the
-    binners are being used) are reported but not counted as failures, because a user who never
-    asked for that code path has nothing wrong with their installation.
+    Optional databases (GTDB-Tk and Bakta, which a flag selects, and CheckM2's data when only the
+    binners are used) are reported but not counted as failures.
     """
     from ..config import OPTIONAL_DB_KEYS, load_settings
 
@@ -722,9 +681,9 @@ def _report_databases(modules: List[str], config: Optional[str], verbose: bool =
     )
     if verbose:
         print(
-            "\n  The value in brackets is the database's content fingerprint, also recorded in\n"
-            "  each run's run_environment.json - so a database replaced in place is visible as a\n"
-            "  change rather than an identical-looking path."
+            "\n  The value in brackets is the database's content fingerprint. Each run also\n"
+            "  records it in run_environment.json, so a database replaced in place shows up as\n"
+            "  a change even when its path is the same."
         )
     return bad
 
@@ -748,7 +707,7 @@ def main(argv: List[str]) -> int:
     ap.add_argument(
         "--from-lock",
         action="store_true",
-        help="with --fix, rebuild from the committed lockfiles rather than by " "solving the yaml",
+        help="with --fix, rebuild from the committed lockfiles instead of solving the yaml",
     )
     ap.add_argument(
         "-t",
@@ -759,9 +718,7 @@ def main(argv: List[str]) -> int:
     )
     args = ap.parse_args(argv)
 
-    # Every module `metawrap2 -h` offers, not every module that owns a conda env: the two differ by
-    # the modules that run in this package's own Python, one of which is gated on a Python extra
-    # that nothing used to check.
+    # Every module `metawrap2 -h` lists, including those that run in this package's own Python.
     modules = args.modules or _module_names()
     known = set(_module_names())
     unknown = [name for name in modules if resolve_env_name(name) is None and name not in known]
@@ -770,8 +727,8 @@ def main(argv: List[str]) -> int:
             for line in explain_unknown_name(name):
                 print(line)
         return 1
-    # A 2.0.x name is <module>-<tool>; report on the module it came from, which has a tool list, in
-    # place of the bare environment, which does not and therefore reports "0/0 tools OK".
+    # A 2.0.x env name is <module>-<tool>; report on that module, since the bare env name has no
+    # tool list and would report "0/0 tools OK".
     for name in modules:
         module = legacy_module_for(name)
         if module:
@@ -784,8 +741,7 @@ def main(argv: List[str]) -> int:
 
     print("\nMetaWrap2 module status")
     print("=" * 74)
-    # 18 for the name column: `quantify_function` is 17 characters and ran straight into the env
-    # column at 16, which is also the width `metawrap2 -h` had to widen for the same name.
+    # Name column is 18 wide to fit `quantify_function` (17 characters).
     print("  %-18s %-30s %-8s %s" % ("module", "dependency", "status", "detail"))
     print("  " + "-" * 70)
     counts = {OK: 0, MISSING: 0, BROKEN: 0}
@@ -803,7 +759,7 @@ def main(argv: List[str]) -> int:
 
     optional = _check_optional_envs(modules)
     if optional:
-        print("\nOpt-in environments (absent is a choice, not a fault)\n")
+        print("\nSeparate environments (CheckM2 is used by default; the rest when a flag asks)\n")
         for r in optional:
             print("  %-18s %-30s %-8s %s" % (r["flag"], r["env"], r["status"], r["detail"]))
             for tool, st, detail in r["tools"]:
@@ -815,7 +771,15 @@ def main(argv: List[str]) -> int:
         db_bad = _report_databases(modules, args.config, verbose=args.verbose)
 
     if args.fix:
-        return repair(modules, results, threads=args.threads, use_lock=args.from_lock)
+        # A default run's separate env (CheckM2) is rebuilt like a module env.
+        default_envs = [
+            {"module": r["flag"], "env": r["env"], "status": r["status"], "conda": True}
+            for r in optional
+            if r.get("default")
+        ]
+        return repair(
+            modules, results + default_envs, threads=args.threads, use_lock=args.from_lock
+        )
 
     unit_ok = None
     if not args.tools_only and not args.no_unit_tests:
@@ -825,6 +789,7 @@ def main(argv: List[str]) -> int:
     print()
     # exit nonzero if anything is missing/broken or unit tests failed
     bad = counts[MISSING] + counts[BROKEN] + db_bad
+    bad += sum(1 for r in optional if r.get("default") and r["status"] != OK)
     if bad or unit_ok is False:
         return 1
     return 0

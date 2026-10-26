@@ -1,16 +1,14 @@
 # Everything that touches reads: QC, assembly, re-assembly, and the blob plot.
 #
-# One env rather than four. read_qc, assembly, reassemble_bins and blobology run the same aligners
-# and samtools, and SPAdes is shared by two of them, so splitting them up meant solving the same
-# dependency graph four times and keeping four copies of it current. They also run in sequence in a
-# normal study, so there is no case where you want one and not the others.
+# One env instead of four. read_qc, assembly, reassemble_bins and blobology use the same aligners
+# and samtools, SPAdes is shared by two of them, and in a normal study they run in sequence.
 #
-# python <3.12 is QUAST's constraint, not a choice: QUAST 5.x still imports distutils, which 3.12
-# removed from the stdlib, so an unpinned solve produces an env where `quast` dies on import.
+# python <3.12 is QUAST's constraint: QUAST 5.x imports distutils, which 3.12 removed from the
+# stdlib, so an unpinned solve gives an env where `quast` fails on import.
 #
 # All three aligners ship so that --aligner needs no second install. bwa is the assembly module's
-# default, where the registry's minimap2 is binning's: that choice was made on depth agreement,
-# which is not what the hybrid path reads out of an alignment.
+# default while minimap2 is binning's: binning's choice was made on depth agreement, which is not
+# what the hybrid path reads from an alignment.
 name: metawrap2-reads
 channels:
   - conda-forge
@@ -20,10 +18,9 @@ dependencies:
   - trim-galore >=0.6.10
   - fastp >=0.24.0
   # Capped below 0.13: FastQC 0.13.0 rewrote its CLI in argparse and dropped short flags, so an
-  # unbounded solve gave every new user a `read_qc` that died on its first command. The lockfile
-  # already holds 0.12.1, which is why `install-env --from-lock` kept working and the default path
-  # (what `quickstart` uses) did not. Lift the cap when read_qc's FASTQC template is checked
-  # against 0.13's argparse flags.
+  # unbounded solve gave new users a `read_qc` that failed on its first command. The lockfile holds
+  # 0.12.1, so `install-env --from-lock` kept working but the default path (used by `quickstart`)
+  # did not. Lift the cap after checking read_qc's FASTQC template against 0.13's flags.
   - fastqc >=0.12.1,<0.13
   - bmtagger >=3.101
   - bowtie2 >=2.5
@@ -35,15 +32,12 @@ dependencies:
   - bwa-mem2 >=2.2
   - minimap2 >=2.24
   - samtools >=1.15
-  # Diversity coverage (`metawrap2 nonpareil`). It is here rather than in its own env because it
-  # reads a read file and nothing else, like the rest of this env, and because one more install
-  # command is a worse trade than the ~300 MB of r-base that bioconda's build pulls in: the
-  # package is built against R, which ships its model-fitting code. MetaWrap2 does not use that
-  # R code - metawrap2.nonpareil fits the model in Python - but the R package is a useful
-  # cross-check and the test suite's expected values came from it.
+  # Diversity coverage (`metawrap2 nonpareil`). Here because it reads only a read file, like the
+  # rest of this env. Bioconda's build pulls in ~300 MB of r-base, since the package ships R
+  # model-fitting code. MetaWrap2 fits the model in Python (metawrap2.nonpareil); the R package is a
+  # cross-check, and the test suite's expected values came from it.
   - nonpareil >=3.5.4
-  # metaFlye, for `assembly --long-reads`. Here rather than in its own environment because this is
-  # where `assembly` runs: a long-read assembly should not need a second install command, and Flye
-  # solves into this set without moving anything (it takes the py311 build the quast pin already
-  # forces). Racon is not here - see the note on polishing in metawrap2.longreads.
+  # metaFlye, for `assembly --long-reads`. Here because this is where `assembly` runs, and Flye
+  # solves into this set without changing it (it takes the py311 build the quast pin already
+  # forces). Racon is not here; see the note on polishing in metawrap2.longreads.
   - flye >=2.9

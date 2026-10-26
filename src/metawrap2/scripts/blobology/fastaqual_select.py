@@ -3,7 +3,7 @@
 # a random subset of contigs ("-s r -n N"), which is what this implements.
 #
 # Replaces the original fastaqual_select.pl (Sujai Kumar, blaxterlab/blobology) for the
-# options the blobology module actually uses.
+# options the blobology module uses.
 import argparse
 import random
 import sys

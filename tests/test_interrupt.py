@@ -1,8 +1,7 @@
 """Tests for treating a scheduler kill the same as Ctrl-C.
 
-The whole design rests on one property: :class:`Stopped` must be catchable by code that only
-knows about ``KeyboardInterrupt``, because every ``finally`` and ``except`` already written for
-Ctrl-C is what makes a killed run record its outcome.
+:class:`Stopped` must be catchable as ``KeyboardInterrupt``, so the ``finally`` and ``except``
+blocks written for Ctrl-C also record the outcome of a killed run.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ def _restore_handlers():
 def test_a_background_runs_ignored_sigint_is_taken_back(monkeypatch):
     """A shell sets a background job's SIGINT to SIG_IGN, and Python then leaves it ignored.
 
-    That is the state every long run starts in - "&", nohup, a batch scheduler - so "kill -INT" on
-    one did nothing at all, silently: no KeyboardInterrupt, no message, the tool kept running.
+    Runs started with "&", nohup or a batch scheduler start this way, and "kill -INT" then had no
+    effect. Checks that the handler is reinstalled.
     """
     monkeypatch.setattr(interrupt, "_received", None, raising=False)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -42,7 +41,7 @@ def test_a_background_runs_ignored_sigint_is_taken_back(monkeypatch):
         os.kill(os.getpid(), signal.SIGINT)
     assert interrupt.received() == signal.SIGINT
 
-    # The behaviour the manifest depends on: a kill runs the cleanup, it does not skip it.
+    # A kill runs the cleanup (the manifest depends on this).
     cleaned = []
     with pytest.raises(KeyboardInterrupt):
         try:

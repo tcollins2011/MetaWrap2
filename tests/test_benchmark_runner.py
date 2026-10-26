@@ -7,22 +7,16 @@ from metawrap2.benchmark.registry import Comparison, Variant
 
 
 def test_every_bin_set_reaches_refinement_and_a_leftover_answer_does_not(tmp_path):
-    """The sets were zipped onto ("-A", "-B", "-C"), and zip truncates.
+    """All bin sets are passed with --bins, a previous consolidated set is not, and -a is passed.
 
-    A variant that binned with six binners was therefore refined from the three whose directory
-    names sort first - metabat2_bins among those dropped - so the arm's numbers came from a
-    different input set than the one it was named for, with nothing said. A consolidated set left
-    behind by an earlier refinement into the same directory is also not an input: refining it
-    together with the sets it came from is not a comparison anyone declared.
-
-    The arm is also handed the assembly: DAS Tool reads the assembly contigs itself and exits
-    immediately without them, which looked like DAS Tool being broken rather than like the harness
-    never passing ``-a``.
+    The sets used to be zipped onto ("-A", "-B", "-C"), so with six binners only the three that
+    sorted first were refined. DAS Tool needs the assembly (``-a``) and exits immediately without
+    it.
     """
     binners = ("comebin", "concoct", "maxbin2", "metabat2", "semibin2", "vamb")
     for name in binners:
         (tmp_path / ("%s_bins" % name)).mkdir()
-    (tmp_path / "metawrap_70_10_bins").mkdir()  # a previous refinement's own answer
+    (tmp_path / "metawrap_70_10_bins").mkdir()  # a previous refinement's output
     assembly = tmp_path / "asm.fa"
     assembly.write_text(">c1\nACGT\n")
     comparison = Comparison(name="consolidator", module="bin_refinement")

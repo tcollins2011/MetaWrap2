@@ -1,7 +1,7 @@
 """`metawrap2 completion [bash|zsh]` - print a shell completion script.
 
-Install with e.g.:  metawrap2 completion bash >> ~/.bashrc   (or into a completions dir)
-Completes the module/utility names and the global flags.
+Install with, for example, ``metawrap2 completion bash >> ~/.bashrc`` (or write it into a
+completions directory). Completes module and utility names and the global flags.
 """
 
 from __future__ import annotations

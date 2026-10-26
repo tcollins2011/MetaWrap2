@@ -1,24 +1,14 @@
-"""MetaWrap2 quantify_function: how much of each function is in the sample, not just which genome has it.
+"""MetaWrap2 quantify_function: sample-level gene and pathway abundance.
 
-`annotate` says what each genome can do and `pathways` says how complete its modules are. Neither
-says anything about the sample: a pathway in a genome at 0.1% abundance and the same pathway in one
-at 40% are the same row in those tables and very different findings in a community.
+Combines per-genome annotation (`annotate`, `pathways`) with genome abundances to give the
+abundance of each feature per sample, in the units of :mod:`metawrap2.funcabund`. Also reports the
+fraction of each sample's abundance that the annotated genomes account for.
 
-So this takes the per-genome tables and the genome abundances and produces sample-level feature
-abundance, in the units of :mod:`metawrap2.funcabund`, plus the metric that qualifies all of them -
-the fraction of the sample's signal a MAG-based profile can account for at all.
-
-Three things it will not do:
-
-* **It will not divide a coverage-based abundance by genome size.** CoverM's numbers are already
-  coverage-proportional; dividing again double-corrects and makes large genomes look rare. Read
-  counts do need it, so the kind of number is a flag (``--abundance-kind``) rather than a guess
-  from the column name.
-* **It will not report one unit.** Relative abundance is compositional and only comparable within a
-  sample; genome equivalents are what compare across samples; length normalisation is what compares
-  two gene families. Each is written with what it may be compared across.
-* **It will not quietly treat an unquantified genome as present.** A genome missing from the
-  abundance table contributes nothing, because it was not observed in that sample.
+* Coverage-based abundances (CoverM) are not divided by genome size; read counts are. The kind is
+  set with ``--abundance-kind``, not inferred from the column name.
+* Each unit (relative, per genome equivalent) is written to its own file, with what it may be
+  compared across.
+* A genome missing from the abundance table contributes nothing to that sample.
 """
 
 from __future__ import annotations
@@ -53,16 +43,13 @@ from ._common import (
 
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
-#: One file per unit, because mixing units in one table is how a reader compares two numbers that
-#: are not comparable.
+#: Output file names, one file per unit.
 KO_TABLE = "ko_abundance_%s" + TSV_SUFFIX
 MODULE_TABLE = "pathway_abundance_%s" + TSV_SUFFIX
-#: The metric that qualifies every other file here.
+#: Fraction of each sample's abundance covered by annotated genomes.
 ASSIGNABLE_TABLE = "assignable_fraction" + TSV_SUFFIX
-#: Minimum module completeness for a module to count toward a sample's pathway abundance. A genome
-#: that has a third of a pathway does not perform it, and summing fractional completeness across
-#: genomes would report a community capability nothing in it has. 0.8 is the convention in the
-#: literature for "present"; it is a parameter because it is a convention rather than a measurement.
+#: Minimum module completeness for a module to count toward a sample's pathway abundance. 0.8 is
+#: the usual threshold for "present" in the literature; it can be changed on the command line.
 MIN_MODULE_COMPLETENESS = 0.8
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -96,7 +83,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         choices=[kind.value for kind in _fa.AbundanceKind],
         help="whether the abundance table holds coverage-proportional numbers (CoverM, sylph, any "
         "depth-derived figure) or read counts (default: %(default)s). Read counts are divided by "
-        "genome length once; coverage is not divided at all, because it already is per-cell",
+        "genome length once; coverage is already per cell and is not divided",
     )
     p.add_argument(
         "--genome-lengths",
@@ -105,7 +92,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--microbial-fraction",
         help="output of `singlem microbial_fraction`, which supplies the denominator for the "
-        "per-genome-equivalent unit. Without it that unit is skipped rather than approximated",
+        "per-genome-equivalent unit. Without it, that unit is not reported",
     )
     p.add_argument(
         "--min-module-completeness",
@@ -113,13 +100,13 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=MIN_MODULE_COMPLETENESS,
         metavar="FRACTION",
         help="a genome's module counts toward the sample only above this completeness "
-        "(default: %(default)s). A genome with a third of a pathway does not perform it",
+        "(default: %(default)s)",
     )
     p.add_argument(
         "--biom",
         action="store_true",
-        help="also write each table as BIOM 2.1 beside the TSV, for QIIME 2 / phyloseq / scikit-bio. "
-        "Needs the biom extra: pip install 'metawrap2[biom]'",
+        help="also write each table as BIOM 2.1 beside the TSV, for QIIME 2 / phyloseq / "
+        "scikit-bio. Needs the biom extra: pip install 'metawrap2[biom]'",
     )
     p.add_argument(
         "--evidence",
@@ -134,8 +121,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 def _read_ko_counts(path: str, evidence: str) -> Dict[str, Dict[str, float]]:
     """genome -> KO -> copy number, from the per-gene KO table.
 
-    A gene with several KOs splits its weight, so a genome's total stays its number of annotated
-    genes - the same rule :mod:`metawrap2.hierarchy` applies, and for the same reason.
+    A gene with several KOs splits its weight, so a genome's total is its number of annotated
+    genes (as in :mod:`metawrap2.hierarchy`).
     """
     per_gene: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
     with open(path) as fh:
@@ -152,9 +139,8 @@ def _read_ko_counts(path: str, evidence: str) -> Dict[str, Dict[str, float]]:
 def _read_module_presence(path: str, minimum: float) -> Dict[str, Dict[str, float]]:
     """genome -> module -> 1.0 for modules complete enough to count.
 
-    Binary rather than the completeness itself. Summing fractional completeness across genomes
-    reports a community that performs a pathway no member of it performs - two genomes with half a
-    pathway each are not one genome with a whole one.
+    Binary, because summing fractional completeness across genomes would credit the community
+    with pathways no single genome has.
     """
     out: Dict[str, Dict[str, float]] = defaultdict(dict)
     with open(path) as fh:
@@ -265,8 +251,7 @@ def _write_units(
             writer.writerows(rows)
         written.append(path)
         if biom:
-            # From the rows just written rather than from `values`, so the BIOM file and the TSV
-            # cannot disagree about what was in the table.
+            # Built from the rows written to the TSV, so the two files match.
             biom_path = path[: -len(TSV_SUFFIX)] + ".biom"
             try:
                 n = _biom.write_biom(
@@ -303,15 +288,12 @@ def main(argv: List[str]) -> int:
     kind = _fa.AbundanceKind(args.abundance_kind)
     if kind is _fa.AbundanceKind.READ_COUNT and not args.genome_lengths:
         error(
-            "--abundance-kind read_count needs --genome-lengths: a read count has to be divided "
-            "by genome length once to become cell-proportional. Coverage must not be divided at "
-            "all, which is why the kind is a flag rather than a guess"
+            "--abundance-kind read_count needs --genome-lengths: read counts are divided "
+            "by genome length to make them proportional to cell numbers."
         )
 
     rec = start_run("quantify_function", args, None, settings, inputs=[args.kos, args.abundance])
-    # No checkpoint: every step here is table arithmetic over files that already exist, so the whole
-    # module costs less than deciding whether to skip part of it. --resume is honoured by the steps
-    # that produced its inputs.
+    # No checkpoint: this module only does fast table arithmetic over existing files.
     try:
         announcement("BEGIN QUANTIFY_FUNCTION PIPELINE!")
         ensure_dir(args.output)
@@ -347,8 +329,8 @@ def main(argv: List[str]) -> int:
             comm("microbial fraction for %d sample(s)" % len(fractions))
         else:
             comm(
-                "no --microbial-fraction: the per-genome-equivalent unit is skipped rather than "
-                "approximated. It is the only unit comparable across samples"
+                "no --microbial-fraction, so the per-genome-equivalent unit is not reported. "
+                "It is the only unit that is comparable across samples"
             )
 
         ko_per_sample = _fa.feature_abundance(ko_counts, abundances)
@@ -402,8 +384,8 @@ def main(argv: List[str]) -> int:
                 % (entry.sample, 100 * entry.assignable_fraction)
             )
         comm(
-            "that is of the genomes in the abundance table, not of the community. "
-            "`singlem appraise` answers the harder question and its figure is usually much smaller"
+            "this is a fraction of the genomes in the abundance table, not of the community. "
+            "`singlem appraise` estimates the community share, which is usually much smaller"
         )
         announcement("QUANTIFY_FUNCTION PIPELINE SUCCESSFULLY FINISHED!!!")
     finally:

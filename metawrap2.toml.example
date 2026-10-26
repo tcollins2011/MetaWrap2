@@ -3,24 +3,25 @@
 # Anything you don't set falls back to the in-code defaults documented in each module.
 
 [settings]
-# Default thread count when a module isn't given -t. Leave it unset and modules use the
-# [limits] budget below, which is usually what you want: it follows the machine instead of
-# pinning every run to one number. Set it to override that for every module.
+# Default thread count when a module isn't given -t. If unset, modules use the [limits]
+# budget below, which scales with the machine. Set it to use one number for every module.
 # threads = 8
 # Set false to run tools directly off your PATH instead of per-module conda envs.
 use_conda_envs = true
 
 [limits]
-# How much of this machine one MetaWrap2 run may take. The defaults below are the ones in
-# effect if you delete this whole section, and they are fractions on purpose: a fraction
-# travels between a laptop and a large node, an absolute number does not. Whatever you set
-# here is divided between concurrent steps, never multiplied - `metawrap2 run -j 4` gives each
-# of four samples a quarter of it, so four samples never ask for four machines' worth of RAM.
+# How much of this machine one MetaWrap2 run may take. The defaults below apply if this section
+# is deleted. Fractions carry over between a laptop and a large node; absolute numbers do not.
+# The budget is divided between concurrent steps: `metawrap2 run -j 4` gives each of four samples
+# a quarter of it.
 #
 # max_thread_fraction = 0.5   # half the cores (cgroup- and affinity-aware, not just nproc)
 # max_memory_fraction = 0.8   # 80% of RAM, what an unset -m resolves to
 # max_disk_fraction = 0.7     # stop the run if a filesystem it writes to passes 70% full
 # max_gpus = 0                # unset means every GPU this machine has; 0 means use none
+# gpu_strict = false          # refuse a GPU step when another process already holds the card.
+#                             # Use for benchmarks: a shared card inflates the step's wall time,
+#                             # and its GPU cost cannot be separated from the other job's.
 #
 # Absolutes win over fractions when you give them, and are still clamped to the machine:
 # max_threads = 32
@@ -28,15 +29,14 @@ use_conda_envs = true
 #
 # Every one of these has a command-line equivalent for a single run: --max-threads,
 # --max-memory-gb, --max-disk-fraction, --max-gpus, and so on. See `metawrap2 --help`.
-# `metawrap2 calibrate` compares what runs were granted against what they really used.
+# `metawrap2 calibrate` compares what runs were granted with what they used.
 
 [databases]
 # Point these at your own databases, or let `metawrap2 install-db` fill them in. Every line is
-# commented out on purpose: an uncommented placeholder is a *configured* path that does not
-# exist, which `metawrap2 config show` and `doctor` then report as a missing database rather
-# than as one you have not set up yet - two different states needing two different fixes. It
-# also leaves `install-db` deciding whether to replace a key or add a second one. Uncomment a
-# line only when the path next to it is real.
+# commented out. An uncommented placeholder is a configured path that does not exist:
+# `metawrap2 config show` and `doctor` report it as a missing database (not as one not yet set
+# up), and `install-db` cannot tell whether to replace the key or add a second one.
+# Uncomment a line only when its path exists.
 # kraken2 module:
 # KRAKEN2_DB = "/path/to/my/kraken2_database"
 # read_qc host removal (the directory holding <host>.bitmask and <host>.srprism*):
@@ -46,8 +46,10 @@ use_conda_envs = true
 # The database's name inside BLASTDB. Only needed if it is not called "nt" (e.g. "core_nt").
 # BLASTDB_NAME = "nt"
 # TAXDUMP = "/path/to/my/NCBI_tax"
-# CheckM1 reference data, used by bin_refinement / reassemble_bins / binning --run-checkm.
-# CheckM stores this path itself; `metawrap2 install-db checkm` runs `checkm data setRoot`.
+# CheckM2's DIAMOND database, for bin_refinement / reassemble_bins / binning --run-checkm, which
+# score bins with CheckM2. `metawrap2 install-db checkm2` installs it and writes this.
+# CHECKM2DB = "/path/to/my/CheckM2_database/uniref100.KO.1.dmnd"
+# CheckM1 reference data, for the same modules with --checkm1 (`metawrap2 install-db checkm`).
 # CHECKM_DB = "/path/to/my/checkm_data"
 
 # Only needed for the opt-in modern tools:

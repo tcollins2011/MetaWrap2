@@ -1,10 +1,8 @@
 """Tests for the cohort path of the driver: per-sample assembly, one coverage pass, one catalogue.
 
-The co-assembly path was the only one wired correctly. With ``coassemble = false`` the planner
-produced per-sample assemblies and then pointed binning and quant_bins at
-``ASSEMBLY/final_assembly.fasta`` - a file that mode never writes - and reassembly at
-``CLEAN_READS/ALL_READS_*``, which is only concatenated when co-assembling. Every assertion here
-about a per-sample path is pinning that down, not decorating it.
+Guards a past bug: with ``coassemble = false`` the planner pointed binning and quant_bins at
+``ASSEMBLY/final_assembly.fasta`` and reassembly at ``CLEAN_READS/ALL_READS_*``, which only the
+co-assembly path writes. The per-sample path assertions check this.
 """
 
 from metawrap2.commands import cohort as cohort_cmd
@@ -52,8 +50,7 @@ def _names(steps):
 def test_a_cohort_defaults_to_the_cohort_steps(tmp_path, monkeypatch, capsys):
     study, layout, steps = _plan(tmp_path)
     assert study.steps == driver.COHORT_STEPS
-    # The two stages that only exist in this mode are on by default; the expensive per-sample one
-    # is not.
+    # The two cohort-only stages are on by default; per-sample reassembly (expensive) is off.
     assert "coverage" in study.steps and "dereplicate" in study.steps
     assert "reassemble_bins" not in study.steps
     assert _names(steps) == [
@@ -77,11 +74,11 @@ def test_a_cohort_defaults_to_the_cohort_steps(tmp_path, monkeypatch, capsys):
 
     quant = _argv_for(steps, "quant_bins")
     assert quant[quant.index("-b") + 1] == layout.catalogue_genomes
-    # No -a: near-identical MAGs from different samples would divide one organism's reads between
-    # them, and there is no single assembly to quantify against anyway.
+    # No -a: near-identical MAGs from different samples would split one organism's reads, and
+    # there is no single assembly to quantify against.
     assert "-a" not in quant
 
-    # `metawrap2 cohort` is this plan, forced over a sheet that asked for co-assembly - not silently.
+    # `metawrap2 cohort` forces this plan over a sheet that asks for co-assembly, and says so.
     seen = {}
 
     def fake_execute(steps, layout, study, *args, **kwargs):
@@ -107,7 +104,7 @@ def test_every_step_reads_a_path_the_cohort_actually_produces(tmp_path):
     study.steps_chosen = True
     layout = driver.Layout(str(tmp_path / "study"))
     steps = driver.plan_steps(study, layout)
-    # Nothing may reference the co-assembly's outputs: in this mode they are never written.
+    # No step may reference co-assembly outputs; this mode does not write them.
     forbidden = (
         layout.assembly,
         layout.binner_bins("metabat2"),
@@ -128,6 +125,6 @@ def test_refinement_consolidates_each_sample_on_its_own(tmp_path):
         assert layout.sample_refinement_dir(sample) in argv
         for binner in driver.selected_binners(list(driver.DEFAULT_BINNERS)):
             assert layout.sample_binner_bins(sample, binner) in argv
-        # Never another sample's bins: consolidation across samples is dereplication's job.
+        # No other sample's bins; cross-sample consolidation is done by dereplication.
         other = "B" if sample == "A" else "A"
         assert not any(("/%s/" % other) in a for a in argv)

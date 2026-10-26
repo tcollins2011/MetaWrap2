@@ -3,26 +3,22 @@ name: End-to-end
 # One real run of `metawrap2 run` on the committed fixture, with the real tools, asserting it
 # reaches the study-complete banner.
 #
-# Unit tests stub the tools and the golden test stubs them too, deliberately: both are about
-# MetaWrap2's own contract. What neither can see is a step that finishes and hands the next step
-# something it cannot read - the output moved, a suffix changed, a path the driver built from a
-# module's old convention. That failure only exists when the steps are chained and the tools are
-# real, which is this job.
+# Unit tests and the golden test stub the tools, since both test MetaWrap2's own contract. They
+# cannot catch a step that finishes and hands the next step something it cannot read (moved
+# output, changed suffix, a path the driver built from a module's old convention). That needs
+# chained steps with real tools.
 #
-# Scope: `read_qc` -> `assembly`, the two steps the committed fixture can actually complete, and
-# the handoff (READ_QC/final_pure_reads_* -> CLEAN_READS/ -> the assembler's input) that the run
-# driver owns rather than any module. The later steps are deliberately not here: the fixture is
-# 4,000 read pairs over three shredded genomes - datasets.toml says outright that it is sized for
-# the harness and not for a binner - so binning would produce no bin of the 50 kb-20 Mb a refined
-# bin has to be, and `bin_refinement` needs a multi-GB CheckM database on top. Widen `steps` by
-# hand (the dispatch input below) when the fixture grows enough to carry them; a step added here
-# that fails because the data is too small teaches nobody anything.
+# Scope: `read_qc` -> `assembly`, the two steps the committed fixture can complete, and the
+# handoff the run driver owns (READ_QC/final_pure_reads_* -> CLEAN_READS/ -> the assembler's
+# input). The fixture is 4,000 read pairs over three shredded genomes, sized for the harness and
+# not for a binner (see datasets.toml), so binning would produce no bin in the 50 kb-20 Mb range a
+# refined bin needs, and `bin_refinement` also needs a multi-GB CheckM database. Widen `steps`
+# (the dispatch input below) when the fixture is large enough for later steps.
 #
-# The environments come from the committed lockfiles, not a fresh solve: this job is about
-# MetaWrap2's plumbing, and a tool that changed upstream should fail the Fresh env solve
-# workflow, where that is the finding, instead of turning up here as a mystery.
+# The environments come from the committed lockfiles, not a fresh solve. Upstream tool changes
+# are caught by the Fresh env solve workflow.
 #
-# Conda, a download, and ~10 minutes, so it is weekly and on demand.
+# Needs conda, a download and ~10 minutes, so it runs weekly and on demand.
 
 on:
   schedule:
@@ -53,8 +49,8 @@ jobs:
 
       - run: pip install .
 
-      # Which environments the chosen steps need, from the same table the modules use, so adding
-      # a step to `steps` installs what it needs without a second edit here.
+      # Which environments the chosen steps need, from the table the modules use, so adding a step
+      # to `steps` installs what it needs without another edit here.
       - name: Work out what has to be installed
         id: plan
         run: |
@@ -77,9 +73,8 @@ jobs:
           echo "locks=$locks" >> "$GITHUB_OUTPUT"
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
 
-      # A green job that tested nothing is worse than no job, so the one case where this cannot
-      # run - a step whose environment has no committed lockfile - says so loudly in the run's
-      # annotations and in the summary, and the run steps below are skipped rather than passed.
+      # If a step's environment has no committed lockfile, say so in the run's annotations and
+      # summary, and skip the run steps below instead of passing them.
       - name: Nothing to run against
         if: steps.plan.outputs.missing != ''
         run: |
@@ -95,8 +90,8 @@ jobs:
         if: steps.plan.outputs.missing == ''
         run: |
           cat > sheet.toml <<'TOML'
-          # The committed fixture, one paired sample. No [modules] section: the whole point is to
-          # run what a user running MetaWrap2 runs, with the defaults the modules choose.
+          # The committed fixture, one paired sample. No [modules] section, so the modules run
+          # with their defaults, as for a user.
           [settings]
           coassemble = true
 
@@ -107,8 +102,8 @@ jobs:
           TOML
           cat sheet.toml
 
-      # -t 2 -m 6 rather than the machine's budget: a GitHub runner has 2 cores and 7 GB, and a
-      # step that asks for more than the box has is a failure this job should not be inventing.
+      # -t 2 -m 6 instead of the machine's budget: a GitHub runner has 2 cores and 7 GB, and a step
+      # should not ask for more than the runner has.
       - name: Run the study
         if: steps.plan.outputs.missing == ''
         run: |
@@ -119,13 +114,12 @@ jobs:
         if: steps.plan.outputs.missing == ''
         run: |
           grep -q "STUDY COMPLETE" run.log
-          # The banner alone is not enough: a step that produced nothing and was recorded as done
-          # would still print it. These are the files the *next* step reads, which is the handoff
-          # this job exists to test.
+          # The banner is printed even if a step produced nothing and was recorded as done, so
+          # also check the files the next step reads.
           ls -la study study/CLEAN_READS
-          # Both names: <sample>_N.fastq is read_qc's output exposed for the per-sample steps,
-          # ALL_READS_N.fastq is the concatenation a co-assembly reads. The driver builds both,
-          # and it is the second one the assembler was handed.
+          # <sample>_N.fastq is read_qc's output for the per-sample steps; ALL_READS_N.fastq is
+          # the concatenation the co-assembly reads. The driver builds both and the assembler
+          # gets ALL_READS_N.fastq.
           test -s study/CLEAN_READS/tiny_1.fastq
           test -s study/CLEAN_READS/tiny_2.fastq
           test -s study/CLEAN_READS/ALL_READS_1.fastq
@@ -133,8 +127,7 @@ jobs:
           grep -c '^>' study/ASSEMBLY/final_assembly.fasta
           echo "End-to-end run completed: $STEPS" >> "$GITHUB_STEP_SUMMARY"
 
-      # Two very different findings end up here, and the difference is worth stating rather than
-      # leaving to whoever reads the log at 7am.
+      # Two different kinds of failure end up here; the message says which.
       - name: Say what a failure here means
         if: failure()
         run: |

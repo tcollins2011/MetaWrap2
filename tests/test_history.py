@@ -1,7 +1,6 @@
 """Tests for the durable run history (metawrap2.history) and `metawrap2 history`.
 
-Two properties matter more than the formatting: a history write must never be able to fail a
-run, and a run that was killed must still leave a trace. Both are pinned below.
+Checks that a failed history write never fails a run, and that a killed run still leaves a row.
 """
 
 from __future__ import annotations
@@ -35,12 +34,12 @@ def add(path, module="binning", status=history.STARTED, run_id="r1", **kw):
 
 
 def test_a_killed_run_still_leaves_a_started_row(hist, tmp_path, capsys):
-    """No outcome entry was ever written - the row must survive anyway, visibly unfinished."""
+    """A run with no outcome entry still appears, shown as unfinished."""
     add(hist, run_id="killed", status=history.STARTED)
     rows = history.runs(hist)
     assert len(rows) == 1 and rows[0]["status"] == history.STARTED
 
-    # Losing a history line must never be the reason a six-hour assembly fails.
+    # A failed history write must not fail the run.
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory")
     add(str(blocker / "history.jsonl"))  # parent is a file: makedirs/open both fail

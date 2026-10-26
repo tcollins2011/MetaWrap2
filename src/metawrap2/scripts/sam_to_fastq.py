@@ -1,31 +1,24 @@
-"""Extract read sequences/qualities from a SAM stream into a FASTQ-style file.
+"""Extract read sequences and qualities from a SAM stream into a FASTQ file.
 
 For every alignment record (a line with at least 11 tab fields) the QNAME, SEQ and QUAL columns
-are emitted. Reads ``-`` as standard input so an aligner can be piped straight in: the assembly
-module's unmapped-read extraction used to write the aligner's full SAM to disk, filter it into a
-second SAM, convert that, then delete both - roughly 25 GB of text at peak to produce one FASTQ.
+are written. ``-`` reads standard input, so an aligner can be piped in directly. The assembly
+module's unmapped-read extraction previously wrote the full SAM to disk, filtered it into a second
+SAM and converted that, about 25 GB of text at peak for one FASTQ.
 
-The original wrote a ``>`` header while emitting the rest of a 4-line FASTQ record, so the
-file it produced was neither valid FASTA nor valid FASTQ despite its ``.fastq`` name. MEGAHIT
-(its only consumer) parses both forms identically - verified by running it on the
-two variants and comparing the read count and length it reports - so emitting the correct
-``@`` changes nothing downstream while making the file readable by every other tool.
+The original wrote a ``>`` header on a 4-line FASTQ record, which is neither valid FASTA nor valid
+FASTQ. MEGAHIT, the only consumer, reports the same read count and length for both forms, so
+writing ``@`` changes nothing downstream and makes the file readable by other tools.
 
-``--unmapped`` reads the unmapped bit in FLAG. It used to test for the absence of an ``NM:i:`` tag
-instead, which is a claim about one aligner rather than about SAM: bwa writes the edit distance on
-every aligned record, so absence stood in for "did not align". The two agree exactly on real bwa
-output - 33,332,411 records from a CAMI2 sample, zero disagreements in either direction - so this
-does not change what the hybrid assembly is built from today. It is a fix because the module it
-serves is moving off bwa: minimap2 is MetaWrap2's measured default aligner everywhere else, and an
-aligner that omits NM would have made every mapped read look unmapped, which fails by silently
-handing MEGAHIT the entire read set rather than by stopping.
+``--unmapped`` tests the unmapped bit in FLAG. The original tested for a missing ``NM:i:`` tag,
+which only works for aligners that, like bwa, write NM on every aligned record. On 33,332,411 bwa
+records from a CAMI2 sample the two tests agree on every record. An aligner that omits NM (the
+module is moving to minimap2) would make every mapped read look unmapped and pass the whole read
+set to MEGAHIT without an error.
 
-Reading the flag costs something, because the NM test could reject a mapped record on a substring
-search without splitting it at all: 650 against 1041 MB per CPU-second over the same 1 GB stream.
-Spent knowingly - the aligner upstream produces SAM at roughly 26 MB/s (bwa) to 146 MB/s (minimap2)
-on this hardware, so the converter has over 4x headroom either way and is not what the pipe waits
-on. ``samtools fastq -f 4`` expresses the same predicate and was measured too: slower again than
-this (711 MB per CPU-second) and it would add samtools to an env that has no other use for it.
+Reading the flag is slower than the NM substring test (650 against 1041 MB per CPU-second over the
+same 1 GB stream). The upstream aligner produces SAM at about 26 MB/s (bwa) to 146 MB/s (minimap2),
+so the converter still has over 4x headroom. ``samtools fastq -f 4`` was also measured: 711 MB per
+CPU-second, and it would add samtools to an env that does not otherwise need it.
 """
 
 from __future__ import annotations
@@ -39,25 +32,19 @@ from ..io.seqio import smart_open
 #: The unmapped bit in FLAG, which is the second field of every alignment record.
 UNMAPPED_FLAG = 0x4
 
-#: Secondary (0x100) and supplementary (0x800) records are extra alignments of a read that is
-#: already represented by its primary record, so emitting them would repeat reads. They can never
-#: be unmapped, so this only matters to the unfiltered mode.
+#: Secondary (0x100) and supplementary (0x800) records repeat a read already given by its primary
+#: record. They are never unmapped, so this only applies to the unfiltered mode.
 SECONDARY_FLAGS = 0x100 | 0x800
 
 
 def _flag(line: str) -> int:
     """FLAG for a SAM *line*, or 0 if it has no readable second field.
 
-    0 rather than a negative sentinel because it has to be safe under a bitmask: a negative int is
-    all ones in two's complement, so ``-1 & UNMAPPED_FLAG`` is truthy and a header line would be
-    treated as an unmapped read. 0 is "mapped, forward, primary", which is the right answer for
-    something that is not a record at all - it reaches the field-count check and is dropped there,
-    exactly as it was before any flag was looked at.
+    The fallback is 0 because a negative sentinel such as -1 has every bit set, so a header line
+    would test as unmapped. A line with flag 0 is later dropped by the field-count check.
 
-    Split with maxsplit rather than in full: this runs once per record in the middle of an aligner
-    pipe, and a 450-byte record would otherwise be cut into a dozen strings to read one of them.
-    Slicing between two ``find`` calls to skip even the 3-element list is slower, not faster (599
-    against 650 MB per CPU-second over the same 1 GB stream), so the obvious version is the one.
+    ``maxsplit`` avoids splitting the whole record on every line of the stream. Slicing between
+    two ``find`` calls was slower (599 against 650 MB per CPU-second over the same 1 GB stream).
     """
     parts = line.split("\t", 2)
     if len(parts) < 3:
@@ -79,8 +66,7 @@ def _emit(line: str, out: IO) -> None:
 def records(lines: Iterable[str], out: IO, unmapped_only: bool = False) -> None:
     """Write QNAME/SEQ/QUAL records from SAM *lines* to *out*.
 
-    One loop per mode rather than one loop that re-asks which mode it is on every record, since
-    neither mode is ever half of a stream.
+    Each mode has its own loop so the mode is not tested on every record.
     """
     if unmapped_only:
         for line in lines:

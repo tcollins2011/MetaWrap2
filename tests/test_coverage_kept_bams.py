@@ -1,10 +1,8 @@
-"""Kept BAMs have to name contigs the way the assembly does, or say loudly that they do not.
+"""Tests that kept BAMs name contigs as the assembly does, or that a warning says they do not.
 
-The defect: `coverage -a water=asm.fa --keep-bams` aligns against a catalogue whose contigs are
-`water~<contig>` and splits the depth table back to plain names - but left the kept BAMs prefixed.
-metaBAT2 reads the table and works; SemiBin2, VAMB, COMEBin and CONCOCT read the BAM and matched
-**zero** contigs against the plain assembly, with nothing raised and no bins produced. Two users
-hit it independently on the same handoff.
+`coverage -a water=asm.fa --keep-bams` aligns against a catalogue whose contigs are
+`water~<contig>` and splits the depth table back to plain names. Kept BAMs left prefixed matched
+zero contigs in SemiBin2, VAMB, COMEBin and CONCOCT, which read the BAM; metaBAT2 reads the table.
 """
 
 import os
@@ -25,7 +23,7 @@ def test_only_the_sq_names_are_rewritten():
     plain, renamed = coverage.plain_header(_header("water~"), "water", "~")
     assert renamed == 2
     assert "SN:k141_1" in plain and "SN:water~k141_1" not in plain
-    # @PG records what ran. Rewriting it to tidy a name would falsify provenance.
+    # @PG records what ran and is kept as is.
     assert "CL:bwa mem catalogue.fa" in plain
     assert plain.startswith("@HD\tVN:1.6")
 
@@ -51,7 +49,7 @@ def test_one_assembly_gets_its_bam_headers_rewritten(tmp_path, monkeypatch):
     monkeypatch.setattr(coverage, "capture_in_env", lambda env, argv: _header("water~"))
 
     def fake_run(cmd, **kwargs):
-        # fs_move is the real one, so the reheadered file has to exist as samtools would leave it.
+        # fs_move is real, so create the reheadered file samtools would write.
         calls.append((cmd, kwargs))
         if "stdout_path" in kwargs:
             with open(kwargs["stdout_path"], "w") as handle:
@@ -67,9 +65,7 @@ def test_one_assembly_gets_its_bam_headers_rewritten(tmp_path, monkeypatch):
     assert kwargs["stdout_path"].endswith(".plain.bam")
     assert os.path.isfile(str(work / "sample_0.bam"))
     assert not os.path.exists(str(work / "sample_0.bam.plain.sam"))
-    # And the kept BAM is indexed, after the rewrite rather than before it - reheadering writes a
-    # new file, which would strand the index. A kept BAM with no .bai is a step every reader of it
-    # has to remember.
+    # The kept BAM is indexed after the rewrite, since reheadering writes a new file.
     assert calls[1][0].startswith("samtools index")
 
 

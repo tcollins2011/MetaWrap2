@@ -1,8 +1,7 @@
 """MetaWrap2 support library.
 
-Houses the logic behind the MetaWrap2 modules (metawrap2.modules.*) and the CLI. The
-modules stay thin, legible "recipe" files that assemble and run external tools; this
-package keeps that layer portable and testable.
+Holds the logic behind the MetaWrap2 modules (metawrap2.modules.*) and the CLI. The modules are
+short files that assemble and run external tools; this package holds the shared, testable code.
 """
 
-__version__ = "2.1.3"
+__version__ = "2.1.4"

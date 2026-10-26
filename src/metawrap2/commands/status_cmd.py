@@ -1,17 +1,14 @@
-"""`metawrap2 status <study_dir>` - what has run in this study, and what a resume would do.
+"""`metawrap2 status <study_dir>`: show what has run in a study and what ``--resume`` would do.
 
-The manifest already records every step's command, inputs, outputs, timing and outcome. Until
-now nothing read it back, so the information existed but was only visible to ``--resume``. This
-command prints it:
+Prints the manifest's record of each step's command, inputs, outputs, timing and outcome:
 
     metawrap2 status study/            # per-step table, and what --resume would skip or redo
     metawrap2 status study/ --audit    # check every recorded output is still present, non-empty
     metawrap2 status study/ --step binning --verbose    # one step's inputs, outputs, command
     metawrap2 status study/ --json     # the manifest, for scripting
 
-The most useful column is the last one. A step is shown as ``would skip`` only under the same
-verification ``--resume`` applies - completed, outputs intact, inputs unchanged - so this answers
-"what will happen if I re-run this?" before you re-run it.
+A step is shown as ``would skip`` only if it passes the same checks ``--resume`` applies:
+completed, outputs intact and inputs unchanged.
 """
 
 from __future__ import annotations
@@ -25,8 +22,7 @@ from .. import usage as _usage
 from ..cliformat import make_parser
 from ..manifest import COMPLETED, MANIFEST_NAME, Manifest
 
-#: Must match metawrap2.commands.run._STATE_DIR. Imported lazily in manifest_path() rather than
-#: at module scope, because importing the driver to print a table is a lot of machinery.
+#: Must match metawrap2.commands.run._STATE_DIR. Duplicated to avoid importing the run driver.
 _STATE_DIR = os.path.join(".metawrap2", "run_steps")
 
 _MARK = {
@@ -45,14 +41,11 @@ def manifest_path(study_dir: str) -> str:
 
 
 def execution_order(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The steps in the order a run performs them, which is not the order a name sort gives.
+    """The steps in the order a run performs them.
 
-    The manifest is saved with sorted keys, so reading it back produced assembly, bin_refinement,
-    binning, quant_bins, read_qc, reassemble_bins - a sequence no study ever ran, and the one thing
-    a user wants from a status table is what happened after what. The driver's ``ALL_STEPS`` is the
-    order its planner itself uses, so that is the order used here. A step the plan does not contain
-    (an older manifest, a module since renamed) keeps its manifest position after the ones it does,
-    and the sort is stable, so the samples within a stage stay in sheet order.
+    The manifest is saved with sorted keys, so steps are reordered by the driver's ``ALL_STEPS``.
+    Steps not in ``ALL_STEPS`` (older manifests, renamed modules) go last. The sort is stable, so
+    samples within a stage keep their sheet order.
     """
     from .run import ALL_STEPS
 
@@ -203,9 +196,8 @@ def main(argv: List[str]) -> int:
     _print_table(manifest, steps, args.strict_fingerprints)
     study = manifest.data.get("study") or {}
     if study:
-        # Which of the two analyses produced this directory. A co-assembly catalogue and a
-        # per-sample one are not comparable - different genome counts, different redundancy - and
-        # the step table alone does not say which one is on disk.
+        # Show the assembly strategy: co-assembly and per-sample catalogues are not comparable,
+        # and the step table does not show which one this is.
         print(
             "  %s of %d sample(s), dereplication %s."
             % (

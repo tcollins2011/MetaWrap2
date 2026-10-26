@@ -1,12 +1,11 @@
-"""The two read filters that feed `reassemble_bins`, and the three ways they read a SAM wrongly.
+"""Tests for the short- and long-read filters that feed `reassemble_bins`.
 
-Neither script had a test, which is how all three survived: both decided whether a record had aligned
-from the presence of an ``NM`` tag rather than from the FLAG, neither excluded secondary or
-supplementary alignments, and a missing ``NM`` scored as 0 - a perfect match - rather than as unknown.
+Covers three past bugs: alignment status was taken from the presence of an ``NM`` tag instead of
+the FLAG, secondary and supplementary alignments were not excluded, and a missing ``NM`` scored as
+0 (a perfect match) instead of unknown.
 
-Every SAM record below is written out in full rather than built by a helper, because what is being
-tested is the reading of specific columns and flag bits, and a helper that set them would be the same
-assumption twice.
+SAM records are written out in full, not built by a helper, so the columns and flag bits under test
+are explicit.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ _COLS = "%s\t%d\tc1\t100\t60\t4M\t=\t200\t104\t%s\t%s"
 
 
 def _bins(tmp_path):
-    """Two bins, one contig each, named the way every binner's output is named."""
+    """Two bins, one contig each, named as binner output is named."""
     (tmp_path / "bins").mkdir()
     (tmp_path / "bins" / "bin_001.fasta").write_text(">c1 len=5000\nACGTACGTAC\n")
     (tmp_path / "bins" / "bin_002.fasta").write_text(">c2 len=4000\nTTTTTTTTTT\n")
@@ -34,13 +33,11 @@ def _read(path):
 
 
 def test_a_supplementary_alignment_does_not_displace_the_mate_it_is_filed_next_to(tmp_path):
-    """The failure is not that a junk record is emitted - it is that a real pair disappears.
+    """A supplementary record between two mates does not replace the forward mate.
 
-    A supplementary record carries the first-mate bit, so the old pairing took it for the forward
-    mate, dropped the real one, and then yielded it against the next reverse mate: two different
-    reads, recruited on where neither of them aligned. Here that puts the forward mate on c2 and the
-    reverse on c1, which disagree, so the pair is silently discarded - and the hard-clipped SEQ would
-    have gone into the FASTQ had they agreed.
+    The supplementary record carries the first-mate bit. Previously it replaced the real forward
+    mate and was paired with the next reverse mate; here the two disagree on bin (c2 and c1), so
+    the pair was dropped.
     """
     sam = [
         _COLS % ("r1", 0x40, "ACGT", "JJJJ") + "\tNM:i:0",
@@ -54,13 +51,13 @@ def test_a_supplementary_alignment_does_not_displace_the_mate_it_is_filed_next_t
     assert _read(os.path.join(out, "bin_001.strict_1.fastq")) == "@r1/1\nACGT\n+\nJJJJ\n"
     assert not os.path.exists(os.path.join(out, "bin_002.strict_1.fastq"))
 
-    # Alignment status comes off the FLAG, not the presence of NM: an aligner that writes no NM
-    # used to recruit nothing, so every bin reassembled from no reads.
+    # Alignment status comes from the FLAG; with the NM check, an aligner that writes no NM
+    # recruited no reads.
     sam = [_COLS % ("r1", 0x40, "ACGT", "JJJJ"), _COLS % ("r1", 0x80, "ACGT", "JJJJ")]
     counts = short.filter_reads(iter(sam), bins, str(tmp_path / "no_nm"), strict=2, permissive=5)
     assert counts["recruited"] == 1 and counts["permissive"] == 1
 
-    # A missing NM on an aligned mate is unknown, not 0 (a perfect match): permissive, never strict.
+    # A missing NM on an aligned mate is unknown, so the pair is permissive, never strict.
     sam = [
         _COLS % ("r1", 0x40, "ACGT", "JJJJ") + "\tNM:i:5",
         _COLS % ("r1", 0x80, "ACGT", "JJJJ"),
@@ -70,9 +67,10 @@ def test_a_supplementary_alignment_does_not_displace_the_mate_it_is_filed_next_t
 
 
 def test_a_long_read_secondary_alignment_is_not_turned_back_into_a_fastq_record(tmp_path):
-    """The one that was reaching SPAdes. ``minimap2 -ax map-ont`` emits secondary alignments by
-    default, writes their SEQ as ``*``, and puts NM on them - so the old NM-presence test let each
-    one through as a one-base read. A long read crossing a repeat produces several.
+    """Long-read secondary and supplementary alignments are not written to the FASTQ.
+
+    ``minimap2 -ax map-ont`` emits secondary alignments by default, with SEQ ``*`` and an NM tag,
+    so the NM-presence check passed each one to SPAdes as a one-base read.
     """
     sam = [
         "r1\t0\tc1\t100\t60\t4M\t*\t0\t0\tACGT\tJJJJ\tNM:i:30",
@@ -85,6 +83,6 @@ def test_a_long_read_secondary_alignment_is_not_turned_back_into_a_fastq_record(
     assert counts["recruited"] == 1
     assert _read(os.path.join(out, "bin_001.nanopore.fastq")) == "@r1/1\nACGT\n+\nJJJJ\n"
 
-    # An unmapped long read placed at a contig: RNAME passes the reference check, only FLAG says no.
+    # An unmapped read placed at a contig has an RNAME; only the FLAG marks it unmapped.
     sam = ["r1\t%d\tc1\t100\t0\t*\t*\t0\t0\tACGT\tJJJJ" % 0x4]
     assert nano.filter_reads(iter(sam), bins, str(tmp_path / "unmapped"))["recruited"] == 0

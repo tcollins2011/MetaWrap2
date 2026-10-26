@@ -1,4 +1,4 @@
-"""The single place that owns *running an external command* in MetaWrap2.
+"""Running external commands in MetaWrap2.
 
 Everything about executing a tool goes through :class:`CommandRunner`:
 
@@ -30,15 +30,14 @@ import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol, Sequence, TextIO, Union
 
-from .logfilter import LogFilter
+from .logfilter import HEARTBEAT_SECONDS, Heartbeat, LogFilter
 from .logging import log_tool_output
 
 
 class Recorder(Protocol):
     """What the runner needs from a provenance recorder.
 
-    A Protocol rather than an import of RunRecorder: provenance imports nothing from here, and
-    keeping it that way avoids a circular import while still type-checking the one call made.
+    A Protocol instead of importing RunRecorder, which avoids a circular import with provenance.
     """
 
     def record_command(self, cmd: str) -> None: ...
@@ -53,6 +52,7 @@ __all__ = [
     "set_dry_run",
     "set_env_manager",
     "set_force",
+    "set_heartbeat_seconds",
     "set_recorder",
     "set_resume",
     "set_run_logs",
@@ -86,20 +86,17 @@ class ToolError(RuntimeError):
 class EnvManagerMissing(RuntimeError):
     """Raised when a command needs a conda environment but the env manager is not on PATH.
 
-    Without this check the failure surfaces from deep inside :func:`subprocess.Popen` as a bare
-    ``FileNotFoundError: 'mamba'``, which reads like the *tool* is missing rather than the thing
-    that was supposed to find it. It is raised when the argv is built rather than when it runs, so
-    a long pipeline stops on its first step instead of recording a directory of failed ones.
+    Raised while building the argv, so a pipeline stops at its first step with a clear message
+    instead of a ``FileNotFoundError: 'mamba'`` from :func:`subprocess.Popen`.
     """
 
     def __init__(self, env_manager: str, env: str) -> None:
         super().__init__(
-            "%s is not on PATH, so tools cannot be run inside their conda environment (%s).\n"
-            "Either add it - a conda/mamba install usually needs "
-            'PATH="$HOME/miniforge3/bin:$PATH" exported, which a non-login shell and most '
-            "batch schedulers do not do for you - or set use_conda_envs = false under [settings] "
-            "in ~/.metawrap2/config.toml to run whatever is already on PATH instead."
-            % (env_manager, env)
+            "%s is not on PATH, so tools cannot run inside their conda environment (%s).\n"
+            "Add it to PATH (for a conda/mamba install, export "
+            'PATH="$HOME/miniforge3/bin:$PATH"; non-login shells and most batch schedulers '
+            "do not set it), or set use_conda_envs = false under [settings] in "
+            "~/.metawrap2/config.toml to run the tools already on PATH." % (env_manager, env)
         )
         self.env_manager = env_manager
         self.env = env
@@ -111,11 +108,10 @@ _RUN_FLAGS_CACHE: dict = {}
 def _run_flags(env_manager: str) -> List[str]:
     """Extra flags for ``<env_manager> run`` so the child's output streams through live.
 
-    ``--no-capture-output`` is a *conda* flag. mamba 2.x does not accept it and mis-parses it
-    into the generated wrapper script, so every command fails with
-    ``exec: --: invalid option`` - which looks like the tool is missing rather than like a
-    flag problem. mamba 2.x streams output by default anyway, so when the flag is not
-    supported we simply omit it. The answer is cached: this shells out once per process.
+    ``--no-capture-output`` is a conda flag. mamba 2.x does not accept it and mis-parses it into
+    the generated wrapper script, so every command fails with ``exec: --: invalid option``. mamba
+    2.x streams output by default, so the flag is omitted when unsupported. The result is cached
+    per process.
     """
     if env_manager in _RUN_FLAGS_CACHE:
         return _RUN_FLAGS_CACHE[env_manager]
@@ -140,6 +136,43 @@ def _run_flags(env_manager: str) -> List[str]:
     return flags
 
 
+#: The configured heartbeat interval, read once per process on first use. Not at import, because
+#: ``--config``/``$METAWRAP2_CONFIG`` are not known yet then; cached, because a module runs hundreds
+#: of commands.
+_CONFIGURED_HEARTBEAT: Optional[float] = None
+
+
+def configured_heartbeat_seconds() -> float:
+    """``[settings] heartbeat_seconds``, or the default when the config does not set it."""
+    global _CONFIGURED_HEARTBEAT
+    if _CONFIGURED_HEARTBEAT is None:
+        from .config import load_settings
+
+        # strict=False: config errors are reported when the run loads the config, and a key that
+        # only controls a progress line must not fail a step.
+        value = load_settings(strict=False).heartbeat_seconds
+        _CONFIGURED_HEARTBEAT = HEARTBEAT_SECONDS if value is None else max(0.0, float(value))
+    return _CONFIGURED_HEARTBEAT
+
+
+def _beat(heartbeat: Heartbeat, screen: Optional[TextIO], stop: threading.Event) -> None:
+    """Print *heartbeat* lines to *screen* until *stop* is set.
+
+    A separate thread, because the output pumps are blocked in ``pipe.readline`` while the tool is
+    silent. The lines go to the screen only, never to ``run.stdout``/``run.stderr`` (see
+    :class:`metawrap2.logfilter.Heartbeat`).
+    """
+    while not stop.is_set():
+        stop.wait(heartbeat.tick_seconds)
+        if stop.is_set():
+            # Checked again after the wait, so no heartbeat follows the output of a finished step.
+            return
+        line = heartbeat.due()
+        if line and screen is not None:
+            screen.write(line)
+            screen.flush()
+
+
 def _pump(
     pipe,
     screen: Optional[TextIO],
@@ -151,8 +184,8 @@ def _pump(
     """Read *pipe* line by line, echoing to *screen* and appending to *logfile*/*tail*.
 
     *log_filter* collapses progress-bar redraws and caps runaway repeated messages (see
-    :mod:`metawrap2.logfilter`). The error *tail* is always fed the unfiltered line, so the
-    message in a ToolError still shows exactly what the tool last said.
+    :mod:`metawrap2.logfilter`). The error *tail* always gets the unfiltered line, so a ToolError
+    shows what the tool last printed.
     """
     try:
         for line in iter(pipe.readline, ""):
@@ -169,8 +202,8 @@ def _pump(
             if logfile is not None:
                 logfile.write(shown)
                 logfile.flush()
-            # Also record it in the combined run log, so metawrap2.log has the whole story of
-            # the run in order rather than only what MetaWrap2 itself said.
+            # Also write it to the combined run log (metawrap2.log), in order with MetaWrap2's
+            # own messages.
             log_tool_output(shown, stream_name)
     finally:
         pipe.close()
@@ -190,6 +223,9 @@ class CommandRunner:
     verbose_logs: bool = False  # True disables log noise filtering
     skip_space_check: bool = False  # True disables the preflight disk-space estimate
     skip_validation: bool = False  # True bypasses input/intermediate file validation
+    #: Seconds of silence before a progress heartbeat is printed; 0 turns them off. None uses the
+    #: config file. Set it to override the config, as tests do.
+    heartbeat_seconds: Optional[float] = None
 
     # -- configuration --------------------------------------------------------------------
 
@@ -204,8 +240,7 @@ class CommandRunner:
         if not env:
             return []
         if not self.dry_run and shutil.which(self.env_manager) is None:
-            # Not under a dry run: a dry run is for seeing the plan on a machine that may not have
-            # anything installed yet, and printing the command it would run costs nothing there.
+            # Not under a dry run, which should print the plan even with nothing installed.
             raise EnvManagerMissing(self.env_manager, env)
         return [self.env_manager, "run"] + _run_flags(self.env_manager) + ["-n", env]
 
@@ -267,11 +302,10 @@ class CommandRunner:
         """The environment for the child process, or None to inherit this one unchanged.
 
         A tool running inside a conda env gets ``PYTHONNOUSERSITE=1``, because ``~/.local`` comes
-        *before* the env on ``sys.path`` and silently overrides whatever the env pinned. That is not
-        hypothetical: AMBER's env pins matplotlib below 3.9 for an API it uses, and a matplotlib 3.11
-        in the user's own site-packages was imported instead and crashed it. Only for env-wrapped
-        commands - without an env there is no pin to protect, and a tool the user pip-installed into
-        ``~/.local`` is then exactly the tool they meant to run.
+        before the env on ``sys.path`` and overrides the env's pins. (AMBER's env pins matplotlib
+        below 3.9; a matplotlib 3.11 in the user's site-packages was imported instead and crashed
+        it.) Commands without an env are left alone, since a tool pip-installed into ``~/.local``
+        is then the one the user meant.
 
         *extra* is for a tool that needs a variable set for it specifically; see THREAD_LIMITS.
         """
@@ -303,8 +337,19 @@ class CommandRunner:
 
         # closed in the finally below.
         data_out = open(stdout_path, "w") if stdout_path else None  # noqa: SIM115
-        out_filter = LogFilter(enabled=not self.verbose_logs)
-        err_filter = LogFilter(enabled=not self.verbose_logs)
+        interval = (
+            self.heartbeat_seconds
+            if self.heartbeat_seconds is not None
+            else configured_heartbeat_seconds()
+        )
+        # One heartbeat shared by both streams, so output on either one counts.
+        beat = Heartbeat(step=tool, interval=interval)
+        out_filter = LogFilter(enabled=not self.verbose_logs, heartbeat=beat)
+        err_filter = LogFilter(enabled=not self.verbose_logs, heartbeat=beat)
+        stop_beating = threading.Event()
+        beat_thread = threading.Thread(
+            target=_beat, args=(beat, sys.stderr, stop_beating), daemon=True
+        )
         tail: list = []
         threads: List[threading.Thread] = []
         proc = None
@@ -338,19 +383,23 @@ class CommandRunner:
                 )
             for t in threads:
                 t.start()
+            if beat.enabled:
+                beat_thread.start()
             rc = proc.wait()
             for t in threads:
                 t.join()
         except KeyboardInterrupt:
-            # Everything from Popen onwards, not just the wait: an interrupt arriving while the
-            # output pumps were being started left the tool running with all the threads it had
-            # been granted, orphaned by the run that was exiting - and the next thing the user
-            # started then competed with it for the machine.
+            # Cover everything from Popen on, not just the wait: an interrupt while the output
+            # pumps were starting used to leave the tool running as an orphan.
             if proc is not None:
                 self._terminate(proc)
             raise
         finally:
-            # Report what was collapsed, so a quiet log never hides that it was filtered.
+            # Stop the heartbeat first, so none can be printed after the step's summary.
+            stop_beating.set()
+            if beat_thread.is_alive():
+                beat_thread.join(timeout=beat.tick_seconds + 1.0)
+            # Report what was collapsed, so the log shows that it was filtered.
             for fh, filt in ((run_out, out_filter), (run_err, err_filter)):
                 if fh is None:
                     continue
@@ -380,22 +429,20 @@ class CommandRunner:
 runner = CommandRunner()
 
 
-#: Environment that confines a tool to the parallelism it was *asked* for.
+#: Environment that limits a tool's numerical libraries to the parallelism it was asked for.
 #:
-#: A numerical library picks its own thread count from the core count unless told otherwise, so a tool
-#: that forks N workers and does linear algebra in each gets N x cores threads fighting over cores.
+#: Numerical libraries size their thread pools from the core count, so a tool that forks N workers
+#: doing linear algebra gets N x cores threads.
 #:
-#: Measured, not theorised, and measured *after* the fix rather than assumed from it: capping the
-#: libraries took CONCOCT binning one CAMI2 sample from 29.9 CPU-hours to 23.8, a 1.3x saving, for a
-#: bin set identical down to the count. Small but free, so it stays.
+#: Capping them took CONCOCT binning one CAMI2 sample from 29.9 CPU-hours to 23.8 (1.3x), with an
+#: identical bin set.
 #:
-#: Worth stating what it does not explain. The same CONCOCT version, with byte-identical arguments and
-#: input, costs 5.6 CPU-hours under a pipeline whose environment carries MKL and Python 2.7 instead of
-#: a pthreads OpenBLAS and 3.12. The cap closes a fifth of that; the rest is somewhere in the compiled
-#: numerical stack and is not accounted for here. Do not read this constant as having fixed it.
+#: The same CONCOCT version with identical arguments and input costs 5.6 CPU-hours in a pipeline
+#: whose environment has MKL and Python 2.7 instead of pthreads OpenBLAS and 3.12. The cap closes
+#: about a fifth of that gap; the rest is in the compiled numerical stack and is not addressed here.
 #:
-#: Applies to any tool that forks *and* does array maths. Passed explicitly rather than set globally,
-#: because a tool that is internally threaded and does not fork wants the opposite.
+#: For tools that fork and do array maths. Passed per tool, not set globally, because internally
+#: threaded tools that do not fork need the opposite.
 THREAD_LIMITS = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -437,6 +484,11 @@ def set_verbose_logs(value: bool) -> None:
     runner.configure(verbose_logs=bool(value))
 
 
+def set_heartbeat_seconds(value: Optional[float]) -> None:
+    """Override the heartbeat interval for this process. None restores the configured value."""
+    runner.configure(heartbeat_seconds=None if value is None else max(0.0, float(value)))
+
+
 def set_skip_space_check(value: bool) -> None:
     runner.configure(skip_space_check=bool(value))
 
@@ -451,10 +503,9 @@ _TOOL_PATH_CACHE: dict = {}
 def tool_path_in_env(env: Optional[str], tool: str) -> str:
     """Absolute path to *tool* inside conda env *env* (or just *tool* if not found).
 
-    MetaWrap2's own Python helpers run in the host interpreter, but a few of them shell out
-    to an external tool that only exists inside a module's conda env (blobology's
-    gc_cov_annotate needs samtools). Resolving the absolute path here lets the helper call it
-    directly instead of relying on a PATH that will not contain it. Cached per process.
+    MetaWrap2's Python helpers run in the host interpreter, but some call a tool that exists only
+    in a module's conda env (blobology's gc_cov_annotate needs samtools). The absolute path lets
+    them call it without relying on PATH. Cached per process.
     """
     if not env:
         return tool
@@ -488,10 +539,8 @@ def tool_path_in_env(env: Optional[str], tool: str) -> str:
 def capture_in_env(env: Optional[str], argv: Sequence[str], timeout: int = 120) -> str:
     """Run *argv* inside conda env *env* and return its stdout, or ``""`` if anything went wrong.
 
-    For asking an env a question rather than making it do work - "can torch see a GPU in here?" -
-    where the answer decides a flag and no answer is itself an answer. Deliberately silent: every
-    caller has a usable fallback, and a traceback from a probe would look like a failure of the thing
-    being probed for.
+    For probing an env (for example, whether torch can see a GPU) to decide a flag. Errors are
+    not reported: every caller has a fallback.
     """
     try:
         if env:

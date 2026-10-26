@@ -51,7 +51,7 @@ def build() -> Diagram:
     d.box("bins", "One bin set per binner\n<binner>_bins/", "bins", x(4.2), y(2.4), w=W)
     d.box(
         "presets",
-        "--preset chooses the binners:\nvery-fast: metaBAT2\nfast: + MaxBin2\ndefault: metaBAT2 + SemiBin2\nslow: + COMEBin",
+        "--preset chooses the binners:\nvery-fast: metaBAT2\nfast: + MaxBin2\ndefault: metaBAT2 + SemiBin2\ngpu: + COMEBin, on a GPU",
         "step",
         x(1),
         y(3.75),

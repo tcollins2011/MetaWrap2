@@ -1,10 +1,10 @@
 """MetaWrap2 quant_bins module: estimate the abundance of each bin in each sample.
 
-Four quantifiers answer that question four ways, and all of them write the same bins x samples
-``bin_abundance_table.tsv`` plus, for more than one sample, a clustered Seaborn heatmap of it.
+Four quantifiers are available. All write the same bins x samples ``bin_abundance_table.tsv`` and,
+for more than one sample, a clustered Seaborn heatmap of it.
 
-**sylph is the default**, and the reason is measured rather than assumed. On 76 bins from the CAMI2
-gastrointestinal gold-standard assembly, quantified across three samples against a read-level truth
+**sylph is the default**, based on a benchmark of 76 bins from the CAMI2 gastrointestinal
+gold-standard assembly, quantified across three samples against a read-level truth
 (``metawrap2 benchmark run cami2_gi quantifier``):
 
     quantifier   Spearman  Pearson   L1 sim   CPU-hours  peak RSS
@@ -13,47 +13,36 @@ gastrointestinal gold-standard assembly, quantified across three samples against
     CoverM         0.803    0.952    0.791      2.368    11.6 GB
     depth          0.780    0.953    0.799      0.013     small
 
-**Spearman is an ordering and Pearson is a magnitude, and no quantifier here wins both.** sylph orders
-the bins best, for a tenth of salmon's cpu; salmon gets the magnitudes closest, and sylph is worst at
-them by a wide margin (0.811 against 0.959). So the rule of thumb is that sylph is right when the
-question is which bins are most abundant and how they change across samples, and
-``--quantifier salmon`` earns its keep when the actual numbers are the point - a ratio between two
-bins, say, rather than an ordering.
+Spearman measures ordering and Pearson measures magnitude; no quantifier is best at both. sylph
+orders the bins best at a tenth of salmon's CPU time, but has the lowest Pearson (0.811 against
+salmon's 0.959). Use sylph to rank bins and follow them across samples, and ``--quantifier salmon``
+when the values themselves matter, such as a ratio between two bins.
 
-``depth`` is the interesting fourth. It aligns nothing: it aggregates the per-contig depth table the
-binning run already wrote into a length-weighted mean per bin, so it costs **0.013 cpu-hours** - 10x
-less than sylph, 80x less than salmon, 180x less than CoverM - and it matches salmon and CoverM on
-magnitude (Pearson 0.953, L1 0.799, ahead of CoverM on both). What it is worst at is the ordering,
-which is the metric to lean on, and that is the trade to understand before reaching for it: Pearson is
-dominated by the abundant bins, Spearman weights every bin alike, so a method that is slightly noisy on
-low-coverage bins reads well on one and badly on the other. Reach for it when the magnitudes matter and
-the table is already on disk; not when the question is which bins rank where.
+``depth`` aligns nothing. It aggregates the per-contig depth table the binning run already wrote
+into a length-weighted mean per bin, costing 0.013 CPU-hours (10x less than sylph, 80x less than
+salmon, 180x less than CoverM). Its magnitudes match salmon and CoverM (Pearson 0.953, L1 0.799,
+both ahead of CoverM), but its ordering is the worst. Pearson is dominated by abundant bins while
+Spearman weights all bins equally, so noise on low-coverage bins lowers Spearman more. Use it when
+magnitudes matter and the depth table already exists.
 
-How they differ mechanically: salmon quantifies the reads against a pseudo-transcriptome of the bins'
-contigs and collapses per-contig counts to a length-weighted median coverage per bin. CoverM works in
-genome mode, mapping against the bins themselves and reporting per-genome coverage directly, with no
-index to build and no counts to collapse. sylph skips alignment altogether - it sketches both the
-bins and the reads into k-mer sketches and profiles one against the other, which is why its cost
-barely grows with sequencing depth and why it needs 1.3 GB where CoverM needs 11.6. ``depth`` reads no
-reads at all: it is one pass over a TSV that another module already paid for, which is why its cost is
-a rounding error and why it is the only one whose numbers are on the same scale the binner clustered
-on.
+Methods: salmon quantifies reads against a pseudo-transcriptome of the bins' contigs and collapses
+per-contig counts to a length-weighted median coverage per bin. CoverM, in genome mode, maps
+against the bins and reports per-genome coverage directly. sylph builds k-mer sketches of the bins
+and the reads and profiles one against the other, so its cost grows little with sequencing depth
+and it needs 1.3 GB where CoverM needs 11.6. ``depth`` reads no reads: it is one pass over an
+existing TSV, on the same scale the binner clustered on.
 
-Everything downstream of the table is unchanged whichever ran, but **the numbers are not
-interchangeable**, which is why this is a flag and not a silent substitution: salmon's cell is a
-length-weighted median contig coverage, CoverM's default is relative abundance as a percentage of
-the sample, and sylph's is a k-mer-derived sequence abundance, also a percentage. Rows of a CoverM
-or sylph table sum to at most 100; rows of a salmon table have no such meaning.
+Downstream steps accept the table from any quantifier, but **the values are not interchangeable**:
+salmon gives a length-weighted median contig coverage, CoverM (default method) a relative
+abundance as a percentage of the sample, and sylph a k-mer-derived sequence abundance, also a
+percentage. Rows of a CoverM or sylph table sum to at most 100; rows of a salmon table do not.
 
-The two percentage tables are still not the same table. A genome sylph does not detect is absent
-from its output rather than present with a zero, because a sketch below the ANI threshold is no
-evidence of that genome at all - so a zero in a sylph column means "not detected above
-``SYLPH_MIN_ANI``", where a zero in a CoverM column means "mapped, but under
-``COVERM_MIN_COVERED_FRACTION`` of the genome was covered".
+The two percentage tables also differ in what zero means. sylph omits genomes whose sketch matches
+below the ANI threshold, so a zero in a sylph column means "not detected above ``SYLPH_MIN_ANI``".
+A zero in a CoverM column means "under ``COVERM_MIN_COVERED_FRACTION`` of the genome was covered".
 
-This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
-block below, and the tunable numbers in the CONSTANTS block. Change a flag there and it
-takes effect — no need to follow the orchestration logic underneath.
+The commands each tool runs are in the COMMANDS block below, and the tunable numbers in the
+CONSTANTS block.
 """
 
 from __future__ import annotations
@@ -100,24 +89,21 @@ SALMON_QUANT = "salmon quant -i {index} --libType IU -1 {r1} -2 {r2} -o {out} --
 # MetaWrap2's own helper -> host interpreter (env=None); the quant_bins env has salmon,
 # not python+seaborn. See metawrap2.pyrun.
 MAKE_HEATMAP = py_module("metawrap2.scripts.make_heatmap", "{table}", "{png}")
-# One invocation for every sample: CoverM takes repeated --coupled pairs and writes one
-# genome x sample table, so there is no per-sample loop and nothing to summarise afterwards.
+# One invocation for all samples: CoverM takes repeated --coupled pairs and writes one
+# genome x sample table.
 #
-# The bins are named in a list file rather than with --genome-fasta-directory/-x. CoverM's -x takes
-# one extension and its default is `fna`, so pointing it at a directory means guessing which single
-# extension the folder uses - and a wrong guess yields an empty genome set rather than an error,
-# while a folder holding both .fasta and .fasta.gz bins cannot be expressed at all. Naming the files
-# says exactly which bins are meant, and lets a stray .stats.tsv or checkm/ subdirectory sit in a bin
-# folder without becoming CoverM's problem.
+# The bins are given as a list file instead of --genome-fasta-directory/-x. CoverM's -x takes a
+# single extension (default `fna`); a wrong one gives an empty genome set without an error, and a
+# folder mixing .fasta and .fasta.gz cannot be described. The list also keeps .stats.tsv files and
+# checkm/ subdirectories in a bin folder out of CoverM's input.
 COVERM_GENOME = (
     "coverm genome --genome-fasta-list {genome_list} "
     "--coupled {coupled} --methods {methods} --min-covered-fraction {min_covered} "
     "--min-read-percent-identity {min_identity} --min-read-aligned-percent {min_aligned} "
     "--mapper {mapper} --threads {threads} --output-file {out}"
 )
-# sylph works in two stages, and both of them are sketching: once over the bins (producing one
-# .syldb) and once over the reads (one .sylsp per sample), after which `profile` compares sketch to
-# sketch and never looks at a read again. The genome sketch takes the same list file CoverM is given.
+# sylph sketches the bins (one .syldb) and the reads (one .sylsp per sample), then `profile`
+# compares the sketches. The genome sketch takes the same list file CoverM is given.
 SYLPH_SKETCH_GENOMES = "sylph sketch --gl {genome_list} -o {db} -t {threads}"
 # --l1/--l2 are lists of forward and reverse read files, matched by position, so every sample is
 # sketched in one invocation. The sketches land in -d as <forward read filename>.paired.sylsp.
@@ -127,44 +113,36 @@ SYLPH_PROFILE = (
 )
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
-#: CoverM's genome-mode default. Kept as the one method written to the abundance table, because
-#: that table has one cell per bin per sample and a second method would have to overwrite it.
+#: CoverM's genome-mode default. Only one method is used because the table has one cell per bin
+#: per sample.
 COVERM_METHOD = "relative_abundance"
-#: A genome must have this percentage of its length covered before CoverM reports anything but
-#: zero for it. CoverM's own default is 10%, and the reason to keep it is that a handful of reads
-#: landing on a conserved gene is not evidence that a genome is present.
+#: Percentage of a genome's length that must be covered before CoverM reports a non-zero value.
+#: CoverM's default of 10% is kept, so a few reads on a conserved gene do not count as presence.
 COVERM_MIN_COVERED_FRACTION = 10
-#: Alignment filters, stated rather than left to CoverM's defaults, which are **0 and 0** - every
-#: alignment counts toward a genome's coverage however poorly it matches. On a MAG catalogue that is
-#: not a neutral default: reads from a relative of a binned genome map to it at lower identity, and
-#: with no floor they are counted as that genome's abundance. It is the same failure the depth table
-#: was given a floor for (see depth.PERCENT_IDENTITY), so the number is the same 90%, and for the same
-#: reason: 97 loses real coverage on a MAG assembled from a population rather than a clone.
+#: Alignment filters. CoverM's defaults are 0 and 0, so every alignment counts however poorly it
+#: matches, and reads from a relative of a binned genome are counted as that genome's abundance.
+#: 90% identity matches the depth table's floor (see depth.PERCENT_IDENTITY); 97 loses real coverage
+#: on a MAG assembled from a population.
 #:
-#: ``--min-read-aligned-percent`` is the second half of it. A read that matches at 95% identity over a
-#: third of its length is a fragment of homology, not an observation of this genome.
+#: ``--min-read-aligned-percent`` excludes reads that match over only part of their length, such as
+#: a third of the read at 95% identity.
 #:
-#: Both are percentages, checked against `coverm genome --full-help` rather than assumed: "Exclude
-#: reads by overall percent identity e.g. 95 for 95%". A tool taking 0-1 here and being handed 90
-#: would silently accept everything, which is the shape of bug that merged two Enterococcus species
-#: in dRep when skani's alignment-fraction units were read the other way round.
+#: Both are percentages, per `coverm genome --full-help` ("Exclude reads by overall percent identity
+#: e.g. 95 for 95%"). A 0-1 scale given 90 would accept everything; a units mix-up of this kind with
+#: skani's alignment fraction merged two Enterococcus species in dRep.
 #:
-#: What these are worth is a question for the quantifier benchmark rather than for taste - the same
-#: benchmark that chose sylph's ANI floor - but 0 is not a defensible starting point.
+#: The values have not yet been tuned with the quantifier benchmark.
 COVERM_MIN_READ_IDENTITY = 90
 COVERM_MIN_READ_ALIGNED = 75
-#: CoverM's own default, pinned here rather than left implicit: it changed between CoverM releases
-#: (0.8 defaults to strobealign where earlier versions did not), and a mapper swapping itself out
-#: underneath a user is a change in the numbers, not just in the runtime. `coverm genome --full-help`
-#: lists the alternatives - ``minimap2-sr``, ``bwa-mem``, ``bwa-mem2`` - and which one earns the
-#: default here is a question for the quantifier benchmark, not for taste.
+#: CoverM's current default, pinned because it changed between releases (0.8 defaults to
+#: strobealign, earlier versions did not) and a different mapper changes the numbers.
+#: `coverm genome --full-help` lists ``minimap2-sr``, ``bwa-mem`` and ``bwa-mem2`` as alternatives;
+#: the choice has not been benchmarked.
 COVERM_MAPPER = "strobealign"
-#: A bin whose sketch matches the sample below this ANI is reported as absent rather than as rare.
-#: This is the single most consequential knob in the module, and the number is measured rather than
-#: inherited. On 76 CAMI2 GI bins across three samples, sylph's own default of 95 sent 55% of the
-#: abundance it reported in one sample to four bins whose genomes are absent from that sample
-#: entirely - relatives close enough to match at 95% ANI, which is a species-level threshold applied
-#: to a strain-level question. Raising the floor fixes it, up to a point:
+#: A bin whose sketch matches the sample below this ANI is reported as absent. This setting has the
+#: largest effect in the module. On 76 CAMI2 GI bins across three samples, sylph's default of 95
+#: assigned 55% of the abundance in one sample to four bins whose genomes are absent from that
+#: sample; close relatives match at 95% ANI, a species-level threshold. Raising it helps up to 99:
 #:
 #:     ANI    Spearman  Pearson    L1   misattributed mass
 #:      95      0.758    0.678   0.832       55%
@@ -173,24 +151,21 @@ COVERM_MAPPER = "strobealign"
 #:      99.5    0.857    0.800   0.536       25%
 #:      99.9    0.696    0.840   0.448       30%   (13 of 29 present bins missed entirely)
 #:
-#: 99 is the turning point: past it the threshold starts discarding bins that really are there, and
-#: rank accuracy collapses even as the surviving estimates get sharper. Below 95 sylph itself warns
-#: "Smaller than 95 for profile will give inaccurate results", its containment statistics being
-#: calibrated for same-species comparison, so 95 is a floor rather than a tuning range.
+#: Above 99 the threshold discards bins that are present and rank accuracy drops, though the
+#: remaining estimates improve. Below 95 sylph warns "Smaller than 95 for profile will give
+#: inaccurate results", since its containment statistics are calibrated for same-species
+#: comparison.
 #:
-#: These bins came off the pooled gold-standard assembly and are therefore near-complete and
-#: low-error; bins from a fragmented real assembly match their own genome less tightly, so a strict
-#: floor could cost more there than it did here. That is why this is a flag (``--min-ani``) and not
-#: just a constant.
+#: These bins come from the pooled gold-standard assembly and are near-complete and low-error. Bins
+#: from a fragmented real assembly match their genome less closely, so a strict threshold may cost
+#: more there; hence the ``--min-ani`` flag.
 SYLPH_MIN_ANI = 99
-#: Below this sylph's own containment statistics stop being calibrated, so the flag warns rather than
-#: silently producing numbers that do not mean what the column header says.
+#: Below this sylph's containment statistics are not calibrated, so --min-ani warns.
 SYLPH_ANI_FLOOR = 95
 #: Which of sylph's two abundance columns fills the table. ``Sequence_abundance`` is the fraction of
-#: the sample's *sequence* a bin accounts for, which is what salmon's coverage and CoverM's relative
-#: abundance both measure, and what the CAMI2 read-to-genome truth counts. ``Taxonomic_abundance``
-#: is the fraction of *organisms*, corrected for genome length - a different and equally valid
-#: number, but not one the other quantifiers or the benchmark truth can be compared against.
+#: the sample's sequence a bin accounts for, which matches what salmon and CoverM measure and what
+#: the CAMI2 read-to-genome truth counts. ``Taxonomic_abundance`` is the fraction of organisms,
+#: corrected for genome length, and is not comparable with the other quantifiers or the truth.
 SYLPH_ABUNDANCE_COLUMN = "Sequence_abundance"
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -211,20 +186,20 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "-a",
         "--assembly",
         default="",
-        help="fasta file with entire metagenomic assembly (strongly recommended!)",
+        help="fasta file with the entire metagenomic assembly (recommended)",
     )
     p.add_argument(
         "--depth",
-        help="contig depth table to aggregate, for --quantifier depth. This is the table binning or "
-        "coverage already wrote (work_files/contig_depth.txt, or coverage's per-sample slice)",
+        help="contig depth table to aggregate, for --quantifier depth: the table binning or "
+        "coverage wrote (work_files/contig_depth.txt, or coverage's per-sample slice)",
     )
     p.add_argument(
         "--quantifier",
         choices=tuple(QUANTIFIERS),
         default="sylph",
-        help="sylph (default): sequence abundance from k-mer sketches, no alignment at all. salmon: "
+        help="sylph (default): sequence abundance from k-mer sketches, no alignment. salmon: "
         "length-weighted median contig coverage per bin. coverm: per-genome relative abundance, "
-        "mapping against the bins directly. The numbers are not interchangeable - see the "
+        "mapping against the bins directly. The three give different numbers; see the "
         "module docstring",
     )
     p.add_argument(
@@ -237,8 +212,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     )
     threads_arg(p)
     p.add_argument("--config", help="path to metawrap2.toml")
-    # Not required: --quantifier depth reads a table that already encodes the reads, so demanding them
-    # would be asking for files it will not open.
+    # Not required: --quantifier depth reads an existing depth table and opens no reads.
     p.add_argument(
         "reads",
         nargs="*",
@@ -251,19 +225,12 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 def _write_genome_list(bin_folder: str, path: str) -> List[str]:
     """Write the bins to quantify, one absolute path per line; return the paths written.
 
-    Every FASTA in the folder is named explicitly, compressed or not, so the tool needs no extension
-    to guess at and a folder mixing ``.fasta`` with ``.fasta.gz`` bins still quantifies in one pass.
-    Anything that is not a FASTA is skipped rather than passed along: a bin folder that has been
-    through another module also holds ``.stats.tsv`` files and tool subdirectories, and handing those
-    over as genomes is an error at best and a bogus row at worst.
+    Every FASTA in the folder is listed, compressed or not, so a folder mixing ``.fasta`` and
+    ``.fasta.gz`` bins works in one pass. Non-FASTA files (``.stats.tsv``, tool subdirectories) are
+    skipped.
 
-    CoverM reads this as ``--genome-fasta-list`` and sylph as ``--gl``; they want the same thing, so
-    they are given the same file. The returned paths are what the sylph table is pivoted against,
-    since sylph reports only the bins it detected and the missing rows have to be filled in from
-    somewhere.
-
-    Sorted, so the genome list - and anything downstream that depends on the order the genomes were
-    given in - is the same on every run over the same folder.
+    CoverM reads this as ``--genome-fasta-list`` and sylph as ``--gl``. The returned paths are used
+    to fill in the bins sylph did not report. Sorted, so the order is the same on every run.
     """
     bins = fasta_files(bin_folder)
     with open(path, "w") as fh:
@@ -274,23 +241,17 @@ def _write_genome_list(bin_folder: str, path: str) -> List[str]:
 def _coverm_table(raw: str, samples: List[str], out: TextIO) -> int:
     """Rewrite CoverM's genome table as the ``Genomic bins`` table, returning the row count.
 
-    Two deliberate translations, both so that a table from either quantifier can be read by the same
-    eyes and the same scripts:
+    Two translations make it match the salmon table:
 
-    * **Row labels go through :func:`bin_label`**, the same function the salmon path labels its rows
-      with, so the two tables key a bin identically by construction rather than by coincidence.
-      CoverM already strips the extension it was given in ``-x``; this is what makes that agreement
-      a guarantee instead of an observation that happened to hold on one set of bins.
-    * **Columns are matched by position, not by title.** CoverM titles each column
-      ``<file> Relative Abundance (%)``, derived from the read filename, and emits them in the order
-      the ``--coupled`` pairs were given - which is the order of *samples*. Using our own sample
-      labels keeps the two tables' headers identical instead of having one of them say
-      ``sample_1_1.fastq``.
+    * **Row labels go through :func:`bin_label`**, as in the salmon path, so both tables key a bin
+      the same way.
+    * **Columns are matched by position.** CoverM titles each column
+      ``<file> Relative Abundance (%)`` after the read filename, in the order the ``--coupled``
+      pairs were given, i.e. sample order. Our own sample labels are used as headers.
 
-    CoverM's ``unmapped`` row is dropped: it is not a bin, and leaving it in would put a row in a
-    bins x samples table that no bin folder contains. Rows come out sorted by bin, which CoverM's
-    own output is not - it emitted ``bin_2`` before ``bin_1`` here, in neither file nor alphabetical
-    order - so the ordering of this table is ours and stays put whatever CoverM does internally.
+    CoverM's ``unmapped`` row is dropped since it is not a bin. Rows are sorted by bin, because
+    CoverM's own order is neither file nor alphabetical order (it has written ``bin_2`` before
+    ``bin_1``).
     """
     rows = []
     with open(raw) as fh:
@@ -314,29 +275,19 @@ def _coverm_table(raw: str, samples: List[str], out: TextIO) -> int:
 def _sylph_table(raw: str, samples: List[tuple], bins: List[str], out: TextIO) -> int:
     """Pivot sylph's long profile into the ``Genomic bins`` table, returning the row count.
 
-    Three things have to be undone here, and each of them would be a silently wrong table if it were
-    not:
+    * **Long format.** sylph writes one row per (sample, genome) detection; it is pivoted into the
+      bins x samples shape the rest of MetaWrap2 reads.
+    * **Undetected genomes are omitted.** sylph leaves out genomes below ``SYLPH_MIN_ANI``, so the
+      bins are taken from the genome list and unreported cells are filled with zero.
+    * **File-path names.** ``Sample_file`` is the forward read file the sketch came from (not the
+      ``.sylsp`` name), which maps back to our sample labels. ``Genome_file`` goes through
+      :func:`bin_label`, as in the other quantifiers, so all tables key a bin the same way.
 
-    * **sylph's output is long, not a matrix.** One row per (sample, genome) *detection*, so it has
-      to be pivoted into the bins x samples shape the rest of MetaWrap2 reads.
-    * **Undetected genomes are absent, not zero.** sylph omits a genome whose sketch matched below
-      ``SYLPH_MIN_ANI`` entirely, so a bin present in one sample and not another has one row, not
-      two. Pivoting only what is in the file would give a ragged table and drop a bin nothing
-      detected from the output altogether; the bins are therefore taken from the genome list, which
-      is every bin the tool was given, and anything unreported is filled in with zero.
-    * **sylph names samples and genomes by file path.** ``Sample_file`` is the *forward read file*
-      the sketch came from - not the ``.sylsp`` name - which is what makes it a reliable key back to
-      our own sample labels; ``Genome_file`` goes through :func:`bin_label`, the same function the
-      other two quantifiers label their rows with, so the three tables key a bin identically.
-
-    Columns are found by name rather than by position, unlike the CoverM table where the value
-    columns are titled after read filenames and only their order is meaningful. sylph's header is
-    made of fixed names, so a future column inserted before ``Sequence_abundance`` should not shift
-    the numbers.
+    Columns are found by name, since sylph's header uses fixed names (unlike CoverM's, which are
+    titled after read filenames).
     """
     labels = [sample for sample, _, _ in samples]
-    #: The forward read path is the key, with its basename as a fallback in case sylph ever
-    #: normalises the path it was handed.
+    #: Keyed by forward read path, with the basename as a fallback in case sylph normalises paths.
     by_read = {}
     for sample, r1, _r2 in samples:
         by_read[r1] = sample
@@ -388,11 +339,10 @@ def _concat_bins_into_assembly(bin_folder: str, assembly: str) -> None:
 def _heatmap(table: str, output: str, samples: int) -> None:
     """Draw the clustered abundance heatmap from *table*, or say why there is none.
 
-    Shared by both quantifiers: the table has the same shape whichever tool filled it in, so the
-    picture is drawn the same way and lives under the same name.
+    Shared by all quantifiers, since the table has the same shape whichever tool filled it in.
     """
     if samples < 2:
-        warning("Cannot make clustered heatmap with just one sample... Skipping heatmap")
+        warning("Cannot make a clustered heatmap from one sample. Skipping the heatmap")
         return
     announcement("MAKING GENOME ABUNDANCE HEATMAP WITH SEABORN")
     comm("making heatmap with Seaborn")
@@ -406,7 +356,7 @@ def _heatmap(table: str, output: str, samples: int) -> None:
 
 
 def _quantify_salmon(args: argparse.Namespace, pairs: list, table: str, env, ckpt) -> None:
-    """Index a pseudo-transcriptome, quantify every sample against it, collapse the result to bins."""
+    """Index a pseudo-transcriptome, quantify every sample against it, and collapse to bins."""
     announcement("SETTING UP OUTPUT AND INDEXING ASSEMBLY")
     assembly = args.assembly
     if not assembly:
@@ -471,9 +421,8 @@ def _quantify_salmon(args: argparse.Namespace, pairs: list, table: str, env, ckp
 
         _heatmap(table, args.output, n)
 
-        # Clean up regardless of sample count: salmon's per-sample output is large and is
-        # fully summarised into quant_files/ and the abundance table by this point. It used
-        # to be deleted only on the >1-sample path, so single-sample runs silently kept it.
+        # Clean up regardless of sample count: salmon's per-sample output is large and is fully
+        # summarised by now. It was once deleted only when there was more than one sample.
         comm("cleaning up salmon's per-sample alignment output...")
         shutil.rmtree(align_dir, ignore_errors=True)
         ckpt.done("summarize")
@@ -489,17 +438,13 @@ def _quantify_salmon(args: argparse.Namespace, pairs: list, table: str, env, ckp
 def _quantify_coverm(args: argparse.Namespace, pairs: list, table: str, env, ckpt) -> None:
     """Map every sample against the bins with CoverM and write the genome x sample table.
 
-    No assembly and no index are involved: CoverM maps against the bin fastas themselves, so ``-a``
-    has nothing to contribute here. It is also a single command for the whole run - every sample's
-    pair goes on the same command line and the complete table comes back at once - so there is no
-    per-sample checkpoint to resume from, only the one covering the whole invocation. Converting
-    that table is cheap, so it is redone on every resume rather than checkpointed too.
+    CoverM maps against the bin fastas, so ``-a`` is unused. All samples go in one command, so
+    there is one checkpoint for the whole invocation. Converting the table is cheap and is redone on
+    every resume.
     """
     announcement("QUANTIFYING BINS ACROSS SAMPLES WITH COVERM")
     if args.assembly:
-        warning(
-            "--quantifier coverm maps reads against the bins themselves; the assembly (-a) is unused"
-        )
+        warning("--quantifier coverm maps reads against the bins; the assembly (-a) is unused")
     comm("%d forward and %d reverse read files detected" % (len(pairs), len(pairs)))
 
     genome_list = os.path.join(args.output, "coverm_genomes.txt")
@@ -550,9 +495,8 @@ def _quantify_coverm(args: argparse.Namespace, pairs: list, table: str, env, ckp
 def _write_read_lists(pairs: list, output: str) -> tuple:
     """Write sylph's ``--l1``/``--l2`` read lists; return their paths.
 
-    Two files rather than one because sylph pairs the lists up by position, which is also why they
-    are written from the same ``pairs`` the other quantifiers use: whatever paired the reads up, all
-    three quantifiers see the same pairing.
+    sylph pairs the two lists by position. They are written from the same ``pairs`` the other
+    quantifiers use, so all quantifiers see the same pairing.
     """
     l1 = os.path.join(output, "sylph_reads_1.txt")
     l2 = os.path.join(output, "sylph_reads_2.txt")
@@ -565,13 +509,11 @@ def _write_read_lists(pairs: list, output: str) -> tuple:
 def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt) -> None:
     """Sketch the bins and the reads, profile one against the other, write the abundance table.
 
-    Nothing is aligned and nothing is indexed in the mapping sense: both sides become k-mer sketches
-    and ``profile`` compares sketches, which is what makes the cost of the profiling step independent
-    of how deep the samples were sequenced. The two sketching steps are checkpointed separately
-    because the genome sketch is the cheap one and the read sketches are not - a run interrupted
-    after sketching 20 samples' reads should not sketch them again.
+    Both sides become k-mer sketches and ``profile`` compares them, so the profiling cost does not
+    depend on sequencing depth. The two sketching steps are checkpointed separately because the
+    read sketches are expensive and should not be redone after an interruption.
 
-    Like the CoverM path, ``-a`` has nothing to contribute: the bins are the reference.
+    As in the CoverM path, ``-a`` is unused: the bins are the reference.
     """
     announcement("QUANTIFYING BINS ACROSS SAMPLES WITH SYLPH")
     if args.assembly:
@@ -579,9 +521,9 @@ def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt
     min_ani = getattr(args, "min_ani", SYLPH_MIN_ANI)
     if min_ani < SYLPH_ANI_FLOOR:
         warning(
-            "--min-ani %g is below %g, where sylph's own containment statistics stop being "
-            "calibrated; it warns about this itself and the abundances stop meaning what the column "
-            "header says" % (min_ani, SYLPH_ANI_FLOOR)
+            "--min-ani %g is below %g, where sylph's containment statistics are no longer "
+            "calibrated (sylph warns about this too); the abundances are then not reliable"
+            % (min_ani, SYLPH_ANI_FLOOR)
         )
     comm("%d forward and %d reverse read files detected" % (len(pairs), len(pairs)))
 
@@ -592,7 +534,7 @@ def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt
     comm("%d bins to quantify" % len(bins))
     l1, l2 = _write_read_lists(pairs, args.output)
 
-    # `sylph sketch -o bins` writes bins.syldb, so the suffix is sylph's to add, not ours.
+    # `sylph sketch -o bins` writes bins.syldb; sylph adds the suffix.
     db = os.path.join(args.output, "sylph_bins")
     sketch_dir = os.path.join(args.output, "sylph_read_sketches")
     if ckpt.todo("sketch_genomes"):
@@ -622,10 +564,9 @@ def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt
 
     raw = os.path.join(args.output, "sylph_profile" + TSV_SUFFIX)
     if ckpt.todo("profile"):
-        # The sketch filenames are sylph's to choose (it appends .paired.sylsp to the forward read's
-        # name), so they are collected from the directory rather than predicted. Counting them is
-        # worth doing: a sample sylph declined to sketch would otherwise turn into a column of
-        # zeroes, which reads as a sample with nothing in it.
+        # sylph names the sketches (forward read name + .paired.sylsp), so collect them from the
+        # directory. Check the count: a sample sylph did not sketch would otherwise become a column
+        # of zeroes.
         sketches = sorted(
             os.path.join(sketch_dir, name)
             for name in os.listdir(sketch_dir)
@@ -664,35 +605,31 @@ def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt
     _heatmap(table, args.output, len(pairs))
 
 
-#: The quantifiers ``--quantifier`` can choose between, in the order it offers them. Each takes the
-#: same arguments and leaves the same ``bin_abundance_table.tsv`` behind, so adding a fourth is a
-#: matter of writing its function and naming it here - and the flag's choices come from this dict, so
-#: there is no second list to keep in step.
+#: QUANTIFIERS (below) lists the ``--quantifier`` choices. Each function takes the same arguments
+#: and writes the same ``bin_abundance_table.tsv``; to add one, write its function and add it to
+#: the dict, which also supplies the flag's choices.
 def _quantify_depth(args: argparse.Namespace, pairs: list, table: str, env, ckpt) -> None:
     """Aggregate the per-contig depth table the pipeline already built into a per-bin abundance.
 
-    No alignment, no index, no third-party tool, and no second opinion about what a contig's coverage
-    is. `binning` and `coverage` already measure every contig's depth in every sample - that is the
-    table the binner itself read - and a bin's abundance is the length-weighted mean of its contigs'
-    depths. Running salmon or CoverM to find that out again aligns the same reads a second time and
-    answers on a different scale: CoverM's numbers are twice a jgi-style depth on strain-rich data,
-    because jgi discards reads below 97% identity and CoverM does not.
+    No alignment and no third-party tool. `binning` and `coverage` already measure each contig's
+    depth in each sample (the table the binner read), and a bin's abundance is the length-weighted
+    mean of its contigs' depths. salmon or CoverM realign the same reads and report on a different
+    scale: on strain-rich data CoverM's values are twice a jgi-style depth, because jgi discards
+    reads below 97% identity and CoverM does not.
 
-    So this is the baseline the other quantifiers should be judged against, and it is close to free:
-    one pass over a TSV against the hours an alignment costs.
+    This is the baseline for the other quantifiers, and costs one pass over a TSV.
 
-    Length-weighted mean rather than median, deliberately, and the difference matters for a bin made of
-    one long contig and twenty short ones. The mean is what "how much of this genome was in the sample"
-    means - total bases over total length - whereas an unweighted median asks a question about contigs.
-    The median over contigs is reported as a second column for anyone who wants the robust version.
+    The length-weighted mean (total bases over total length) is used because it measures how much
+    of the genome was in the sample; an unweighted median describes contigs, and differs for a bin
+    of one long contig and twenty short ones. The median over contigs is written as a second column.
     """
     announcement("AGGREGATING THE CONTIG DEPTH TABLE INTO PER-BIN ABUNDANCE")
     if not args.depth:
         error(
             "--quantifier depth needs the contig depth table that binning or coverage wrote.\n"
             "Pass it with --depth, e.g. --depth BINNING_OUT/work_files/contig_depth.txt\n"
-            "It is the same table the binner read, which is the point: no realignment and no second "
-            "opinion about what a contig's coverage is."
+            "The bins are quantified from the same coverage the binner used, with no "
+            "realignment."
         )
     if args.assembly:
         warning(
@@ -725,8 +662,9 @@ def _quantify_depth(args: argparse.Namespace, pairs: list, table: str, env, ckpt
         present = frame.index.intersection(contigs)
         if len(present) == 0:
             warning(
-                "%s: none of its %d contigs are in the depth table, so it has no abundance. Are the "
-                "bins and the table from the same assembly?" % (name, len(contigs))
+                "%s: none of its %d contigs are in the depth table, so it has no abundance. "
+                "Check that the bins and the table come from the same assembly."
+                % (name, len(contigs))
             )
             continue
         if len(present) < len(contigs):
@@ -766,10 +704,9 @@ def main(argv: List[str]) -> int:
     validate_inputs(
         "quant_bins",
         [
-            # Gzipped bins are accepted here specifically, unlike in the modules that pass a bin
-            # file to prokka or CheckM1: both quantifiers read compression without noticing it -
-            # salmon's path goes through iter_fasta, and CoverM reads a gzipped genome FASTA
-            # directly (verified: 100% of reads mapped, to the right genome).
+            # Gzipped bins are accepted here, unlike in modules that pass a bin to prokka or
+            # CheckM1: salmon's path goes through iter_fasta, and CoverM reads a gzipped genome
+            # FASTA directly (tested: 100% of reads mapped to the right genome).
             (
                 lambda path, what: require_nonempty_dir(path, what, FASTA_EXTENSIONS_WITH_GZ),
                 args.bins,
@@ -779,9 +716,8 @@ def main(argv: List[str]) -> int:
         + ([(check_fasta, args.assembly, "assembly (-a)")] if args.assembly else [])
         + [(check_fastq, r, "read file") for r in args.reads],
     )
-    # All three quantifiers live in this module's env. CoverM used to have one of its own for its
-    # size; it is a single static binary and the separate solve bought nothing but a second install
-    # command, so --quantifier now never needs one.
+    # All quantifiers are in this module's env. CoverM once had its own env; it is a single static
+    # binary, so the separate env was dropped.
     env = env_for("quant_bins", settings)
     rec = start_run(
         "quant_bins", args, env, settings, inputs=[args.assembly, args.bins] + list(args.reads)
@@ -790,8 +726,7 @@ def main(argv: List[str]) -> int:
     ckpt = make_checkpoint(args.output)
     try:
         ensure_dir(args.output)
-        # Before anything expensive: a read file that cannot be paired up is worth hearing about
-        # now rather than after an index or a mapping run.
+        # Pair the reads before anything expensive, so a pairing error is reported early.
         if args.quantifier == "depth":
             if args.reads:
                 warning(
@@ -802,8 +737,8 @@ def main(argv: List[str]) -> int:
         else:
             if not args.reads:
                 error(
-                    "--quantifier %s needs read files. Only --quantifier depth works without them, "
-                    "by aggregating a depth table that binning or coverage already wrote."
+                    "--quantifier %s needs read files. Only --quantifier depth works without them; "
+                    "it aggregates the depth table that binning or coverage wrote."
                     % args.quantifier
                 )
             try:

@@ -1,15 +1,13 @@
 """Recognising read-file layouts and pairing up mates by filename.
 
-One place decides what a read filename means, so every module agrees. Two jobs:
+All modules use this file to interpret read filenames.
 
-**Pairing.** Only ``name_1.fastq`` / ``name_2.fastq`` used to be recognised. Real data off
-a sequencer is very often ``name_R1_001.fastq.gz`` / ``name_R2_001.fastq.gz``, so users had to
-rename everything before they could start. :data:`MATE_PATTERNS` lists the conventions that are
-understood; add a pattern here and every module accepts it.
+**Pairing.** :data:`MATE_PATTERNS` lists the accepted mate-naming conventions, including
+``name_1``/``name_2`` and the Illumina ``name_R1_001``/``name_R2_001`` form. A pattern added here
+is accepted by every module.
 
-**Layout validation.** Paired, interleaved, and single-end data are checked up front by
-:func:`classify`, so a mistake is reported with an actionable message instead of failing deep
-inside a binner or assembler hours later.
+**Layout validation.** :func:`classify` checks paired, interleaved and single-end input up front,
+so a mistake is reported before a binner or assembler fails on it later.
 """
 
 from __future__ import annotations
@@ -131,8 +129,7 @@ def _first_read_name(path: str) -> Optional[str]:
 def classify(files: List[str], interleaved: bool = False, single: bool = False) -> ReadSet:
     """Classify and validate a list of read files into a :class:`ReadSet`.
 
-    Raises ``ValueError`` with a human-readable message on any inconsistency, rather than
-    letting a downstream tool fail cryptically.
+    Raises ``ValueError`` with a human-readable message on any inconsistency.
     """
     files = [f for f in files if f]
     if not files:
@@ -230,14 +227,12 @@ def collect_singles(reads: List[str]) -> List[Tuple[str, str]]:
 def deinterleave(path: str, out_r1: str, out_r2: str) -> int:
     """Split an interleaved FASTQ into two mate files. Returns the number of pairs written.
 
-    Interleaved input is handled by splitting it up front and then running the ordinary paired
-    path, rather than by teaching every tool about a third layout: Trim Galore has no
-    interleaved mode at all, and treating interleaved data as single-end silently destroys the
-    pairing that the assembler and binners depend on.
+    Interleaved input is split up front and then handled as ordinary paired data. Trim Galore has
+    no interleaved mode, and treating interleaved data as single-end would lose the pairing that
+    the assembler and binners use.
 
-    Records are taken strictly two at a time, which is what "interleaved" means. A file with
-    an odd number of records, or whose adjacent records are not mates, is a real problem worth
-    reporting rather than quietly mis-pairing.
+    Records are taken two at a time. A file with an odd number of records, or whose adjacent
+    records are not mates, raises ``ValueError``.
     """
 
     def _records(handle):

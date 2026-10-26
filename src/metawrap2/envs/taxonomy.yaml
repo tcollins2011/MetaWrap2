@@ -1,26 +1,24 @@
 # Read- and bin-level taxonomy: kraken2 with its Krona plot, and the taxator-tk classifier.
 #
-# GTDB-Tk is not here and cannot be: it has no common solution with taxator-tk. It is also the one
-# tool in this group with a 100+ GB reference database, so a user who wants it is already opting in.
-# See gtdbtk.yaml.
+# GTDB-Tk has no common solution with taxator-tk, and it needs a 100+ GB reference database, so
+# it is opt-in in its own env. See gtdbtk.yaml.
 name: metawrap2-taxonomy
 channels:
   - conda-forge
   - bioconda
 dependencies:
   - kraken2 >=2.1.2
-  # Next to kraken2 because it is not an alternative to it but the second half of it: kraken2 reports
-  # the reads assigned *at* each node, and a read matching sequence conserved across a genus is
-  # assigned to the genus, so the species rows of a report are not a composition. Bracken
-  # redistributes those reads down to one rank using the k-mer distribution of the kraken2 database.
+  # Next to kraken2 because it completes it: kraken2 reports reads assigned at each node, and a
+  # read matching sequence conserved across a genus is assigned to the genus, so the species rows of
+  # a report are not a composition. Bracken redistributes those reads down to one rank using the
+  # k-mer distribution of the kraken2 database.
   #
-  # It costs nothing here - 507 kB, and it declares kraken2 as its own dependency, so this env was
-  # always going to be where it lives. What it costs is a database: `bracken-build` writes
-  # databaseNmers.kmer_distrib into the kraken2 database directory, per read length, and the
-  # distribution is only valid for the kraken2 database it was built from.
+  # The package is 507 kB and depends on kraken2. It needs a database: `bracken-build` writes
+  # databaseNmers.kmer_distrib into the kraken2 database directory, per read length, and it is valid
+  # only for the kraken2 database it was built from.
   #
-  # Note for anyone matching versions: bioconda's bracken 3.1 ships a wrapper whose VERSION string
-  # says 3.0.1, so `bracken -v` and the package version disagree. The pin is on the package.
+  # bioconda's bracken 3.1 ships a wrapper whose VERSION string says 3.0.1, so `bracken -v` and the
+  # package version disagree. The pin is on the package.
   - bracken >=3.0
   - krona >=2.8
   - taxator-tk >=1.3.3e

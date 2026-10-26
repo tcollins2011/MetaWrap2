@@ -1,15 +1,13 @@
 """Running MetaWrap2's own Python helper scripts.
 
-The per-module conda envs hold only that module's *external* tools (metabat2, spades,
-checkm, ...). They deliberately do not contain a Python interpreter with metawrap2 and its
-plotting stack installed. So MetaWrap2's own helpers - ``metawrap2.scripts.*`` and
-``metawrap2.vendor.*`` - must run in the **host** interpreter that metawrap2 itself was
-installed into, not inside a module env.
+The per-module conda envs hold only that module's external tools (metabat2, spades, checkm, ...)
+and have no Python with metawrap2 and its plotting stack. MetaWrap2's own helpers
+(``metawrap2.scripts.*`` and ``metawrap2.vendor.*``) therefore run in the host interpreter that
+metawrap2 was installed into.
 
-Use :func:`py_module` to build the argv for such a helper, and pass ``env=None`` to
-``run()``. ``sys.executable`` is used rather than the string ``"python"`` so the helper
-always lands on the same interpreter (and therefore the same metawrap2) that is driving
-the pipeline, whatever is first on PATH.
+Build the argv with :func:`py_module` and pass ``env=None`` to ``run()``. ``sys.executable`` is
+used instead of ``"python"`` so the helper runs on the same interpreter as the pipeline, whatever
+is first on PATH.
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ from typing import List
 
 __all__ = ["PY", "py_module"]
 
-#: The host interpreter, shell-quoted - safe to interpolate into a command template.
+#: The host interpreter, shell-quoted for use in a command template.
 PY = shlex.quote(sys.executable)
 
 

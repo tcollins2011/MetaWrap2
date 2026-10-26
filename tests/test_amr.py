@@ -1,18 +1,15 @@
-"""Resistance calls, their context, and the three claims that must stay distinct.
+"""Tests for resistance-gene parsing, mobile-element context and evidence levels.
 
-The arithmetic here is trivial; the distinctions are not, and every one of them corresponds to a way
-published resistome results get over-read:
+Checked distinctions:
 
-* **"looked and found nothing" is not "did not look."** With no mobile-element caller run, the
-  honest verdict is ``context_unknown``, and reporting ``no_mge_in_window`` instead turns an unasked
-  question into a negative finding.
-* **"nothing within 10 kb" needs 10 kb of sequence.** A gene 2 kb from the end of its contig cannot
-  support that claim however long the window is.
-* **detection is not phenotype.** Every row is L1 or L2 of Cao et al.'s ladder, and the level is
-  derived from the context rather than from how confident the detection was.
+* With no mobile-element caller run, the context is ``context_unknown``, not ``no_mge_in_window``.
+* ``no_mge_in_window`` needs the full window of sequence on the contig; a gene near a contig end is
+  ``context_unknown``.
+* Every row is L1 or L2 of Cao et al.'s ladder, derived from the context, not from detection
+  confidence.
 
-The fixture is a real finding from CAMI2 sample 10: ant(6)-Ia, aph(3')-IIIa and sat4 within 2.3 kb
-on one 92,857 bp contig - a known aminoglycoside/streptothricin cassette.
+The fixture is from CAMI2 sample 10: ant(6)-Ia, aph(3')-IIIa and sat4 within 2.3 kb on one
+92,857 bp contig, a known aminoglycoside/streptothricin cassette.
 """
 
 from __future__ import annotations
@@ -74,8 +71,8 @@ def _write_report(path, rows):
 
 
 def test_contig_length_comes_from_the_assembly_not_the_report(tmp_path):
-    """AMRFinderPlus reports coordinates and not contig lengths, so a wrapper passing its output
-    through cannot tell a gene mid-megabase from one at the edge of what was assembled."""
+    """Contig length and distance to the contig end come from the assembly; AMRFinderPlus does
+    not report contig lengths."""
     path = _write_report(
         tmp_path / "r.tsv",
         [
@@ -96,8 +93,7 @@ def test_contig_length_comes_from_the_assembly_not_the_report(tmp_path):
     assert calls[0].contig_length == CONTIG_LENGTH
     assert calls[0].distance_to_contig_end == 14926
 
-    # A contig missing from the assembly yields zero rather than a wrong distance: zero is the
-    # conservative answer, it forces context_unknown rather than inventing room.
+    # A contig missing from the assembly gets length and distance 0, which forces context_unknown.
     path = _write_report(
         tmp_path / "absent.tsv",
         [{"Contig id": "absent", "Start": 500, "Stop": 100, "Type": "AMR", "Method": "EXACTX"}],
@@ -112,10 +108,10 @@ def test_contig_length_comes_from_the_assembly_not_the_report(tmp_path):
 
 
 def test_a_gene_too_close_to_a_contig_end_cannot_support_an_absence_claim():
-    """The measured reason this matters: MEGAHIT's ARG-bearing contigs average 284 bp.
+    """A gene too near a contig end gets context_unknown (MEGAHIT's ARG-bearing contigs average
+    284 bp).
 
-    And no caller run is unknown, not absence: None means the question was never asked; an empty
-    list means it was asked and answered.
+    Elements None (no caller run) gives context_unknown; an empty list gives no_mge_in_window.
     """
     assert amr.classify_context(_call(), None)[0] is amr.Context.UNKNOWN
     assert amr.classify_context(_call(), [])[0] is amr.Context.NO_MGE_IN_WINDOW
@@ -131,10 +127,9 @@ def test_a_gene_too_close_to_a_contig_end_cannot_support_an_absence_claim():
 
 
 def test_the_level_follows_the_context_not_the_confidence_of_detection():
-    """A 100%-identity exact match with an unobserved neighbourhood is still only L1.
+    """The level depends on the context only: an unknown context is L1, a known one L2.
 
-    L2 is "linked to a host and a genetic neighbourhood". How certain the detection was does not
-    bear on whether the neighbourhood was seen.
+    L2 means "linked to a host and a genetic neighbourhood".
     """
     assert amr.evidence_level(amr.Context.UNKNOWN) is amr.EvidenceLevel.PRESENCE
     assert amr.evidence_level(amr.Context.MGE_NEARBY) is amr.EvidenceLevel.CONTEXT
@@ -158,10 +153,9 @@ ARGNORM_OUTPUT = os.path.join(os.path.dirname(__file__), "fixtures", "amr", "arg
 
 
 def test_argnorm_output_is_parsed_past_its_comment_line():
-    """argNorm writes `# argNorm version: ...` first, which csv would take as the header.
+    """argNorm's leading `# argNorm version: ...` line is skipped, not read as the header.
 
-    Handed the file directly, DictReader keys every column under that comment and the result is
-    silently empty rather than an error - so the comment handling is the thing being tested.
+    Without that, DictReader would return no usable rows.
     """
     rows = amr.parse_argnorm(ARGNORM_OUTPUT)
     assert len(rows) == 4
@@ -177,8 +171,8 @@ GENOMAD_FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "amr", "g
 def test_proviruses_are_read_with_their_host_coordinates():
     """geNomad's provirus table is its only output with coordinates on the host contig.
 
-    The `seq_name` column names the trimmed viral piece; `source_seq` names the contig an ARG call
-    would carry, and using the wrong one gives elements no call can ever be near.
+    Elements use `source_seq` (the host contig, as in ARG calls), not `seq_name` (the trimmed
+    viral piece).
     """
     elements = amr.read_proviruses(os.path.join(GENOMAD_FIXTURES, "assembly_provirus.tsv"))
     assert len(elements) == 3
@@ -200,7 +194,7 @@ RGI_LENGTHS = {
 
 
 def test_rgi_output_parses_into_the_same_calls_as_amrfinder():
-    """One dataclass for both backends: context, evidence and clustering are properties of a call."""
+    """RGI output parses into the same ArgCall dataclass as AMRFinderPlus output."""
     calls = amr.parse_rgi(RGI_REPORT, "bin_007", RGI_LENGTHS, database_version="4.0.2")
     assert len(calls) == 5
     assert {c.tool for c in calls} == {"rgi"}
@@ -210,7 +204,7 @@ def test_rgi_output_parses_into_the_same_calls_as_amrfinder():
     assert len(perfect) == 1
     assert perfect[0].symbol == "APH(3')-IIIa"
     assert perfect[0].identity == pytest.approx(100.0)
-    # RGI reports Start > Stop on the minus strand, and every consumer here assumes otherwise.
+    # RGI reports Start > Stop on the minus strand; calls are normalised to start <= end.
     for call in calls:
         assert call.contig_length == RGI_LENGTHS[call.contig]
         assert call.start <= call.end

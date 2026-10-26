@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Regenerate the committed ``tiny`` fixture.
 
-The fixture is committed rather than generated at test time so that the tests measure the harness
-against fixed bytes. This script exists so those bytes are reproducible: the seed is fixed, so
-re-running it produces the same files, and a results diff is never noise from a regenerated
-fixture.
+The fixture is committed so the tests run the harness against fixed bytes. The seed is fixed, so
+re-running this script produces the same files.
 
     python benchmarks/fixtures/make_tiny.py
 
-Three synthetic genomes with deliberately different GC content, shredded into ~250 contigs, plus a
-small paired read set sampled from them and a gold-standard contig-to-genome mapping in the same
-two-column format CAMI uses. Far too small to say anything about a binner; large enough to prove
-the harness computes and records what it claims to.
+Three synthetic genomes with different GC content, shredded into ~250 contigs, plus a small paired
+read set sampled from them and a gold-standard contig-to-genome mapping in the two-column CAMI
+format. Too small to evaluate a binner; large enough to test that the harness computes and records
+its metrics.
 """
 
 from __future__ import annotations
@@ -20,12 +18,10 @@ import gzip
 import os
 import random
 
-#: Fixed so the fixture is reproducible. Changing it changes every committed byte, which is a
-#: bigger decision than it looks.
+#: Fixed so the fixture is reproducible. Changing it changes every committed byte.
 SEED = 20260929
 
-#: Genome name -> GC fraction. Different GC is what gives a binner a signal to find at this scale;
-#: coverage alone would not, with one sample.
+#: Genome name -> GC fraction. With one sample, GC is the only signal a binner has at this scale.
 GENOMES = {"genome_A": 0.30, "genome_B": 0.50, "genome_C": 0.68}
 
 GENOME_LENGTH = 120_000
@@ -66,9 +62,8 @@ def main() -> None:
                 for offset in range(0, len(seq), LINE_WIDTH)
             )
 
-    # With the sequence lengths, because that is what AMBER weights its bp metrics by and it reads
-    # them from the gold standard alone. Without the column it dies inside pandas; the harness can
-    # add them back from the assembly, but a fixture may as well ship complete.
+    # Include sequence lengths: AMBER weights its bp metrics by them and reads them only from the
+    # gold standard. Without the column it fails inside pandas.
     with open(os.path.join(out, "gold_standard_binning.tsv"), "w") as fh:
         fh.write("@Version:0.9.1\n@SampleID:tiny\n\n@@SEQUENCEID\tBINID\t_LENGTH\n")
         fh.writelines(

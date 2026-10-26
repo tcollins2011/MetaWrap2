@@ -31,14 +31,11 @@ def _read_table(path):
 
 
 def test_a_bins_abundance_in_one_sample_does_not_leak_into_the_next(tmp_path):
-    """Each cell is that bin in that sample alone, with nothing carried over from earlier samples.
+    """Each cell holds that bin's abundance in that sample only.
 
-    The accumulators used to be reset through a bin name left over from the inner loop, so only one
-    bin - whichever contig came last in the counts file - was ever cleared, and it was cleared
-    partway through the pass that read it. Every other bin kept accumulating across samples and that
-    one bin reported NaN throughout. This fixture makes the right answer unambiguous: each bin's
-    contig has all the coverage in exactly one sample and none in the other, so any leak shows up as
-    a nonzero cell where a zero belongs.
+    Guards against accumulators being reset through a bin name left over from the inner loop, which
+    cleared only one bin and let the others accumulate across samples. Each bin's contig has all its
+    coverage in one sample, so a leak appears as a nonzero cell where zero is expected.
     """
     quant, bins, assembly = _salmon_fixture(
         tmp_path,
@@ -57,9 +54,8 @@ def test_a_bins_abundance_in_one_sample_does_not_leak_into_the_next(tmp_path):
         "bin_2": {"sampX": 0.0, "sampY": 1_000_000.0},
     }
 
-    # A bin absent from one sample's counts file must shift no other bin's columns. The header used
-    # to be written from the first bin's sample dict while every row was written from its own, so a
-    # bin seen in fewer samples emitted a short row, or values under the wrong headings.
+    # A bin missing from one sample's counts file gets NaN there and does not shift columns. Guards
+    # against the header coming from the first bin's samples while rows used their own.
     second = tmp_path / "second"
     second.mkdir()
     quant, bins, assembly = _salmon_fixture(

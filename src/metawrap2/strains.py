@@ -1,31 +1,23 @@
-"""Within-population variation: is this the same strain in two samples, and how varied is it?
+"""Within-population variation: strain sharing between samples, and diversity within a sample.
 
-A MAG is a consensus of a population, not a genome. Two samples can both carry "the same species"
-at 99.9% ANI between their MAGs and be carrying different strains, and the pipeline has had no way
-to say so - which matters for every transmission, persistence or engraftment claim anyone makes from
-a cohort.
+A MAG is a population consensus. Two samples can carry MAGs at 99.9% ANI and still carry different
+strains, which matters for transmission, persistence or engraftment claims.
 
-inStrain answers it from the alignments rather than from the consensus: it reads every position's
-allele frequencies, so a population with two variants at 30/70 is visibly that rather than a
-consensus of whichever won. Two numbers out of it carry the weight:
+inStrain works from per-position allele frequencies in the alignments. Two outputs are used:
 
-* **popANI** between two samples for one genome. Alleles are compared as *populations* - two samples
-  share a position when their allele sets overlap at all - so a minor variant present in both does
-  not count as a difference. inStrain's own threshold for "same strain" is popANI >= 99.999%, which
-  is roughly one difference per 100 kb.
-* **nucleotide diversity** within one sample for one genome, which says how varied the population
-  is at all. A clonal population and a mixture of two strains can have the same consensus genome.
+* popANI between two samples for one genome. Alleles are compared as populations (a position is
+  shared when the allele sets overlap), so a minor variant present in both is not a difference.
+  inStrain's same-strain threshold is popANI >= 99.999%, about one difference per 100 kb.
+* Nucleotide diversity within one sample for one genome. A clonal population and a mix of two
+  strains can have the same consensus.
 
-The thing that makes popANI misleading, and the reason this module reports it alongside, is
-**breadth**: popANI is computed only over positions both samples covered deeply enough. Two samples
-sharing 2% of a genome at 100% identity produce a popANI of 100%, and that is not evidence of
-anything. inStrain's guidance is a floor of 50% of the genome compared, and
-:data:`MIN_PERCENT_COMPARED` applies it rather than leaving it to the reader.
+popANI is computed only over positions both samples cover deeply enough, so it must be read with
+breadth: two samples sharing 2% of a genome at 100% identity give popANI 100%.
+:data:`MIN_PERCENT_COMPARED` applies inStrain's recommended floor of 50% of the genome compared.
 
-Also worth knowing before quoting a distance: Shaw & Yu's evaluation of strain-distance tools found
-most of them overestimate SNP distances, and TRACS the least. inStrain is here because it is
-maintained, installs cleanly and reports the breadth its own number depends on; a distance from it
-is a comparison between samples processed identically, not an absolute SNP count.
+Shaw & Yu's evaluation of strain-distance tools found most overestimate SNP distances, TRACS the
+least. inStrain distances are best used to compare samples processed the same way, not as absolute
+SNP counts.
 """
 
 from __future__ import annotations
@@ -37,22 +29,17 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-#: popANI at or above which inStrain considers two samples to carry the same strain. Its own
-#: default, stated here so a verdict in this pipeline means the same thing as one in its paper.
+#: popANI at or above which two samples carry the same strain (inStrain's default).
 SAME_STRAIN_POPANI = 99.999
 
-#: Fraction of a genome that must be compared for a popANI to mean anything, as a percentage. Below
-#: this the comparison is between slivers of two genomes: two samples sharing 2% of a genome at
-#: 100% identity give popANI 100%, which says nothing about the strain. inStrain's own guidance.
+#: Minimum percentage of the genome compared for a popANI verdict (inStrain's guidance).
 MIN_PERCENT_COMPARED = 50.0
 
-#: Minimum breadth (fraction of the genome covered at the profiler's depth floor) for a within-sample
-#: diversity figure to be worth reporting. A genome covered over 10% of its length has a nucleotide
-#: diversity measured on 10% of its length.
+#: Minimum breadth (fraction of the genome covered at the profiler's depth floor) for a
+#: within-sample diversity figure to be reported.
 MIN_BREADTH = 0.5
 
-#: Coverage below which inStrain's per-position allele frequencies are too thin to call a minor
-#: variant at all - its own `min_cov` default.
+#: Coverage below which minor variants are not called (inStrain's `min_cov` default).
 MIN_COVERAGE = 5.0
 
 
@@ -67,12 +54,12 @@ class StrainVerdict(Enum):
     ABSENT = "not_in_both"
 
 
-#: What each verdict licenses saying, emitted in the table so the constraint travels with the data.
+#: Interpretation of each verdict, written into the output table.
 VERDICT_LANGUAGE: Dict[str, str] = {
     StrainVerdict.SAME.value: (
         "the populations in these two samples are indistinguishable at inStrain's threshold "
-        "(popANI >= %g%% over at least %g%% of the genome). That is consistent with transmission, "
-        "persistence or a shared source; it does not establish which"
+        "(popANI >= %g%% over at least %g%% of the genome). This is consistent with transmission, "
+        "persistence or a shared source, and does not distinguish between them"
         % (
             SAME_STRAIN_POPANI,
             MIN_PERCENT_COMPARED,
@@ -80,15 +67,15 @@ VERDICT_LANGUAGE: Dict[str, str] = {
     ),
     StrainVerdict.DIFFERENT.value: (
         "the populations differ by more than inStrain's threshold over enough of the genome to "
-        "tell. Different strains of the same species"
+        "compare: different strains of the same species"
     ),
     StrainVerdict.UNDETERMINED.value: (
-        "too little of the genome was compared for the identity to mean anything. Not evidence of "
-        "either answer - the usual cause is low coverage in one of the two samples"
+        "too little of the genome was compared to call same or different strains. The usual "
+        "cause is low coverage in one of the two samples"
     ),
     StrainVerdict.ABSENT.value: (
-        "the genome was not detected deeply enough in both samples, so there was nothing to "
-        "compare. Absence here is about this sequencing depth, not about the community"
+        "the genome was not covered deeply enough in both samples to compare. This reflects "
+        "sequencing depth; the genome may still be present in the community"
     ),
 }
 
@@ -103,13 +90,10 @@ class GenomeProfile:
     coverage: Optional[float]
     #: Fraction of the genome covered at all, 0-1.
     breadth: Optional[float]
-    #: Fraction covered at or above the profiler's depth floor, 0-1 - the positions SNVs are
-    #: actually called over. This is the one a diversity figure has to be gated on: a genome can be
-    #: 91% covered and have a quarter of that deep enough to call a variant, and the diversity is a
-    #: statement about the second number.
+    #: Fraction covered at or above the profiler's depth floor, 0-1: the positions SNVs are called
+    #: over. Diversity is gated on this, since it can be much lower than ``breadth``.
     breadth_min_cov: Optional[float]
-    #: Breadth inStrain expects given the coverage, 0-1. The ratio of the two says whether the
-    #: genome is really present or whether reads from a relative are mapping to part of it.
+    #: Breadth inStrain expects given the coverage, 0-1. See ``breadth_ratio``.
     expected_breadth: Optional[float]
     #: Mean per-position nucleotide diversity over covered positions.
     nucleotide_diversity: Optional[float]
@@ -124,9 +108,8 @@ class GenomeProfile:
     def breadth_ratio(self) -> Optional[float]:
         """Observed breadth over expected breadth, or None if either is unknown.
 
-        Well below 1 means the genome is covered unevenly - reads piling on conserved regions of a
-        relative rather than spread over a genome that is present. inStrain's own diagnostic, and
-        the reason breadth alone does not establish presence.
+        Well below 1 means uneven coverage, usually reads from a relative mapping to conserved
+        regions, so the genome may not be present (inStrain's diagnostic).
         """
         if not self.breadth or not self.expected_breadth:
             return None
@@ -134,12 +117,12 @@ class GenomeProfile:
 
     @property
     def usable_breadth(self) -> Optional[float]:
-        """The breadth a diversity figure is measured over: at the depth floor, not at any depth."""
+        """Breadth at the depth floor if known, else overall breadth."""
         return self.breadth_min_cov if self.breadth_min_cov is not None else self.breadth
 
     @property
     def diversity_is_reportable(self) -> bool:
-        """Whether this genome is covered well enough for its diversity to describe the genome."""
+        """Whether breadth and coverage meet MIN_BREADTH and MIN_COVERAGE."""
         breadth = self.usable_breadth
         return (
             breadth is not None and breadth >= MIN_BREADTH and (self.coverage or 0) >= MIN_COVERAGE
@@ -155,10 +138,10 @@ class GenomeComparison:
     sample_b: str
     #: Population ANI: alleles compared as sets, so a minor variant in both is not a difference.
     pop_ani: Optional[float]
-    #: Consensus ANI: major alleles only, which is the stricter and less meaningful of the two for
-    #: a population, and is reported because the two diverging is informative.
+    #: Consensus ANI: major alleles only. Stricter than popANI; reported because a difference
+    #: between the two is informative.
     con_ani: Optional[float]
-    #: Percentage of the genome compared - the denominator popANI is computed over.
+    #: Percentage of the genome compared: the positions popANI is computed over.
     percent_compared: Optional[float]
     population_snvs: Optional[int]
     consensus_snvs: Optional[int]
@@ -175,10 +158,8 @@ class GenomeComparison:
     def population_snv_distance(self) -> Optional[float]:
         """Population SNVs per megabase of compared sequence, or None without the breadth.
 
-        A rate rather than a count, because the count is a function of how much was compared: 10
-        differences over 2% of a genome and 10 over all of it are not the same finding. Still a
-        comparison between samples processed identically rather than an absolute SNP distance - see
-        the module docstring on what strain-distance tools overestimate.
+        A rate, so comparisons over different breadths can be compared. Not an absolute SNP
+        distance; see the module docstring.
         """
         if self.population_snvs is None or not self.percent_compared:
             return None
@@ -199,10 +180,8 @@ def _as_float(value: object) -> Optional[float]:
 def _as_percent(value: object) -> Optional[float]:
     """A fraction from inStrain's compare table, as a percentage.
 
-    Unconditional, not inferred from the magnitude: popANI is ~0.99999 and percent_compared can be
-    anything from 0.001 to 1.0, so "greater than 1 must already be a percentage" would be a rule
-    that works on one column and silently fails on the other. The same mistake, and the same fix,
-    as `parse_singlem_fraction`.
+    Always multiplied by 100, not inferred from magnitude: percent_compared ranges from 0.001 to
+    1.0, so a magnitude rule would fail on it (as in `parse_singlem_fraction`).
     """
     number = _as_float(value)
     return None if number is None else number * 100.0
@@ -216,8 +195,7 @@ def _as_int(value: object) -> Optional[int]:
 def _strip_extension(name: str) -> str:
     """A genome name without its FASTA extension.
 
-    ``os.path.splitext`` is wrong here for the same reason it is wrong in the clean-MAG join:
-    metaWRAP names bins ``bin.13``, so splitext turns every bin in a set into ``bin``.
+    Not ``os.path.splitext``, which would turn metaWRAP bin names like ``bin.13`` into ``bin``.
     """
     for extension in (".fasta", ".fa", ".fna", ".fas"):
         if name.endswith(extension):
@@ -225,7 +203,7 @@ def _strip_extension(name: str) -> str:
     return name
 
 
-#: inStrain's profile columns. Named so a schema change is a KeyError rather than empty output.
+#: inStrain's profile column names.
 PROFILE_COLUMNS = {
     "genome": "genome",
     "coverage": "coverage",
@@ -238,11 +216,8 @@ PROFILE_COLUMNS = {
     "density": "divergent_site_count",
 }
 
-#: inStrain's compare table stores popANI, conANI and the compared fraction as **fractions**, not
-#: percentages, while its documentation and its paper quote popANI as "99.999%". Read literally
-#: against the published threshold, every comparison is a different strain and every breadth is
-#: below the floor - which is what the first real run reported. Parsed values are multiplied by 100
-#: here so everything downstream, including the thresholds above, is in one unit.
+#: inStrain's compare table stores these as fractions, while its documentation quotes popANI as a
+#: percentage ("99.999%"). They are multiplied by 100 on parsing to match the thresholds above.
 FRACTION_COLUMNS = ("pop_ani", "con_ani", "percent_compared")
 
 #: inStrain's compare columns.
@@ -292,9 +267,8 @@ def parse_profile(path: str, sample: str) -> List[GenomeProfile]:
 def parse_comparison(path: str) -> List[GenomeComparison]:
     """Read `genomeWide_compare.tsv` from `inStrain compare`.
 
-    Sample names come back as inStrain writes them - the profile directory names - and the caller
-    relabels them, exactly as the appraisal path does for SingleM: a table whose sample names do not
-    match the rest of the pipeline's joins to nothing.
+    Sample names are returned as inStrain writes them; the caller maps them to the pipeline's
+    sample names with :func:`relabel`.
     """
     out: List[GenomeComparison] = []
     with open(path) as handle:
@@ -326,9 +300,8 @@ def parse_comparison(path: str) -> List[GenomeComparison]:
 def _label_key(name: str) -> str:
     """inStrain's own name for a sample, reduced to something a caller can map.
 
-    `compare` labels a row with the BAM's basename (``ERR011347.bam``) while `profile` is given a
-    directory, so the two halves of this module see different names for one sample. Stripping the
-    extension is what lets the caller's own sample names be put back.
+    `compare` labels rows with the BAM basename (``ERR011347.bam``); the extension is stripped so
+    the caller's sample names can be mapped back.
     """
     base = os.path.basename(name.strip())
     for extension in (".bam", ".sam", ".cram"):
@@ -384,8 +357,7 @@ def profile_row(profile: GenomeProfile) -> Dict[str, str]:
         "breadth_at_min_coverage": num(profile.breadth_min_cov),
         "expected_breadth": num(profile.expected_breadth),
         "breadth_ratio": num(profile.breadth_ratio),
-        # Blank rather than 0 when the genome is too thin to measure: a diversity of zero is a
-        # clonal population, which is a finding, and this is not it.
+        # Blank, not 0, when coverage is too low: zero diversity would mean a clonal population.
         "nucleotide_diversity": (
             num(profile.nucleotide_diversity, 6) if profile.diversity_is_reportable else ""
         ),
@@ -423,8 +395,7 @@ def comparison_row(comparison: GenomeComparison) -> Dict[str, str]:
         "genome": comparison.genome,
         "sample_a": comparison.sample_a,
         "sample_b": comparison.sample_b,
-        # Six decimal places on purpose: the threshold is 99.999%, so two would make every
-        # comparison read as 100.00 and the verdict column look arbitrary.
+        # Six decimal places, since the threshold is 99.999%.
         "pop_ani": num(comparison.pop_ani, 6),
         "con_ani": num(comparison.con_ani, 6),
         "percent_genome_compared": num(comparison.percent_compared, 2),
@@ -459,17 +430,17 @@ def shared_strains(
 
 #: Printed with every popANI figure.
 BREADTH_CAVEAT = (
-    "popANI is computed only over positions both samples covered deeply enough, so it has to be "
-    "read with `percent_genome_compared`: two samples sharing 2%% of a genome at 100%% identity "
-    "produce popANI 100%%, which is not evidence of a shared strain. Comparisons below %g%% of the "
-    "genome are reported as undetermined rather than as either answer" % MIN_PERCENT_COMPARED
+    "popANI is computed only over positions both samples covered deeply enough, so read it with "
+    "`percent_genome_compared`: two samples sharing 2%% of a genome at 100%% identity have popANI "
+    "100%%, which is not evidence of a shared strain. Comparisons over less than %g%% of the "
+    "genome are reported as undetermined" % MIN_PERCENT_COMPARED
 )
 
 #: Printed with every nucleotide-diversity figure.
 DIVERSITY_CAVEAT = (
-    "nucleotide diversity is measured over the positions covered at or above %gx, so a genome "
-    "present at low coverage has its diversity measured on a fraction of itself. Genomes below "
-    "%g breadth are reported without a diversity rather than with a thin one"
+    "nucleotide diversity is measured over the positions covered at or above %gx, so for a "
+    "genome at low coverage it uses only part of the genome. Genomes below %g breadth are "
+    "reported without a diversity value"
     % (
         MIN_COVERAGE,
         MIN_BREADTH,
@@ -482,12 +453,10 @@ def comparable_genomes(
 ) -> Dict[Tuple[str, str], int]:
     """How many genomes each *pair* of samples could even be compared for.
 
-    Per pair, not across every sample at once. inStrain compares pairs, and the intersection over
-    all samples is a different and much smaller number: on three real gut samples it was 0 while
-    42 pairwise comparisons existed, so reporting it beside them read as a contradiction.
+    Counted per pair, as inStrain compares pairs; the intersection over all samples can be much
+    smaller (0 on three gut samples with 42 pairwise comparisons).
 
-    "Comparable" means covered deeply enough in both to be worth a popANI - which is the first
-    thing that explains a table of undetermined verdicts.
+    A genome is comparable when it is reportable (see ``diversity_is_reportable``) in both samples.
     """
     by_sample: Dict[str, set] = {}
     for profile in profiles:
@@ -503,14 +472,12 @@ def comparable_genomes(
 
 # ── TRACS, the second backend ────────────────────────────────────────────────────────────────
 
-#: TRACS' own default SNP threshold for calling a transmission pair. Its paper's argument is that
-#: most tools *overestimate* SNP distances, so a threshold calibrated on another tool's distances
-#: does not transfer - which is the reason to keep its number rather than reuse inStrain's.
+#: TRACS' default SNP threshold for a transmission pair. Thresholds from other tools do not
+#: transfer, since most tools overestimate SNP distances.
 TRACS_SNP_THRESHOLD = 10
 
-#: Fraction of a reference genome TRACS requires to have read coverage before it will use it. Its
-#: own floor, and the same idea as MIN_PERCENT_COMPARED here: a distance computed over a sliver of
-#: a genome is not a distance. Recorded because it is why a shallow sample yields no rows at all.
+#: Fraction of a reference genome TRACS requires to be covered before using it (its own floor).
+#: A shallow sample therefore produces no rows.
 TRACS_MIN_BREADTH = 0.25
 
 #: TRACS' transmission-distance columns, as `transmission_distances.csv` carries them.
@@ -535,22 +502,19 @@ class TracsDistance:
     sample_b: str
     #: Raw SNP distance between the two samples' consensus sequences for this genome.
     snp_distance: Optional[float]
-    #: TRACS' own estimate after accounting for within-host diversity and the clock - the number its
-    #: paper argues is the one not inflated by the usual pipelines.
+    #: TRACS' estimate after accounting for within-host diversity and the molecular clock.
     transmission_distance: Optional[float]
-    #: Expected number of intermediate hosts, which is what a transmission claim rests on.
+    #: Expected number of intermediate hosts.
     expected_k: Optional[float]
     filtered_snp_distance: Optional[float]
-    #: Sites with enough coverage in both samples - this backend's version of breadth.
+    #: Sites with enough coverage in both samples (this backend's measure of breadth).
     sites_considered: Optional[int]
 
     @property
     def verdict(self) -> StrainVerdict:
         """Same or different strain at TRACS' own threshold.
 
-        Deliberately not re-derived from popANI: the two backends measure different quantities on
-        different scales, and converting one threshold into the other would invent a number neither
-        tool published.
+        Not derived from popANI: the backends measure different quantities on different scales.
         """
         distance = (
             self.filtered_snp_distance
@@ -565,19 +529,13 @@ class TracsDistance:
 def parse_tracs(path: str, samples: Sequence[str] = ()) -> List[TracsDistance]:
     """Read TRACS' `transmission_distances.csv`.
 
-    The genome is not a column of its own, and the obvious place to look for it does not work:
-    TRACS' `MSA file` column truncates the reference name at the first dot, so a run over `bin.1`
-    and `bin.4` writes `combinedbin` in *both* rows. Measured, not assumed - the first version of
-    this parser read that column and returned the genome `bin` for every row.
+    There is no genome column, and the `MSA file` column truncates reference names at the first
+    dot (`bin.1` and `bin.4` both give `combinedbin`). The genome is taken from the sample labels,
+    which TRACS writes as `<sample>_<genome>`, by removing a known sample name prefix. Splitting at
+    the last underscore would break genome names such as `bin_001`.
 
-    What does carry it is the row's sample labels, which TRACS writes as `<sample>_<genome>`. Given
-    the pipeline's own sample names, the genome is what remains after the matching prefix - split by
-    the known sample rather than at the last underscore, because a genome called `bin_001` would
-    take that split with it.
-
-    An empty table is a legitimate result and the commonest one on shallow data: TRACS skips any
-    reference with less than 25% of its genome covered, so a sample that does not carry a genome
-    deeply produces no row for it rather than a row saying "far apart".
+    An empty table is a valid result, common on shallow data: TRACS skips references with less than
+    25% of the genome covered.
     """
     out: List[TracsDistance] = []
     if not os.path.isfile(path):
@@ -615,9 +573,8 @@ def parse_tracs(path: str, samples: Sequence[str] = ()) -> List[TracsDistance]:
 def _split_label(label: str, samples: Sequence[str]) -> Tuple[str, str]:
     """`<sample>_<genome>` -> (sample, genome), split by a known sample name.
 
-    *samples* is tried longest first, so one sample name that is a prefix of another cannot claim
-    the other's rows. With no match the whole label is the sample and the genome is unknown, which
-    is reported as an empty string rather than guessed at.
+    *samples* is tried longest first, so a sample name that is a prefix of another does not match
+    the other's rows. Without a match, the whole label is the sample and the genome is empty.
     """
     label = label.strip()
     for sample in samples:
@@ -665,21 +622,19 @@ def tracs_row(distance: TracsDistance) -> Dict[str, str]:
         "verdict": verdict.value,
         "permitted_language": VERDICT_LANGUAGE[verdict.value],
         "snp_threshold": str(TRACS_SNP_THRESHOLD),
-        # In the row because the two backends are not interchangeable and a table of distances with
-        # no tool named cannot be compared with anything.
+        # The backends are not interchangeable, so each row names its tool.
         "backend": "tracs",
     }
 
 
 #: Printed with TRACS results.
 TRACS_CAVEAT = (
-    "TRACS reports a SNP distance and a transmission distance, and they are different claims: the "
-    "first is between two consensus sequences, the second is its estimate after accounting for "
-    "within-host diversity and the clock. Its paper's argument is that most tools overestimate the "
-    "first, which is why its own threshold of %d SNPs is used here rather than one converted from "
-    "another tool's scale. It also skips any reference with less than %.0f%% of its genome "
-    "covered, so a shallow sample produces no row rather than a distant one"
-    % (TRACS_SNP_THRESHOLD, TRACS_MIN_BREADTH * 100)
+    "TRACS reports a SNP distance and a transmission distance. The SNP distance is between two "
+    "consensus sequences; the transmission distance is TRACS' estimate after accounting for "
+    "within-host diversity and the molecular clock. The TRACS paper reports that most tools "
+    "overestimate the SNP distance, so its own threshold of %d SNPs is used here. TRACS skips "
+    "any reference with less than %.0f%% of its genome covered, so a shallow sample produces no "
+    "row" % (TRACS_SNP_THRESHOLD, TRACS_MIN_BREADTH * 100)
 )
 
 
@@ -688,9 +643,8 @@ def compare_backends(
 ) -> Dict[str, object]:
     """Where the two backends agree on same-versus-different, per genome and sample pair.
 
-    Reported rather than reconciled. They measure different quantities - a population ANI and a
-    consensus SNP distance - so a disagreement is information about the genome rather than a fault
-    in either tool, and averaging them would produce a number neither one published.
+    Disagreements are listed, not reconciled: the backends measure different quantities
+    (population ANI and consensus SNP distance).
     """
 
     def key(genome: str, a: str, b: str):

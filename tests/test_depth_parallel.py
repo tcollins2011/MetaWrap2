@@ -1,10 +1,9 @@
-"""The depth phase runs several pileups at once, because one does not use a machine.
+"""The depth phase runs several pileups at once.
 
-Measured by a user on a large machine: `coverage` saturated every core while aligning, then walked
-50 BAMs one at a time as `samtools view | samtools depth` with every thread at ~2 minutes each and ~25%
-utilisation - 6h44m for 36 water samples, 2h14m for 50 gut ones. `samtools depth` does not scale to
-every thread; the work is embarrassingly parallel across BAMs instead, since each one fills its own
-column of the running sums.
+A user on a large machine measured `coverage` using every core while aligning, then processing BAMs
+one at a time with `samtools view | samtools depth` at ~2 minutes each and ~25% utilisation (6h44m
+for 36 water samples, 2h14m for 50 gut samples). `samtools depth` does not scale with threads, but
+BAMs can run in parallel since each fills its own column of the running sums.
 """
 
 import numpy as np
@@ -22,14 +21,14 @@ def test_workers_divide_the_budget_rather_than_giving_one_pileup_everything():
 
 
 def test_a_small_budget_or_one_bam_stays_serial():
-    """Unchanged behaviour where parallelism cannot pay: no extra processes, no interleaved logs."""
+    """A small budget or a single BAM runs serially."""
     assert depth.depth_workers(1, 128) == 1
     assert depth.depth_workers(36, 4) == 1
     assert depth.depth_workers(36, 1) == 1
 
 
 def test_every_bam_lands_in_its_own_column(monkeypatch, tmp_path):
-    """The property that makes it safe without a lock, asserted on the table that comes out."""
+    """Each BAM writes only its own column of the output table."""
     seen = []
 
     def fake_accumulate(
@@ -47,13 +46,13 @@ def test_every_bam_lands_in_its_own_column(monkeypatch, tmp_path):
     )
 
     assert sorted(column for _bam, column, _t in seen) == [0, 1, 2]
-    # Three BAMs share a 16-thread budget, so five threads each - not 16 to one pileup while the
-    # other two wait. DEPTH_THREADS_PER_BAM sets how many run at once, not how many each gets.
+    # Three BAMs share a 16-thread budget, five threads each. DEPTH_THREADS_PER_BAM sets how many
+    # run at once, not how many threads each gets.
     assert {t for _bam, _c, t in seen} == {5}
     header = out.read_text().splitlines()[0].split("\t")
     assert header[:3] == ["contigName", "contigLen", "totalAvgDepth"]
     row = out.read_text().splitlines()[1].split("\t")
-    # Column order follows the BAM list, which is what makes two tables comparable.
+    # Column order follows the BAM list.
     assert float(row[3]) < float(row[5]) < float(row[7])
 
 
@@ -75,7 +74,7 @@ def test_a_failing_bam_stops_the_table_rather_than_writing_a_partial_one(monkeyp
 
 
 def test_the_numbers_do_not_depend_on_how_many_workers_ran(monkeypatch, tmp_path):
-    """Parallelism must not change the result, only when it arrives."""
+    """The table is the same for any number of workers."""
     monkeypatch.setattr(depth, "contig_lengths", lambda bam, env=None: {"k141_1": 1000})
 
     def fake_accumulate(

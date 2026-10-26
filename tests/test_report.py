@@ -1,10 +1,8 @@
-"""The one PDF a finished run did not have, and the page that says what is not in it.
+"""The run report PDF and its "What was not run" page.
 
-A run writes twenty-odd correct tables and nothing a collaborator can open. The risk in assembling
-them into one document is not that it looks wrong - it is that it reads as complete when it is not,
-because a page whose inputs were missing simply is not there. These tests pin that: every page that
-was not drawn is named on the last page, that page is written whether or not anything is missing,
-and the numbers on the pages that were drawn are the ones in the files they came from.
+A page whose inputs are missing is left out, so the report could look complete when it is not.
+Checked: every page not drawn is named on the "What was not run" page, that page is always written,
+and the numbers on drawn pages match their source files.
 """
 
 from __future__ import annotations
@@ -41,10 +39,8 @@ def _run(tmp_path, *parts: str) -> str:
 def pages(monkeypatch):
     """Every page's title and body, recorded as the document is written.
 
-    The PDF's text is glyph-indexed by the time it is on disk and cannot be read back, so the only
-    way to assert what a page *says* is to watch it being written. Both page kinds are recorded,
-    text pages and the embedded-PNG ones, because a wheel that was not drawn is as much a gap as a
-    table that was not.
+    The PDF's text is glyph-indexed on disk and cannot be read back, so pages are recorded as they
+    are written. Both text pages and embedded-PNG pages are recorded.
     """
     recorded: list = []
     text_page, image_page = R._Pdf.page, R._Pdf.image_page
@@ -77,12 +73,11 @@ def _page(pages: list, title: str) -> tuple:
 
 
 def test_a_pdf_is_written_with_a_page_for_every_section(tmp_path, pages):
-    """One file, ten pages, and the page count the PDF declares is the one that was drawn.
+    """One file with ten pages, and the PDF's declared page count matches the pages drawn.
 
     The ten are: the summary, read QC, assembly, the genome table, abundance, one functional wheel,
-    the resistance and virus summaries, "what was not run", and the provenance appendix. Pinned as
-    a number because a page lost to an exception swallowed somewhere would otherwise still produce
-    a plausible-looking PDF.
+    the resistance and virus summaries, "what was not run", and the provenance appendix. The count
+    catches a page lost to a swallowed exception.
     """
     out = str(tmp_path / "report.pdf")
     result = R.build_report([_run(tmp_path)], out)
@@ -105,28 +100,22 @@ def test_a_pdf_is_written_with_a_page_for_every_section(tmp_path, pages):
 
 
 def test_the_first_page_is_a_summary_and_the_first_result_is_the_second_page(tmp_path, pages):
-    """What was run, when and where - one page, one line per module, then straight into results.
+    """Page one is a one-line-per-module summary and page two is the first result.
 
-    This is a regression: the per-run provenance dumps used to be on the title page, and on the
-    reference run they filled six pages, so the first actual result was page seven. A reader
-    opening the report to see what the run found read six pages of configuration first.
+    The provenance dumps used to be on the title page and filled six pages on the reference run.
     """
     R.build_report([_run(tmp_path)], str(tmp_path / "r.pdf"), title="Fixture run")
     summary = "\n".join(_page(pages, "Fixture run")[1])
     assert _titles(pages)[0] == "Fixture run"
     assert _titles(pages)[1] == "Read QC"
-    # The one-liner: module, dates and duration, and nothing that needs a second page.
+    # Module, dates and duration, on one page.
     assert "bin_refinement" in summary and "2026-01-01T12:00:00" in summary
     assert len(_page(pages, "Fixture run")[1]) <= R.PAGE_LINES
     assert "threads" not in summary  # a resolved parameter, which belongs in the appendix
 
 
 def test_the_provenance_appendix_keeps_every_parameter_tool_and_database(tmp_path, pages):
-    """Moved to the back, not dropped. Read out of run_config.json rather than re-derived.
-
-    The appendix is the answer to "what exactly was this run", so losing a block on the way to the
-    back of the document would be worse than the six pages of front matter it replaced.
-    """
+    """The appendix, read from run_config.json, keeps all parameters, tools and databases."""
     R.build_report([_run(tmp_path, "REFINEMENT")], str(tmp_path / "r.pdf"))
     body = "\n".join(_page(pages, "Appendix: provenance")[1])
     assert "bin_refinement" in body and "20260101T120000-abcd1234" in body
@@ -142,11 +131,7 @@ def test_the_provenance_appendix_keeps_every_parameter_tool_and_database(tmp_pat
 
 
 def test_the_final_page_names_exactly_the_modules_whose_output_was_absent(tmp_path, pages):
-    """Eight modules produced nothing for a refinement-only run, and all eight are named.
-
-    Exactly: a page missing from this list is a page a reader would take for a negative result, and
-    a module on it that did run sends somebody looking for output that is already there.
-    """
+    """A refinement-only run lists exactly the eight modules with no output."""
     result = R.build_report([_run(tmp_path, "REFINEMENT")], str(tmp_path / "r.pdf"))
     assert [entry.module for entry in result.absent] == [
         "read_qc",
@@ -164,17 +149,17 @@ def test_the_final_page_names_exactly_the_modules_whose_output_was_absent(tmp_pa
 
 
 def test_a_module_that_was_not_run_gets_no_page_of_its_own(tmp_path, pages):
-    """Skipped, not drawn empty. An empty read-QC page would read as a sample with no reads."""
+    """A module with no output gets no page, not an empty one."""
     R.build_report([_run(tmp_path, "REFINEMENT")], str(tmp_path / "r.pdf"))
     assert "Read QC" not in _titles(pages)
     assert "Assembly" not in _titles(pages)
 
 
 def test_the_file_to_look_for_is_named_in_full_and_not_truncated(tmp_path, pages):
-    """The point of the page is to send a reader to a file, so the filename cannot be elided.
+    """Filenames on the "What was not run" page are not truncated.
 
-    Laid out by hand for this reason: the table formatter truncates a cell at 34 characters, which
-    turns the virus module's three filenames into "viral_contigs.tsv / plasmid_conti…".
+    The page is laid out by hand because the table formatter truncates cells at 34 characters
+    ("viral_contigs.tsv / plasmid_conti…").
     """
     R.build_report([_run(tmp_path, "REFINEMENT")], str(tmp_path / "r.pdf"))
     body = "\n".join(_page(pages, "What was not run")[1])
@@ -183,10 +168,10 @@ def test_the_file_to_look_for_is_named_in_full_and_not_truncated(tmp_path, pages
 
 
 def test_the_what_was_not_run_page_is_written_even_when_nothing_was_absent(tmp_path, pages):
-    """Its own absence would be ambiguous: a reader could not tell whether the report had checked.
+    """The "What was not run" page is written even when nothing is absent.
 
-    The fixture run has no strains output and one empty Krona distribution, so both are supplied
-    here - the strains tables as the headers that module writes, and the empty wheel removed.
+    The fixture run lacks strains output and has one empty Krona distribution, so strains tables
+    are added and the empty distribution removed.
     """
     root = _run(tmp_path)
     os.remove(os.path.join(root, "PATHWAYS", "hierarchy", "krona", "genome.bin_003.all.txt"))
@@ -202,7 +187,7 @@ def test_the_what_was_not_run_page_is_written_even_when_nothing_was_absent(tmp_p
     result = R.build_report([root], str(tmp_path / "r.pdf"))
     assert result.absent == []
     _title, body, footer = _page(pages, "What was not run")
-    # Last of the result pages: only the provenance appendix is allowed to follow it.
+    # Last result page; only the provenance appendix follows it.
     assert _titles(pages)[-2:] == ["What was not run", "Appendix: provenance"]
     assert "produced output" in "\n".join(body)
     assert footer == R.ABSENCE_NOTE
@@ -212,10 +197,9 @@ def test_the_what_was_not_run_page_is_written_even_when_nothing_was_absent(tmp_p
 
 
 def test_reads_in_and_out_come_from_whichever_report_the_run_left(tmp_path):
-    """FastQC states the count in its HTML and fastp in its JSON; both samples get a row.
+    """Read counts come from FastQC's HTML or fastp's JSON; both samples get a row.
 
-    FastQC counts are summed over the mates, because a page reporting R1 only would be wrong by a
-    factor of exactly two for every paired sample and look entirely plausible.
+    FastQC counts are summed over both mates; R1 alone would be half the paired-sample total.
     """
     counts = {entry.sample: entry for entry in R.read_qc_counts([_run(tmp_path, "READ_QC")])}
     assert (counts["sampleA"].reads_in, counts["sampleA"].reads_out) == (2000, 1800)
@@ -223,10 +207,7 @@ def test_reads_in_and_out_come_from_whichever_report_the_run_left(tmp_path):
 
 
 def test_a_count_no_report_stated_is_blank_rather_than_zero(tmp_path, pages):
-    """sampleC has only a post-QC report, so its reads-in is unknown, not zero.
-
-    Zero reads in and 700 reads out is an impossible row that a reader would have to disbelieve.
-    """
+    """sampleC has only a post-QC report, so its reads-in is blank, not zero."""
     counts = {entry.sample: entry for entry in R.read_qc_counts([_run(tmp_path, "READ_QC")])}
     assert counts["sampleC"].reads_in is None
     R.build_report([_run(tmp_path, "READ_QC")], str(tmp_path / "r.pdf"))
@@ -235,10 +216,10 @@ def test_a_count_no_report_stated_is_blank_rather_than_zero(tmp_path, pages):
 
 
 def test_assembly_numbers_are_quasts_own_rows_and_not_its_length_cuts(tmp_path, pages):
-    """Copied from report.tsv, and only the metrics a summary page wants.
+    """Assembly metrics are copied from QUAST's report.tsv, without the length-cut variants.
 
-    QUAST writes a dozen ``>= 5000 bp`` variants of each metric; putting them on this page would
-    make a reader pick one, and they would not all pick the same one.
+    QUAST writes about a dozen ``>= 5000 bp`` variants of each metric; only the base metrics are
+    shown.
     """
     ((name, metrics),) = R.assembly_stats([_run(tmp_path, "ASSEMBLY")])
     assert name == "final_assembly"
@@ -249,11 +230,11 @@ def test_assembly_numbers_are_quasts_own_rows_and_not_its_length_cuts(tmp_path, 
 
 
 def test_a_wheel_is_embedded_for_every_krona_input_with_a_distribution(tmp_path, pages):
-    """One wheel per Krona input, by contract - drawn by sunburst, not by a second renderer.
+    """One sunburst wheel per Krona input with a distribution.
 
-    Grouped two to a page by unit, so the two wheels of one genome (with and without BRITE's
-    scaffolding branches) are side by side. The fixture has one drawable input, so one page with
-    one wheel on it - a unit with an odd number of wheels must not lose the last one.
+    Wheels are grouped two per page by unit, so a genome's two wheels (with and without BRITE's
+    classification branches) are side by side. The fixture has one drawable input: one page with
+    one wheel, so an odd last wheel is not lost.
     """
     assert len(R.krona_inputs([_run(tmp_path, "PATHWAYS")])) == 2
     R.build_report([_run(tmp_path, "PATHWAYS")], str(tmp_path / "r.pdf"))
@@ -263,7 +244,7 @@ def test_a_wheel_is_embedded_for_every_krona_input_with_a_distribution(tmp_path,
 
 
 def test_two_wheels_of_one_unit_go_on_one_page(tmp_path, pages):
-    """The pair exists to be compared, and comparing them across a page turn is not possible."""
+    """A unit's two wheels are drawn on the same page."""
     krona = tmp_path / "run" / "PATHWAYS" / R.KRONA_DIR
     _run(tmp_path, "PATHWAYS")
     shutil.copyfile(krona / "genome.bin_001.all.txt", krona / "genome.bin_001.pathways.txt")
@@ -274,7 +255,7 @@ def test_two_wheels_of_one_unit_go_on_one_page(tmp_path, pages):
 
 
 def test_a_wheels_caption_names_its_source_relative_to_the_run_directory(tmp_path, pages):
-    """An absolute path on a cluster is 60 characters before the part that identifies the file."""
+    """Wheel captions give the source path relative to the run directory."""
     root = _run(tmp_path, "PATHWAYS")
     R.build_report([root], str(tmp_path / "r.pdf"))
     caption = _page(pages, "Function: genome.bin_001")[2]
@@ -283,20 +264,17 @@ def test_a_wheels_caption_names_its_source_relative_to_the_run_directory(tmp_pat
 
 
 def test_an_empty_distribution_is_named_rather_than_drawn_as_a_blank_wheel(tmp_path):
-    """A genome with no KO at all is a real result, and a missing wheel reads as a missing genome."""
+    """A genome with no KO is listed as absent instead of drawn as a blank wheel."""
     result = R.build_report([_run(tmp_path, "PATHWAYS")], str(tmp_path / "r.pdf"))
     assert [entry for entry in result.absent if "bin_003" in entry.looked_for]
 
 
 def test_the_first_genomes_page_is_headed_genomes_and_not_a_tier_name(tmp_path, pages, monkeypatch):
-    """The heading has to be the page's *first* text, not just the text highest up the page.
+    """The heading is the first text in the page's content stream.
 
-    A regression with no visual symptom. A figure draws its children in ascending zorder, an Axes
-    defaults to 0 and figure-level text to 3, so the tier bar chart went into the PDF's content
-    stream ahead of the heading above it. The page looked right and read wrong: the extracted text
-    of this page began "near", "complete", "high", "quality" - the chart's tick labels - with
-    "Genomes (26)" tenth. Anything reading the text rather than the pixels (copy-paste, a search
-    index, a screen reader) saw a quality tier where the title belongs.
+    A figure draws children in ascending zorder (Axes default 0, figure text 3), so the tier chart
+    was written before the heading. Extracted text (copy-paste, search, screen readers) then began
+    with the chart's tick labels, and "Genomes (26)" came tenth.
     """
     captured: list = []
     add = R._Pdf.add
@@ -312,17 +290,16 @@ def test_the_first_genomes_page_is_headed_genomes_and_not_a_tier_name(tmp_path, 
     figure = captured[at]
     heading = figure.texts[0]
     assert heading.get_text() == "Genomes (3)"
-    # The mechanism, stated as the assertion: the chart is drawn after the heading, so the heading
-    # reaches the content stream first. Comparing text to 0 would pass by accident on a page with
-    # no chart at all, so the chart's own axes is what is compared against.
+    # The chart's axes must have a higher zorder than the heading, so it is drawn after it. Compare
+    # against the chart's own axes; comparing to 0 would pass on a page without a chart.
     assert figure.axes, "the first genomes page carries the tier chart"
     assert figure.axes[0].get_zorder() > heading.get_zorder()
 
 
 def test_the_genome_pages_are_paginated_rather_than_shrunk(tmp_path, pages):
-    """A 300-genome catalogue scaled onto one page is a grey rectangle.
+    """Large genome tables span several pages instead of being scaled down.
 
-    120 genomes is the size of a real dereplicated catalogue from a small cohort.
+    120 genomes is the size of a dereplicated catalogue from a small cohort.
     """
     root = tmp_path / "big" / "REFINE"
     root.mkdir(parents=True)
@@ -339,7 +316,7 @@ def test_the_genome_pages_are_paginated_rather_than_shrunk(tmp_path, pages):
 
 
 def test_the_abundance_heatmap_quant_bins_already_drew_is_embedded(tmp_path, pages):
-    """An existing PNG, not a second heatmap: a report that re-plotted it could normalise it."""
+    """quant_bins' existing heatmap PNG is embedded instead of re-plotted."""
     root = _run(tmp_path, "QUANT")
     heatmap = os.path.join(root, "QUANT", R.ABUNDANCE_HEATMAP)
     shutil.copyfile(
@@ -354,10 +331,7 @@ def test_the_abundance_heatmap_quant_bins_already_drew_is_embedded(tmp_path, pag
 
 
 def test_a_module_that_ran_and_found_nothing_is_not_reported_as_absent(tmp_path, pages):
-    """virulence.tsv is header-only. Nothing found is a result; nothing run is not.
-
-    These are the two states the final page exists to keep apart, and here they are in one module.
-    """
+    """A module that ran and found nothing (header-only virulence.tsv) is not listed as absent."""
     result = R.build_report([_run(tmp_path, "AMR")], str(tmp_path / "r.pdf"))
     assert "amr" not in [entry.module for entry in result.absent]
     body = "\n".join(_page(pages, "Resistance and virulence")[1])
@@ -368,7 +342,7 @@ def test_a_module_that_ran_and_found_nothing_is_not_reported_as_absent(tmp_path,
 
 
 def test_the_command_writes_the_pdf_and_the_full_table_beside_it(tmp_path, capsys):
-    """The PDF truncates long lineages to stay legible, so the untruncated table ships with it."""
+    """The command writes the PDF and an untruncated genome table beside it."""
     out = str(tmp_path / "study.pdf")
     assert report_cmd.main([_run(tmp_path), "-o", out]) == 0
     table = str(tmp_path / ("study" + report_cmd.MAG_TABLE_SUFFIX))
@@ -379,7 +353,7 @@ def test_the_command_writes_the_pdf_and_the_full_table_beside_it(tmp_path, capsy
 
 
 def test_the_command_says_what_is_not_in_the_report(tmp_path, capsys):
-    """The same list as the final page, on the terminal, so it is seen before the PDF is opened."""
+    """The command prints the "What was not run" list to the terminal."""
     assert report_cmd.main([_run(tmp_path, "REFINEMENT"), "-o", str(tmp_path / "r.pdf")]) == 0
     out = capsys.readouterr().out
     assert "strains" in out and "viral_contigs.tsv" in out
@@ -387,13 +361,13 @@ def test_the_command_says_what_is_not_in_the_report(tmp_path, capsys):
 
 
 def test_a_mistyped_run_directory_is_an_error_rather_than_an_empty_report(tmp_path, capsys):
-    """Every page would say the module was absent, which is the one wrong answer this must not give."""
+    """A nonexistent run directory is an error and writes no PDF."""
     assert report_cmd.main([str(tmp_path / "nope"), "-o", str(tmp_path / "r.pdf")]) == 1
     assert "Not a directory" in capsys.readouterr().out
     assert not os.path.exists(str(tmp_path / "r.pdf"))
 
 
-# ── a study is more than one bin set ─────────────────────────────────────────────────────────
+# ── studies with several bin sets ────────────────────────────────────────────────────────────
 
 
 def _study(tmp_path, bins_per_sample: dict) -> str:
@@ -412,9 +386,9 @@ def _study(tmp_path, bins_per_sample: dict) -> str:
 
 
 def test_the_genomes_heading_says_how_many_bin_sets_it_covers(tmp_path, pages):
-    """ "Genomes (24)" for a study that recovered 62 was a page a reader could only misread.
+    """The genomes heading gives the total and the number of bin sets.
 
-    The count alone did not say it was one sample's, and the other two samples appeared nowhere.
+    It used to read "Genomes (24)" for one sample of a 62-genome, three-sample study.
     """
     R.build_report(
         [_study(tmp_path, {"sample_6": 24, "sample_7": 15, "sample_13": 23})],
@@ -425,17 +399,17 @@ def test_the_genomes_heading_says_how_many_bin_sets_it_covers(tmp_path, pages):
 
 
 def test_one_bin_set_keeps_the_plain_heading(tmp_path, pages):
-    """No "across 1 bin sets" on a per-run report, and no sample column to explain."""
+    """A single bin set gets the plain heading."""
     R.build_report([_study(tmp_path, {"sample_6": 4})], str(tmp_path / "r.pdf"))
     headings = [title for title in _titles(pages) if title.startswith("Genomes")]
     assert headings == ["Genomes (4)"]
 
 
 def test_the_footer_says_which_bin_sets_an_input_could_not_be_joined_to(tmp_path, pages):
-    """Blank because the file does not describe these genomes, not because it was never written.
+    """The footer names the bin sets an input could not be joined to.
 
-    Both leave identical empty cells, so only this sentence tells a reader which happened - and in
-    a cohort run, where taxonomy is keyed on dereplicated names, the second is the normal case.
+    Unjoined and unwritten inputs both leave empty cells; the footer distinguishes them. In a cohort
+    run, taxonomy is keyed on dereplicated genome names and usually does not join per-sample sets.
     """
     study = _study(tmp_path, {"sample_6": 2, "sample_7": 2})
     classify = tmp_path / "study" / "CLASSIFY"

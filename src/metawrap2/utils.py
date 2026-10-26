@@ -1,7 +1,6 @@
 """Small utility functions shared across MetaWrap2 modules.
 
-Kept deliberately dependency-light so any module or helper script can import from here
-without pulling in heavy libraries.
+Has no heavy dependencies, so any module or helper script can import it.
 """
 
 from __future__ import annotations
@@ -37,29 +36,21 @@ def strip_trailing_slash(path: str) -> str:
     return path.removesuffix("/")
 
 
-#: Linux gives a unix-domain socket address 108 bytes of ``sun_path`` including its terminator, so
-#: 107 usable characters. That number decides where a tool is allowed to put its temp files, for a
-#: reason that is not obvious from either end: several of the tools MetaWrap2 drives take a temp
-#: directory and then set it process-wide (CheckM1 assigns ``tempfile.tempdir``; SemiBin2 exports
-#: ``TMPDIR``), and Python's ``multiprocessing`` binds its listener socket inside whatever that
-#: resolves to. The name is ``/listener-`` plus eight random characters, so a long enough temp
-#: directory leaves no room, ``bind()`` fails in the child, and the parent reports an ``EOFError``
-#: from a ``recv()`` that says nothing about paths.
-#:
-#: Measured rather than reasoned about: a 90-character tmpdir under a benchmark work directory
-#: failed exactly this way on every variant of a comparison - taking its completeness metrics - and
-#: the same bins passed under /tmp. 90 is not a deep path by any standard, which is why this is
-#: handled rather than documented as a limitation.
+#: Linux gives a unix-domain socket address 108 bytes of ``sun_path`` including the terminator, so
+#: 107 usable characters. Several tools MetaWrap2 runs set their temp directory process-wide
+#: (CheckM1 assigns ``tempfile.tempdir``; SemiBin2 exports ``TMPDIR``), and Python's
+#: ``multiprocessing`` binds its listener socket inside it. With a long temp directory ``bind()``
+#: fails in the child and the parent reports an unexplained ``EOFError`` from ``recv()``. A
+#: 90-character tmpdir under a benchmark work directory failed this way; the same bins passed under
+#: /tmp.
 SOCKET_PATH_LIMIT = 107
-#: What ``multiprocessing`` adds below the temp directory before it binds anything. Two components,
-#: not one, and missing the first is what made the first version of this fix too generous by 14
-#: characters: ``get_temp_dir()`` first creates a *subdirectory* named ``pymp-`` plus 8 random
-#: characters, and only then does ``arbitrary_address()`` put ``listener-`` plus 8 more inside it.
+#: What ``multiprocessing`` adds below the temp directory before binding: ``get_temp_dir()``
+#: creates a subdirectory ``pymp-`` plus 8 random characters, then ``arbitrary_address()`` adds
+#: ``listener-`` plus 8 more inside it.
 #:
-#: The boundary this gives - 75 usable characters - was then checked by binding real sockets under
-#: directories of length from 60 to 90: 75 succeeds, 76 raises ``AF_UNIX path too long`` in the
-#: child and surfaces in the parent as a bare ``EOFError``. A 77-character tmpdir is what exposed
-#: the gap, having been judged short enough.
+#: This gives 75 usable characters, checked by binding real sockets under directories of 60 to 90
+#: characters: 75 succeeds, 76 raises ``AF_UNIX path too long`` in the child (a bare ``EOFError``
+#: in the parent).
 _MP_TEMP_DIR = len("/pymp-") + 8
 _LISTENER_NAME = len("/listener-") + 8
 MAX_TMPDIR_LEN = SOCKET_PATH_LIMIT - _MP_TEMP_DIR - _LISTENER_NAME
@@ -68,13 +59,11 @@ MAX_TMPDIR_LEN = SOCKET_PATH_LIMIT - _MP_TEMP_DIR - _LISTENER_NAME
 def short_tmpdir(real: str) -> str:
     """Create *real* and return a path to it short enough to hold a unix socket.
 
-    The directory itself stays where the caller asked for it, which is the point of passing one at
-    all: these temp directories hold GBs, and they belong on the filesystem chosen for the run's
-    output rather than on whatever /tmp happens to be. When that path is too long (see
-    :data:`MAX_TMPDIR_LEN`) the returned path is instead a short symlink to it under the system temp
-    directory - ``bind()`` resolves the symlink, so the socket name stays short while every byte
-    still lands where it was going to. The symlink is named from a hash of the real path, so a
-    ``--resume`` finds the same one rather than leaking a fresh link per attempt.
+    The directory stays where the caller asked (these temp directories hold GBs and belong on the
+    run's filesystem, not /tmp). When the path is too long (see :data:`MAX_TMPDIR_LEN`), a short
+    symlink to it under the system temp directory is returned instead, so socket names stay short
+    while data is still written to *real*. The symlink name is a hash of the real path, so
+    ``--resume`` reuses it.
     """
     os.makedirs(real, exist_ok=True)  # harmless under --dry-run; the tools need it to exist
     if len(real) <= MAX_TMPDIR_LEN:

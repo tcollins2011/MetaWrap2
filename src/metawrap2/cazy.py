@@ -1,22 +1,18 @@
-"""CAZyme families from dbCAN, and the agreement between the three ways it calls them.
+"""CAZyme families from dbCAN, with the agreement between its three methods.
 
-Carbohydrate-active enzymes are the part of a genome's function that a KO table answers worst. KEGG
-places a gene in a pathway; CAZy says which glycosidic bond it acts on, which is the question in any
-study about polysaccharide degradation - the gut, soil carbon, plant biomass. The two annotations
-overlap hardly at all for the enzymes that matter, so this is not a second opinion on the same
-calls.
+KEGG places a gene in a pathway; CAZy says which glycosidic bond it acts on, which matters for
+studies of polysaccharide degradation (gut, soil carbon, plant biomass). The two annotations
+overlap little for these enzymes.
 
-dbCAN runs three independent methods - a DIAMOND search of CAZy, the dbCAN family HMMs, and the
-dbCAN-sub subfamily HMMs - and writes what each one said per gene. That disagreement is the useful
-part of its output and is the thing a single "CAZy family" column throws away: on one real bin, 65
-of 1,772 proteins got a CAZyme call and a third of them were supported by one method only. dbCAN's
-own guidance is to trust a call supported by at least two, so the number of agreeing methods travels
-with every row here and the default for a confident call is two.
+dbCAN runs three methods (a DIAMOND search of CAZy, the dbCAN family HMMs and the dbCAN-sub
+subfamily HMMs) and reports each one's call per gene. On one bin, 65 of 1,772 proteins got a
+CAZyme call and a third of those were supported by one method only. dbCAN recommends trusting a
+call supported by at least two, so every row carries the number of agreeing methods and a
+confident call needs two.
 
-One more distinction the output keeps. A **CBM** is a carbohydrate-binding module, not a catalytic
-domain: a protein with a CBM binds a polysaccharide, and may or may not cut it. Counting CBMs
-alongside glycoside hydrolases inflates a count of degradative enzymes with proteins that do not
-degrade anything, so the class summary separates them and says so.
+A CBM is a carbohydrate-binding module, not a catalytic domain: a protein with one binds a
+polysaccharide and may or may not cut it. The class summary counts CBMs separately from the
+catalytic classes.
 """
 
 from __future__ import annotations
@@ -26,15 +22,13 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
-#: dbCAN's own recommendation: a family call supported by at least two of its three methods. Not a
-#: threshold invented here - a one-method call is kept, reported and counted separately rather than
-#: dropped, because which method found it is itself informative (DIAMOND finds close homologues of
-#: characterised enzymes; the HMMs find divergent ones).
+#: dbCAN's recommendation: a family call supported by at least two of its three methods. One-method
+#: calls are kept and counted separately, because the method is informative (DIAMOND finds close
+#: homologues of characterised enzymes; the HMMs find divergent ones).
 MIN_TOOLS = 2
 
-#: The CAZy class of a family, by prefix. Order matters: "GT" and "GH" share no prefix but "CBM"
-#: must be checked before "CE" would ever match, so these are matched whole rather than by
-#: startswith over a dict in arbitrary order.
+#: The CAZy class of a family, by prefix, in CAZy's conventional order. :func:`family_class`
+#: matches the longest prefix first.
 CAZY_CLASSES: Tuple[Tuple[str, str], ...] = (
     ("GH", "glycoside hydrolase"),
     ("GT", "glycosyltransferase"),
@@ -44,12 +38,11 @@ CAZY_CLASSES: Tuple[Tuple[str, str], ...] = (
     ("CBM", "carbohydrate-binding module"),
 )
 
-#: Classes whose members catalyse a reaction on a carbohydrate. CBM is deliberately absent: it binds
-#: one. Summing it into "degradative capacity" is the error this constant exists to prevent.
+#: Classes whose members catalyse a reaction on a carbohydrate. CBM is excluded because it only
+#: binds one.
 CATALYTIC_CLASSES = ("GH", "GT", "PL", "CE", "AA")
 
-#: dbCAN's columns in overview.tsv, as of 5.2. Named so a schema change is a KeyError at parse time
-#: rather than an empty column downstream.
+#: dbCAN's columns in overview.tsv, as of 5.2. A schema change raises KeyError at parse time.
 OVERVIEW_COLUMNS = {
     "gene": "Gene ID",
     "ec": "EC#",
@@ -64,8 +57,8 @@ OVERVIEW_COLUMNS = {
 #: dbCAN writes a lone "-" for every field it has nothing for.
 EMPTY = "-"
 
-#: ``GH13(45-389)`` -> ``GH13``; ``GH13_e82`` keeps its subfamily suffix, which is the point of
-#: dbCAN-sub. Coordinates are dropped because they are per-method and the family is not.
+#: ``GH13(45-389)`` -> ``GH13``; ``GH13_e82`` keeps its dbCAN-sub subfamily suffix. Coordinates
+#: are dropped because they differ between methods.
 _COORDINATES = re.compile(r"\((\d+)-(\d+)\)")
 
 
@@ -73,8 +66,7 @@ def _families(field: Optional[str]) -> Tuple[str, ...]:
     """Split one method's call into families, without its coordinates.
 
     A multi-domain protein gets several families from one method, separated by ``+``, and each may
-    carry coordinates. Both are stripped here so that agreement between methods can be compared on
-    the family rather than on the string.
+    carry coordinates. Both are stripped so methods can be compared by family.
     """
     if not field or field.strip() in ("", EMPTY):
         return ()
@@ -89,9 +81,8 @@ def _families(field: Optional[str]) -> Tuple[str, ...]:
 def family_class(family: str) -> Optional[str]:
     """``GH13_e82`` -> ``GH``. None for anything that is not a CAZy family name.
 
-    Checked longest-prefix first so ``CBM`` is never read as ``CE``-something, and returning None
-    rather than guessing: dbCAN's DIAMOND column can hold a CAZy accession that is not a family at
-    all, and a wrong class is worse than an unclassified one in a summary table.
+    Checked longest prefix first. dbCAN's DIAMOND column can hold a CAZy accession that is not a
+    family; that returns None.
     """
     for prefix, _description in sorted(CAZY_CLASSES, key=lambda item: -len(item[0])):
         if family.startswith(prefix) and (
@@ -109,16 +100,15 @@ class CazymeCall:
     gene: str
     #: Every family any method proposed, deduplicated. The consensus is in `families_agreed`.
     families: Tuple[str, ...]
-    #: Families at least `MIN_TOOLS` methods proposed, which is dbCAN's own bar for a call.
+    #: Families proposed by at least `MIN_TOOLS` methods (dbCAN's bar for a call).
     families_agreed: Tuple[str, ...]
-    #: dbCAN's own pick, which can be empty when its methods disagree. Kept as it is written rather
-    #: than recomputed, so a row can be checked against dbCAN's output directly.
+    #: dbCAN's pick, empty when its methods disagree. Kept as written so a row can be checked
+    #: against dbCAN's output.
     recommended: str
     diamond: Tuple[str, ...]
     hmm: Tuple[str, ...]
     subfamily: Tuple[str, ...]
-    #: As dbCAN counts it. Recomputed here as well, and the two are asserted equal in the tests,
-    #: because its number is the one a reader will compare against.
+    #: dbCAN's count of agreeing methods. The tests check it against a recomputed count.
     tools: int
     ec: str
     substrate: str
@@ -145,9 +135,8 @@ class CazymeCall:
 def parse_overview(path: str, genome: str) -> List[CazymeCall]:
     """Read dbCAN's ``overview.tsv``.
 
-    Only genes with at least one call appear in that file, so its length is the CAZyme count and not
-    the gene count - which is why the fraction of a genome that is CAZyme has to be computed against
-    the gene table rather than from this file alone.
+    Only genes with at least one call appear in that file, so the CAZyme fraction of a genome has
+    to be computed against the gene table.
     """
     calls: List[CazymeCall] = []
     with open(path) as handle:
@@ -197,16 +186,13 @@ def _clean(value: Optional[str]) -> str:
 def _clean_list(value: Optional[str]) -> str:
     """Clean a field that can be a list with empty members, e.g. ``-;peptidoglycan`` or ``-|-``.
 
-    dbCAN joins a multi-domain protein's per-domain annotations, and writes ``-`` for a domain it
-    has no mapping for - so the lone-dash check is not enough: real output carries
-    ``-;peptidoglycan`` for a protein with two domains, one of them unmapped. Left in, that dash
-    becomes a substrate named "-" in any count.
+    dbCAN joins a multi-domain protein's per-domain annotations and writes ``-`` for an unmapped
+    domain, e.g. ``-;peptidoglycan``. Those members are dropped so "-" is never counted as a
+    substrate.
 
-    ``|`` is a separator here too, and that one bit the EC column. dbCAN writes ``-|-`` for a
-    two-domain gene with no EC number on either domain; splitting only on ``;`` and ``,`` left that
-    string intact, so `ec` came back as ``-|-`` - a non-empty EC annotation for a gene that has
-    none. Measured on the vendored fixture: 2 of 11 rows. The trailing dash of a partial EC number
-    (``3.2.1.-``) must survive, which is why whole members are dropped rather than dashes stripped.
+    ``|`` is also a separator: dbCAN writes ``-|-`` in the EC column for a two-domain gene with no
+    EC number (2 of 11 rows in the vendored fixture). Whole members are dropped, not dashes, so a
+    partial EC number such as ``3.2.1.-`` is kept.
     """
     text = _clean(value)
     if not text:
@@ -221,9 +207,8 @@ def _agreed(
 ) -> Tuple[str, ...]:
     """Families proposed by at least *minimum* of the three methods.
 
-    Compared at family level with the subfamily suffix removed, because dbCAN-sub exists to add that
-    suffix: ``GH13`` from the HMMs and ``GH13_e82`` from dbCAN-sub are the same call, and treating
-    them as different would make the subfamily method's every agreement look like a disagreement.
+    Compared at family level with the subfamily suffix removed: ``GH13`` from the HMMs and
+    ``GH13_e82`` from dbCAN-sub count as the same call.
     """
     votes: Dict[str, int] = {}
     for group in (diamond, hmm, subfamily):
@@ -266,8 +251,7 @@ def cazyme_row(call: CazymeCall) -> Dict[str, str]:
         "dbcan_recommended": call.recommended,
         "methods_agreeing": str(call.tools),
         "confident": "yes" if call.is_confident else "no",
-        # Stated per row because the distinction is lost the moment these are counted: a CBM-only
-        # protein binds a polysaccharide and need not act on one.
+        # Per row, so CBM-only proteins (binding, not necessarily catalytic) can be told apart.
         "catalytic": "yes" if call.is_catalytic else "no",
         "ec": call.ec,
         "substrate": call.substrate,
@@ -344,9 +328,7 @@ def class_row(summary: ClassSummary) -> Dict[str, str]:
 def substrate_counts(calls: Sequence[CazymeCall]) -> List[Tuple[str, int]]:
     """substrate -> how many genes dbCAN assigned to it, commonest first.
 
-    dbCAN predicts a substrate only for the families it has a mapping for, so the genes with no
-    substrate are the majority and are not an error. Counted here rather than left as a column so
-    that "what can this genome eat" has an answer at the genome level.
+    dbCAN predicts a substrate only for families it has a mapping for, so most genes have none.
     """
     counts: Dict[str, int] = {}
     for call in calls:

@@ -1,26 +1,19 @@
-"""`metawrap2 install-db [name ...] [--all]` - download and configure MetaWrap2's databases.
+"""`metawrap2 install-db [name ...] [--all]`: download and configure MetaWrap2's databases.
 
-Database setup used to be the roughest part of getting MetaWrap2 working: five separate
-manual downloads copy-pasted out of the docs, each with its own unpacking and indexing step,
-followed by hand-editing ``metawrap2.toml`` with the right key names, plus a
-``checkm data setRoot`` that is easy to forget and silently breaks bin_refinement later.
-
-This command does all of that: it fetches each database, unpacks it, runs whatever indexing
-step it needs, writes the matching key into the config file, and verifies the result. Every
-step is skipped if it already looks complete, so re-running it is cheap and safe.
+For each database this downloads, unpacks and indexes it, writes its key into ``metawrap2.toml``,
+runs any tool-side setup (such as ``checkm data setRoot``) and verifies the result. Steps that
+already look complete are skipped, so re-running is safe.
 
     metawrap2 install-db --list            # what is available, how big, who needs it
     metawrap2 install-db checkm taxdump    # just these two
     metawrap2 install-db --all             # everything (large: see --list for sizes)
 
-Sizes are the real thing, so ``--all`` is a many-hour, several-hundred-GB commitment. The
-per-database ``--small`` variants download a capped-but-real stand-in instead, which is what
-you want for a smoke test of the pipeline rather than a production analysis.
+``--all`` takes many hours and several hundred GB. ``--small`` installs a capped variant where one
+exists, for smoke tests.
 
-Because that run is long, it is built to be interrupted: each database's config key is written as
-that database finishes, every installer short-circuits on one that is already complete, and
-``--list`` gives both numbers you need to plan it - what crosses the network and what is left on
-disk afterwards.
+An interrupted run can be restarted: each config key is written as its database finishes, and
+installers skip databases that are already complete. ``--list`` shows the download size and the
+on-disk size of each database.
 """
 
 from __future__ import annotations
@@ -41,33 +34,24 @@ import time
 from typing import Callable, Deque, Dict, Iterator, List, NamedTuple, Optional, Set, Tuple
 
 from .. import interrupt as _interrupt
+from ..benchmark import fetch as _fetcher
 from ..cliformat import make_parser
 from ..config import MODULE_ENVS, OPTIONAL_ENVS, env_prefix, find_config
 
-# Databases are independent of each other and mostly network-bound, so fetching several at
-# once is close to a linear speedup. Modest default so a slow link is not swamped.
+# Databases are independent and mostly network-bound, so several are fetched at once. The default
+# is modest so a slow link is not saturated.
 DEFAULT_PARALLEL_DBS = 3
 # Serialises the progress prints from concurrent installers so lines do not interleave.
 _PRINT_LOCK = threading.Lock()
 
-# How much of a failed installer's own output to show under the FAILED line, and how much of it to
-# keep in order to be able to show that much.
-#
-# A failed database used to report nothing but its name. The reporter's dbcan failure was three
-# lines - the header, the command, "FAILED: dbcan" - because the subprocess wrote its error to the
-# shared stdout where it was interleaved with two other databases' progress meters under `-t 3`.
-# Re-running the identical command by hand worked, so the failure was transient and the one piece
-# of information needed to know that was the part that got lost. Each installer's child output is
-# captured per database instead, and the tail of it printed where the reason belongs.
-#
-# 15 lines is enough for a traceback or a curl message without burying the summary. The ring buffer
-# is what makes capturing safe for a 300 GB download: curl's progress meter to a pipe writes
-# indefinitely, and holding all of it would be a leak proportional to download time.
+# Lines of a failed installer's output shown under its FAILED line, and lines kept to show them.
+# Child output is captured per database so concurrent installers (`-t N`) do not interleave and a
+# failure can be explained. A bounded buffer is used because curl's progress meter writes for as
+# long as the download runs.
 FAILURE_TAIL_LINES = 15
 _CAPTURE_LINES = 400
-#: The ring buffer the installer running on *this* thread writes its child output into, or None
-#: outside an installer. Thread-local rather than one shared buffer because up to `-t N` installers
-#: run at once and the whole point is to keep their output apart.
+#: Ring buffer for the child output of the installer on this thread, or None outside an
+#: installer. Thread-local so concurrent installers keep their output separate.
 _CAPTURED = threading.local()
 
 
@@ -81,58 +65,42 @@ def _say(*lines: str) -> None:
 class Database(NamedTuple):
     key: Optional[str]  # metawrap2.toml [databases] key, None if the tool stores its own path
     used_by: str
-    #: What crosses the network, and what is left on disk afterwards - two numbers, because for
-    #: half of these they are not the same number and the difference decides whether the install
-    #: fits. One "size" column used to carry whichever of the two was known, so a row said
-    #: "6.7 GB download" (gunc, ~13 GB once unpacked) beside one that said "1.4 GB" (checkm, a
-    #: bare size) and the column could not be added up. ``on_disk`` is marked ``~`` when it is an
-    #: estimate rather than a measurement; see the note under ``--list``.
+    #: Download size, and size on disk after unpacking and indexing; these often differ (gunc
+    #: downloads 6.7 GB and uses about 13 GB). ``on_disk`` is marked ``~`` when it is an estimate.
     download: str
     on_disk: str
     small_size: Optional[str]
     describe: str
-    #: Written into the config instead of the install directory, when the tool wants a file rather
-    #: than a directory - GUNC takes ``--db_file``, so GUNC_DB has to name the .dmnd itself. Also
-    #: used for a subdirectory the downloader creates under the install directory: geNomad writes
-    #: ``genomad_db/`` into the destination it is given and wants that inner path back.
+    #: Path under the install directory to write into the config instead of the directory itself:
+    #: a file the tool takes (GUNC's ``--db_file`` .dmnd) or a subdirectory the downloader creates
+    #: (geNomad's ``genomad_db/``).
     key_file: Optional[str] = None
-    #: ``key_file`` for a ``--small`` install, when the capped variant lands somewhere else:
-    #: ``bakta_db download --type light`` writes ``db-light/`` where ``--type full`` writes
-    #: ``db/``, so the configured path depends on which one was asked for.
+    #: ``key_file`` for a ``--small`` install, when it differs: ``bakta_db download --type light``
+    #: writes ``db-light/`` and ``--type full`` writes ``db/``.
     small_key_file: Optional[str] = None
-    #: Like ``key_file``, for a path whose name is not known until it is downloaded. SingleM's
-    #: metapackage directory carries its own version (``S6.5.0.GTDB_r232.metapackage_...``), and
-    #: that version is part of the answer - a per-cell fraction is only as current as the reference
-    #: behind it - so the versioned directory is what goes into the config rather than a `latest`
-    #: symlink that would hide it.
+    #: Like ``key_file``, for a path whose name is only known after download. SingleM's
+    #: metapackage directory includes its version (``S6.5.0.GTDB_r232.metapackage_...``); the
+    #: versioned path is configured so the reference version stays visible.
     key_glob: Optional[str] = None
 
     @property
     def size(self) -> str:
-        """The download size, under the name ``quickstart`` reads it by.
-
-        ``quickstart._print_database_guidance`` prints its own short table from this registry and
-        reads ``db.size``; splitting the field in two would have made ``metawrap2 quickstart``
-        raise AttributeError on a machine where nothing else had changed. One spelling, one
-        meaning: the size column anywhere outside ``--list`` is the download.
-        """
+        """The download size. Kept for ``quickstart._print_database_guidance``, which reads it."""
         return self.download
 
 
-# Sizes below are measurements where one exists and the download size carried across where one
-# does not - never a number invented to fill the column. The ones worth knowing the provenance of:
-# gunc's ~13 GB is a reported on-disk measurement against a 6.7 GB download, checkm2's ~3 GB and
-# pfam's 1.6 GB come from their own release notes, singlem's 9.7 GB is the unpacked metapackage,
-# and the five tool-managed databases (bakta, gtdbtk, amrfinder, genomad, checkv) carry the figures
-# the README's table has always quoted. A row whose on-disk figure is an estimate says so with `~`.
+# Sizes are measurements where available; otherwise the download size is reused for on-disk.
+# Sources: gunc's ~13 GB is a reported on-disk measurement, checkm2's ~3 GB and pfam's 1.6 GB come
+# from their release notes, singlem's 9.7 GB is the unpacked metapackage, and the tool-managed
+# databases (bakta, gtdbtk, amrfinder, genomad, checkv) use the figures from the README table.
 DATABASES: Dict[str, Database] = {
     "checkm": Database(
         key="CHECKM_DB",
-        used_by="bin_refinement, reassemble_bins, binning --run-checkm",
+        used_by="--checkm1 in bin_refinement and binning --run-checkm",
         download="1.4 GB",
         on_disk="~1.4 GB",
         small_size=None,
-        describe="CheckM1 marker-gene reference data",
+        describe="CheckM1 marker-gene reference data (only for --checkm1; CheckM2 is the default)",
     ),
     "taxdump": Database(
         key="TAXDUMP",
@@ -160,11 +128,11 @@ DATABASES: Dict[str, Database] = {
     ),
     "checkm2": Database(
         key="CHECKM2DB",
-        used_by="bin_refinement --checkm2, binning --run-checkm --checkm2",
+        used_by="bin_refinement, reassemble_bins, binning --run-checkm (the default scorer)",
         download="1.7 GB",
         on_disk="~3 GB",
         small_size=None,
-        describe="CheckM2's DIAMOND reference (uniref100.KO; not CheckM1's data - see checkm)",
+        describe="CheckM2's DIAMOND reference (uniref100.KO; separate from CheckM1's `checkm`)",
         key_file=os.path.join("CheckM2_database", "uniref100.KO.1.dmnd"),
     ),
     "gunc": Database(
@@ -173,8 +141,8 @@ DATABASES: Dict[str, Database] = {
         download="6.7 GB",
         on_disk="~13 GB",
         small_size=None,
-        describe="GUNC proGenomes 2.1 reference (diamond .dmnd, gunzipped to about twice the "
-        "download; this one runs by default, so budget the 13 GB)",
+        describe="GUNC proGenomes 2.1 reference (diamond .dmnd, about twice the download size "
+        "once gunzipped; GUNC runs by default)",
         key_file="gunc_db_progenomes2.1.dmnd",
     ),
     "gtdbtk": Database(
@@ -183,8 +151,8 @@ DATABASES: Dict[str, Database] = {
         download="~110 GB",
         on_disk="~110 GB",
         small_size=None,
-        describe="GTDB-Tk reference package, by its own download-db.sh (the tarball is deleted "
-        "only after it unpacks, so the install needs about twice this free)",
+        describe="GTDB-Tk reference package, installed by its download-db.sh (the tarball is "
+        "deleted after unpacking, so the install needs about twice this space free)",
     ),
     "dbcan": Database(
         key="DBCAN_DB",
@@ -209,8 +177,7 @@ DATABASES: Dict[str, Database] = {
         download="12 GB",
         on_disk="48 GB",
         small_size=None,
-        # The release is not named here: EGGNOG_DB_VERSION is defined with the other URLs, below
-        # this table, and a second copy of "5.0.2" would be correct until one of them was edited.
+        # The release is not named here; it is defined once, in EGGNOG_DB_VERSION below.
         describe="eggNOG annotation SQLite (39 GB unpacked) and the DIAMOND database of eggNOG "
         "proteins (8.7 GB)",
     ),
@@ -220,8 +187,8 @@ DATABASES: Dict[str, Database] = {
         download="30 GB",
         on_disk="~30 GB",
         small_size="1.3 GB",
-        describe="Bakta's reference database, by bakta_db (--small: the `light` type, which drops "
-        "the UPS/IPS protein sets and annotates from the HMMs alone)",
+        describe="Bakta's reference database, installed by bakta_db (--small: the `light` type, "
+        "without the UPS/IPS protein sets; annotates from the HMMs only)",
         key_file="db",
         small_key_file="db-light",
     ),
@@ -240,8 +207,8 @@ DATABASES: Dict[str, Database] = {
         download="200 MB",
         on_disk="~200 MB",
         small_size=None,
-        describe="AMRFinderPlus reference database, by amrfinder_update, which also builds its "
-        "BLAST and HMMER indexes; the dated version directory is what gets configured",
+        describe="AMRFinderPlus reference database, installed by amrfinder_update, which also "
+        "builds its BLAST and HMMER indexes; the dated version directory is configured",
         key_glob="20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]*",
     ),
     "genomad": Database(
@@ -250,8 +217,8 @@ DATABASES: Dict[str, Database] = {
         download="1.5 GB",
         on_disk="~1.5 GB",
         small_size=None,
-        describe="geNomad marker database, by `genomad download-database`; one download serves "
-        "both the viral calls and the plasmid calls amr's mobility work reads",
+        describe="geNomad marker database, installed by `genomad download-database`; used for "
+        "the viral calls and for the plasmid calls that amr reads",
         key_file="genomad_db",
     ),
     "checkv": Database(
@@ -260,8 +227,8 @@ DATABASES: Dict[str, Database] = {
         download="6.4 GB",
         on_disk="~6.4 GB",
         small_size=None,
-        describe="CheckV reference database, by `checkv download_database`; the versioned "
-        "checkv-db-vX directory it creates is what gets configured",
+        describe="CheckV reference database, installed by `checkv download_database`; the "
+        "versioned checkv-db-vX directory it creates is configured",
         key_glob="checkv-db-*",
     ),
     "singlem": Database(
@@ -271,8 +238,8 @@ DATABASES: Dict[str, Database] = {
         on_disk="9.7 GB",
         small_size=None,
         describe="SingleM GTDB marker metapackage (single-copy marker genes + their taxonomy). "
-        "Zenodo serves this at a sustained 150-300 KB/s, so the 2.2 GB takes 2-4 hours where "
-        "every other database here arrives at 0.5-20 MB/s: start it early, it is not stuck",
+        "Downloads at 150-300 KB/s, so the 2.2 GB takes 2-4 hours (the other databases here "
+        "download at 0.5-20 MB/s); start it early",
         key_glob="*.smpkg.zb",
     ),
     "kofam": Database(
@@ -298,21 +265,18 @@ DATABASES: Dict[str, Database] = {
         on_disk="~20 GB",
         small_size="~9 GB",
         describe="bmtagger index of the host genome (--small: human chr21 only). The bitmask and "
-        "srprism index are built locally, which is the slow step rather than the download",
+        "srprism index are built locally; building takes longer than the download",
     ),
 }
 
-#: Size strings in this registry are human-readable on purpose - they are read far more often than
-#: they are summed - so the totals row parses them back. GB throughout; MB and TB convert.
+#: Unit factors to GB, for parsing the registry's human-readable size strings into totals.
 _SIZE_UNITS: Dict[str, float] = {"MB": 1.0 / 1024, "GB": 1.0, "TB": 1024.0}
 
 
 def _gigabytes(size: str) -> float:
     """Parse one of this registry's size strings ("399 MB", "~110 GB") into GB.
 
-    The `~` is dropped rather than rejected: an estimate still has to be counted, or the totals
-    row would omit the largest databases in the table and read as smaller than the smallest
-    useful install.
+    A leading `~` is ignored, so estimates are included in totals.
     """
     number, _, unit = size.replace("~", "").strip().partition(" ")
     return float(number) * _SIZE_UNITS[unit.strip()]
@@ -324,15 +288,7 @@ def _total(sizes: List[str]) -> str:
 
 
 def _print_list() -> None:
-    """The authoritative database table: two numbers per row and a column that can be added up.
-
-    What this replaced put four kinds of number in one "full size" column - a bare size, a
-    download size, a download-and-unpacked pair, and "~20 GB + indexing" - so only 4 of 13 rows
-    said how much disk the install needed, the two-number rows overflowed into the `--small`
-    column and broke the alignment, and planning a disk budget from it was not possible. GUNC was
-    the costly case: it read "6.7 GB download" and occupies about 13 GB, and it runs by default in
-    bin_refinement, so the under-statement landed on everybody.
-    """
+    """Print the database table with download, on-disk and ``--small`` sizes, and totals."""
     print("\nMetaWrap2 databases\n")
     print("  %-10s %-11s %-11s %-11s %s" % ("name", "download", "on disk", "--small", "used by"))
     print("  " + "-" * 84)
@@ -357,12 +313,11 @@ def _print_list() -> None:
     for name, db in DATABASES.items():
         print("  %-10s %s" % (name, db.describe))
     print(
-        "\n  Both numbers matter and they are not the same: `download` crosses the network, "
-        "`on disk`\n  is what is left after unpacking and indexing. An on-disk figure marked `~` "
-        "is an estimate;\n  where no measurement exists the download size is carried across "
-        "rather than guessed upwards,\n  so read the on-disk total as a floor. `--small` is what "
-        "that flag downloads - for a database\n  with no capped variant it repeats the full "
-        "download, because that is what --small installs."
+        "\n  `download` is the size fetched over the network; `on disk` is the size after "
+        "unpacking\n  and indexing. An on-disk figure marked `~` is an estimate; where none was "
+        "measured, the\n  download size is used, so the on-disk total is a lower bound. "
+        "`--small` is the download\n  size with that flag; for a database with no smaller "
+        "variant it is the full download."
     )
     print("\n  Install into a directory of your choice with --dir (default ~/metawrap2_dbs).")
     print("  Each database's path is written to your config file as it finishes.\n")
@@ -371,9 +326,8 @@ def _print_list() -> None:
 # --- shared helpers ---------------------------------------------------------------------
 
 
-#: The process group of every download running right now, one per child started by :func:`_run`.
-#: Kept so that an interrupt can kill the *group* rather than only the process we started: curl is
-#: the one writing the file, and a downloader from a conda env is several processes deep.
+#: Process group of each child started by :func:`_run` that is still running. An interrupt kills
+#: the whole group, since the curl writing the file may be several processes below the child.
 _DOWNLOAD_GROUPS: Set[int] = set()
 _GROUPS_LOCK = threading.Lock()
 
@@ -382,11 +336,9 @@ _GROUPS_LOCK = threading.Lock()
 def _tracked(child: subprocess.Popen) -> Iterator[None]:
     """Remember *child*'s process group for as long as it runs.
 
-    Started with ``start_new_session``, so the child leads its own group and ``child.pid`` is that
-    group's id. Both halves matter: a new session is what stops a terminal's Ctrl-C from reaching
-    curl behind this command's back, and tracking the group is what lets
-    :func:`_terminate_downloads` then kill it on purpose. Without the second half the first one
-    turns a Ctrl-C into the very orphan it was meant to prevent.
+    The child is started with ``start_new_session``, so ``child.pid`` is its group id. The new
+    session keeps a terminal Ctrl-C from reaching curl directly; tracking the group lets
+    :func:`_terminate_downloads` kill it instead, so no download is orphaned.
     """
     with _GROUPS_LOCK:
         _DOWNLOAD_GROUPS.add(child.pid)
@@ -400,14 +352,9 @@ def _tracked(child: subprocess.Popen) -> Iterator[None]:
 def _terminate_downloads() -> None:
     """SIGTERM every download process group still running, and forget it.
 
-    This is the half of the orphan fix that acts. A killed `install-db` used to leave its curl
-    running: the reporter's `ps` showed a 44-minute curl from a stopped run and a 16-minute one
-    from the next, both writing the same `.part` at their own offsets, and the garbage that makes
-    surfaces later as a `tar` or `gzip` failure that reads like a bad download. Killing the group
-    rather than the child covers the downloaders that are a shell script around a tool around curl.
-
-    A group that has already exited is not an error: the race being closed is a writer that
-    outlives this process, not one that finished before it.
+    Prevents a curl from outliving an interrupted `install-db`. Two curls writing the same `.part`
+    corrupt it, which later shows up as a `tar` or `gzip` failure. Groups that already exited are
+    ignored.
     """
     with _GROUPS_LOCK:
         groups = sorted(_DOWNLOAD_GROUPS)
@@ -422,15 +369,11 @@ def _terminate_downloads() -> None:
 def _run(cmd: List[str], **kw) -> int:
     """Run *cmd*, capturing its output into this thread's buffer when there is one.
 
-    Outside an installer there is no buffer and the child writes straight to this process's
-    stdout, which is what a direct call (a test, another command) wants. Inside one, stderr is
-    folded into stdout and both are kept so that a failure can quote them: the alternative is the
-    status quo, where three databases' output arrives on one terminal interleaved and the one that
-    failed is unreadable.
+    Outside an installer the child writes to this process's stdout. Inside one, stderr is merged
+    into stdout and captured so a failure can be quoted.
 
-    Every child goes into its own session - see :func:`_tracked` - and is launched through Popen
-    even when its output is not captured, because a pid is what the cleanup needs and
-    ``subprocess.call`` does not hand one back.
+    Every child runs in its own session (see :func:`_tracked`) and is started with Popen so its pid
+    is available for cleanup.
     """
     print("  $ %s" % " ".join(cmd))
     sink: Optional[Deque[str]] = getattr(_CAPTURED, "lines", None)
@@ -458,12 +401,8 @@ def _run(cmd: List[str], **kw) -> int:
 def _install_capturing(name: str, target: str, small: bool, jobs: int) -> Tuple[bool, List[str]]:
     """Run one installer with its child output captured, and hand back whatever it said.
 
-    The exception text is appended to the captured lines as well as printed: an installer that
-    raises is the case where the reason is most likely to be the last thing printed rather than
-    the subprocess's own output.
-
-    Only `Exception` is caught, deliberately: a Ctrl-C has to leave this function and stop the run
-    rather than be recorded as "this database failed" while the next one starts downloading.
+    An exception's text is appended to the captured lines as well as printed. Only `Exception` is
+    caught, so Ctrl-C stops the whole run.
     """
     sink: Deque[str] = collections.deque(maxlen=_CAPTURE_LINES)
     _CAPTURED.lines = sink
@@ -486,27 +425,20 @@ def _failure_tail(output: List[str]) -> List[str]:
     return ["    %s" % line for line in tail]
 
 
-#: How long a `.part` has to have been untouched before this command will resume it.
+#: Seconds a `.part` must be unmodified before it is resumed.
 #:
-#: Resuming is the useful default - these downloads are hours long and a stale `.part` is most of
-#: the work already done - but `curl -C -` appends from wherever the file currently ends, so two
-#: curls resuming the same `.part` write at their own offsets and interleave into a file that is
-#: not the download. That is what the reporter hit, and it surfaces as a `tar`/`gzip` failure
-#: rather than as a collision.
-#:
-#: 120 seconds because the quiet gaps a *live* curl can have are all much shorter: `--retry 3` with
-#: no delay backs off 1s, 2s, 4s, and a stalled TCP connection goes quiet for a connection timeout,
-#: not for minutes. Erring long is deliberate - resuming over a live writer corrupts silently,
-#: while refusing a `.part` that is actually dead costs one message that names the file to delete.
+#: `curl -C -` appends from the current end of the file, so two curls resuming the same `.part`
+#: interleave and corrupt it, which later shows up as a `tar`/`gzip` failure. A live curl's quiet
+#: gaps are much shorter than this (`--retry 3` backs off 1s, 2s, 4s). Refusing a dead `.part`
+#: only costs a message naming the file to delete.
 LIVE_PART_SECONDS = 120
 
 
 def _another_writer(part: str) -> bool:
     """Does *part* look like a file another `install-db` is still writing? Prints the reason.
 
-    Mtime rather than a lock file: the writer is curl, started by whatever process, possibly
-    orphaned from a run that no longer exists, so there is nobody to hold a lock and nothing to
-    ask. What can be observed is that the bytes are still arriving.
+    Uses the file's mtime instead of a lock file, because the writer may be an orphaned curl
+    that holds no lock.
     """
     try:
         idle = time.time() - os.path.getmtime(part)
@@ -522,34 +454,40 @@ def _another_writer(part: str) -> bool:
 
 
 def _fetch(url: str, dest: str) -> bool:
-    """Download *url* to *dest* with curl, resuming a partial file that nobody else is writing."""
+    """Download *url* to *dest*, verified, resuming a partial file that no other process is writing.
+
+    The transfer is ``benchmark.fetch.download``: several ranged connections with aria2c when it is
+    installed, curl otherwise, with the same checks either way. The databases fetched by URL here
+    are ``.gz``, ``.tar.gz`` or ``.tar.bz2`` files without published checksums, so each one is
+    test-decompressed before it is accepted, and a corrupt one fails here instead of at unpacking.
+
+    ``_run`` is passed in so the child still leads its own process group and writes into this
+    thread's capture buffer. The live ``.part`` check below stays here: it guards against two
+    copies of this command downloading the same file.
+    """
     if os.path.isfile(dest) and os.path.getsize(dest):
         print("  already downloaded: %s" % os.path.basename(dest))
         return True
-    tmp = dest + ".part"
+    tmp = _fetcher.partial_path(dest)
     if os.path.isfile(tmp) and _another_writer(tmp):
         return False
-    rc = _run(["curl", "-fL", "--retry", "3", "-C", "-", "-o", tmp, url])
-    if rc != 0:
-        print("  download failed: %s" % url)
+    problem = _fetcher.download(url, dest, run=_run)
+    if problem:
+        print("  download failed: %s\n  %s" % (url, problem))
         return False
-    os.replace(tmp, dest)
     return True
 
 
 def _extract(archive: str, into: str) -> bool:
     """Unpack *archive* into *into*, refusing members that would land outside it.
 
-    These archives come off the public internet, and a bare `extractall` writes wherever a member's
-    name says to - including `/etc/...` and `../../..`. Python 3.12's `data` filter rejects exactly
-    that (and strips the ownership and mode bits a database tarball has no business setting); the
-    explicit check below is the same guard for older versions, so the refusal does not depend on
-    which interpreter happens to be running.
+    A bare `extractall` writes wherever a member's name points, including absolute and `..`
+    paths. Python 3.12's `data` filter rejects those and strips ownership and mode bits; the
+    explicit check below does the same on older versions.
 
-    This is the only place any archive here is unpacked. It used to be one of two: the CARD
-    installer hand-rolled the same check against realpath() prefixes and got it wrong, which made
-    that database impossible to install at all. One guard, used by everything, is the point -
-    compression is detected from the file, so bz2 and gz both arrive here.
+    All archives in this module are unpacked here. Compression (gz, bz2) is detected from the
+    file. A separate check in the CARD installer once rejected valid archives, so there is only
+    this one.
     """
     print("  unpacking %s" % os.path.basename(archive))
     try:
@@ -560,7 +498,7 @@ def _extract(archive: str, into: str) -> bool:
                     print("  skipping %s: it would be written outside %s" % (member.name, into))
                     continue
                 if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-                    # A device node or fifo in a database tarball is not something to write out.
+                    # Skip device nodes and fifos.
                     print("  skipping %s: not a file, directory or link" % member.name)
                     continue
                 safe.append(member)
@@ -577,8 +515,8 @@ def _extract(archive: str, into: str) -> bool:
 def _untar(archive: str, into: str) -> None:
     """`_extract`, and remove the archive once it has been unpacked.
 
-    A failed unpack keeps the archive: it is usually a truncated download, and `_fetch` resumes
-    one with `curl -C -` on the next run rather than starting the download again.
+    A failed unpack keeps the archive, which is usually a truncated download that `_fetch` can
+    resume on the next run.
     """
     if _extract(archive, into):
         os.remove(archive)
@@ -598,8 +536,8 @@ def _gunzip(archive: str, dest: str) -> bool:
 def _escapes(member: tarfile.TarInfo) -> bool:
     """Would extracting *member* write outside the destination directory?
 
-    Checked on the link target as well as the name: a symlink to `/etc` is how the next member in
-    the archive gets written there.
+    Checks the link target as well as the name, since a symlink out of the directory lets later
+    members be written through it.
     """
     for name in (member.name, member.linkname or ""):
         if name.startswith(("/", "\\")):
@@ -619,12 +557,9 @@ def _mamba_run(env: str, cmd: List[str]) -> int:
 def dry_run() -> bool:
     """True if this is a ``--dry-run``: print the plan, touch nothing.
 
-    Read from the one place that knows, ``command.runner``, which is what the global ``--dry-run``
-    flag sets in ``cli`` and what every module asks through ``modules._common.dry_run``. This
-    command used to have no notion of it at all - ``_run`` went straight to subprocess, so
-    ``metawrap2 --dry-run install-db gtdbtk`` downloaded 110 GB from a flag whose entire purpose
-    is to not do that. A second switch of our own would have been a second answer to a question
-    that already has one.
+    Read from ``command.runner``, which the global ``--dry-run`` flag sets and every module reads
+    through ``modules._common.dry_run``. Before this check, ``metawrap2 --dry-run install-db
+    gtdbtk`` downloaded 110 GB.
     """
     from ..command import runner
 
@@ -633,45 +568,40 @@ def dry_run() -> bool:
 
 # --- what each installer fetches or runs -------------------------------------------------
 #
-# URLs and downloader argv live here, not inline in the installers, because `--dry-run` has to
-# print what the real run would fetch. One definition read by both: a plan composed from a second
-# copy of these strings would be correct exactly until one of them was edited.
+# URLs and downloader argv are defined here so the installers and `--dry-run` read the same values.
 
 CHECKM_URL = "https://data.ace.uq.edu.au/public/CheckM_databases/checkm_data_2015_01_16.tar.gz"
 TAXDUMP_URL = "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz"
 KRAKEN2_URL = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_20240904.tar.gz"
-#: A real standard build, capped to 8 GB - right for testing, not for production.
+#: The standard build capped to 8 GB, for testing.
 KRAKEN2_SMALL_URL = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_08gb_20240904.tar.gz"
 GUNC_URL = "https://swifter.embl.de/~fullam/gunc/gunc_db_progenomes2.1.dmnd.gz"
 PFAM_BASE_URL = "https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release"
 PFAM_FILES = ("Pfam-A.hmm.gz", "Pfam-A.hmm.dat.gz")
 CARD_URL = "https://card.mcmaster.ca/latest/data"
 
-#: eggNOG's emapper database files. Fetched here rather than through eggNOG-mapper's own
-#: `download_eggnog_data.py`, which hardcodes `eggnogdb.embl.de` - a host that no longer answers.
-#: Run against it the downloader printed "Finished" over three zero-byte files, because it shells
-#: out to wget per file and checks neither the exit status nor the result. The live mirror is
-#: eggnog5.embl.de, and fetching the three files directly also gets this project's own resume,
-#: live-`.part` refusal and progress reporting.
+#: eggNOG's emapper database files, fetched from eggnog5.embl.de. eggNOG-mapper's own
+#: `download_eggnog_data.py` uses `eggnogdb.embl.de`, which no longer responds, and reports
+#: "Finished" over zero-byte files because it does not check wget's exit status. Fetching directly
+#: also gives this module's resume and `.part` handling.
 EGGNOG_DB_VERSION = "5.0.2"
 EGGNOG_BASE_URL = "http://eggnog5.embl.de/download/emapperdb-%s" % EGGNOG_DB_VERSION
-#: What `-m diamond` needs: the annotation SQLite, the taxonomy, and the DIAMOND protein database.
-#: Each is gzipped on the server except the taxonomy, which is a tarball.
+#: Files `-m diamond` needs: annotation SQLite, taxonomy and DIAMOND protein database. All are
+#: gzipped on the server except the taxonomy, which is a tarball.
 EGGNOG_FILES: Tuple[str, ...] = (
     "eggnog.db.gz",
     "eggnog.taxa.tar.gz",
     "eggnog_proteins.dmnd.gz",
 )
 HOST_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz"
-#: Real human sequence, one chromosome - enough to exercise host removal.
+#: One human chromosome, enough to test host removal.
 HOST_SMALL_URL = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr21.fa.gz"
-#: What the --small BLAST build is assembled from; the full one is fetched by update_blastdb.pl.
+#: Source list for the --small BLAST build; the full build is fetched by update_blastdb.pl.
 BLAST_SMALL_SOURCE = "https://ftp.ncbi.nlm.nih.gov/genomes/refseq/bacteria/assembly_summary.txt"
 
-#: The databases a tool downloads for itself: the env that owns the tool, and the argv, as a
-#: function of ``--small``. Both the installer and the dry run read this, so "the command it would
-#: run" and "the command it runs" cannot drift apart. The env comes from config.py for the reason
-#: the CheckM installer records below - a hardcoded env name survived a rename and failed quietly.
+#: Databases fetched by their own tool: the env that has the tool, and the argv as a function of
+#: ``--small``. Read by both the installer and the dry run. Env names come from config.py so they
+#: follow env renames.
 DOWNLOADERS: Dict[str, Tuple[str, Callable[[str, bool], List[str]]]] = {
     "checkm2": (
         OPTIONAL_ENVS["checkm2"],
@@ -718,17 +648,14 @@ DOWNLOADERS: Dict[str, Tuple[str, Callable[[str, bool], List[str]]]] = {
 def _run_downloader(name: str, target: str, small: bool) -> int:
     """Run *name*'s own downloader in the env that owns it.
 
-    The env is checked first because five of these databases are fetched by their own tool, and
-    `quickstart` builds only the default envs - so `install-db checkm2` on a fresh machine failed
-    with mamba's own words, `critical libmamba The given prefix does not exist:
-    ".../envs/metawrap2-checkm2"`, followed by `FAILED: checkm2`. That names the prefix rather
-    than the thing to do about it. One readable line instead, naming the command that fixes it.
+    Checks first that the env exists, since `quickstart` builds only the default envs, and prints
+    the `install-env` command to run if it does not. Otherwise mamba reports only a missing prefix.
     """
     env, argv = DOWNLOADERS[name]
     if not dry_run() and env_prefix(env) is None:
         print(
-            "  cannot install %s: its downloader lives in the %s environment, which is not "
-            "built yet.\n  Run `metawrap2 install-env %s` first, then this command again."
+            "  cannot install %s: its downloader is in the %s environment, which is not "
+            "built yet.\n  Run `metawrap2 install-env %s`, then run this command again."
             % (name, env, env.replace("metawrap2-", ""))
         )
         return 1
@@ -737,28 +664,22 @@ def _run_downloader(name: str, target: str, small: bool) -> int:
 
 # --- is it already installed? ------------------------------------------------------------
 #
-# One answer per database, because two callers need it: the installer, to short-circuit (which is
-# what makes re-running this command cheap), and the dry run, which has to say "already present,
-# would skip" rather than announce it would download 90 GB that is already on the disk.
+# Used by the installers, to skip complete databases, and by the dry run, to report them.
 #
-# The general rule is that a database is installed when the path that would go into the config is
-# there and not empty - which is the right question by construction, since that is the path every
-# module will open. Only the databases whose key names the install directory itself need a marker
-# file naming here.
+# A database is installed when the path that would go into the config exists and is not empty.
+# Databases whose key is the install directory itself list marker files here.
 PRESENT_WHEN: Dict[str, Tuple[str, ...]] = {
     "checkm": ("taxon_marker_sets.tsv",),
     "taxdump": ("names.dmp",),
     "kraken2": ("hash.k2d",),
     "dbcan": ("dbCAN.hmm",),
     "kofam": ("ko_list.gz", "profiles"),
-    #: GTDB-Tk's package is directories all the way down and its own download-db.sh decides it is
-    #: installed the same way - by whether the destination holds a subdirectory.
+    #: Installed when the destination holds a subdirectory, as GTDB-Tk's download-db.sh checks.
     "gtdbtk": ("*/",),
-    #: What read_qc actually opens. hg38.fa is an input to the indexing, not a product of it.
+    #: The index files read_qc opens. hg38.fa is only an input to indexing.
     "host": ("hg38.bitmask", "hg38.srprism.idx"),
-    #: Both files emapper needs, so a 27 GB download interrupted between them is not "installed".
-    #: EGGNOG_DB itself stays the *directory*, because emapper takes --data_dir - naming the file
-    #: in the config is the shape that lost Pfam's release version in 2.1.2.
+    #: Both files emapper needs, so a download interrupted between them is not complete.
+    #: EGGNOG_DB is the directory, because emapper takes --data_dir.
     "eggnog": ("eggnog.db", "eggnog_proteins.dmnd"),
 }
 
@@ -766,9 +687,7 @@ PRESENT_WHEN: Dict[str, Tuple[str, ...]] = {
 def _already_installed(name: str, target: str, small: bool) -> bool:
     """Is *name* complete in *target*? Never writes, so it is safe under a dry run."""
     if name == "blast":
-        # BLAST's database is a dozen files under a name the config can change (BLASTDB_NAME), so
-        # a filename pattern here would be a second and worse answer to a question blastdb.find
-        # already answers.
+        # BLAST's files are named by the configurable BLASTDB_NAME; blastdb.find handles that.
         from .. import blastdb
         from ..config import Settings
 
@@ -790,9 +709,9 @@ def _already_installed(name: str, target: str, small: bool) -> bool:
 def _exists_nonempty(pattern: str) -> bool:
     """Does *pattern* match a file with bytes in it, or a directory with something in it?
 
-    Globbed because three of these databases name themselves after the release they are
-    (`checkv-db-v1.5`, `*.smpkg.zb`, AMRFinderPlus's dated directories), and emptiness is checked
-    because an interrupted download leaves the directory it was writing into behind.
+    Globbed because some databases are named by release (`checkv-db-v1.5`, `*.smpkg.zb`,
+    AMRFinderPlus's dated directories). Empty matches are rejected because an interrupted download
+    leaves its directory behind.
     """
     for match in glob.glob(pattern):
         if os.path.isdir(match) and os.listdir(match):
@@ -815,20 +734,15 @@ def _install_checkm(target: str, small: bool, jobs: int = 8) -> bool:
             return False
         _untar(archive, target)
 
-    # CheckM stores this path inside its own env, so this is belt and braces rather than the
-    # mechanism: every CheckM1 call also gets CHECKM_DATA_PATH from the configured CHECKM_DB (see
-    # checkm.checkm1_data_env), which is what makes the setting survive the env being rebuilt. Doing it
-    # anyway means `checkm` run by hand from the env also works.
-    #
-    # The env name comes from MODULE_ENVS rather than being written out: it used to be spelled
-    # "metawrap2-bin_refinement" here, and consolidating the envs left this line pointing at one that
-    # no longer exists - which fails quietly, since the message below is only a NOTE.
+    # Pipeline calls pass CHECKM_DATA_PATH from CHECKM_DB (see checkm.checkm1_data_env), which
+    # survives env rebuilds. setRoot is also run so `checkm` works when called by hand from the env.
+    # The env name comes from MODULE_ENVS so it follows env renames; a failure here is only a NOTE.
     checkm_env = MODULE_ENVS["bin_refinement"]
     print("  pointing CheckM at the data (checkm data setRoot)")
     if _mamba_run(checkm_env, ["checkm", "data", "setRoot", target]) != 0:
         print(
-            "  NOTE: could not run `checkm data setRoot` automatically. CHECKM_DATA_PATH is passed\n"
-            "        per call so bin_refinement will work regardless, but to use `checkm` directly:\n"
+            "  NOTE: could not run `checkm data setRoot`. bin_refinement still works because\n"
+            "        CHECKM_DATA_PATH is passed on each call. To use `checkm` directly, run:\n"
             "        mamba run -n %s checkm data setRoot %s" % (checkm_env, target)
         )
     return os.path.isfile(os.path.join(target, "taxon_marker_sets.tsv"))
@@ -859,8 +773,7 @@ def _install_kraken2(target: str, small: bool, jobs: int = 8) -> bool:
 
 
 def _install_blast(target: str, small: bool, jobs: int = 8) -> bool:
-    # Every other installer short-circuits when its database is already there; without the
-    # same check here, re-running install-db re-ran makeblastdb over the whole database.
+    # Skip if present, so a re-run does not rebuild the database with makeblastdb.
     if _already_installed("blast", target, small):
         print("  BLAST database already present.")
         return True
@@ -871,7 +784,7 @@ def _install_blast(target: str, small: bool, jobs: int = 8) -> bool:
         with open(script, "w") as fh:
             fh.write(_SMALL_BLAST_SCRIPT)
         os.chmod(script, 0o755)
-        # Thousands of small genome downloads: run them concurrently or this dominates.
+        # Thousands of small genome downloads, run concurrently.
         if _run(["bash", script, str(jobs)], cwd=target) != 0:
             return False
     else:
@@ -922,15 +835,11 @@ rm -f all_genomes.fna
 def _install_checkm2(target: str, small: bool, jobs: int = 8) -> bool:
     """CheckM2's DIAMOND reference, fetched by CheckM2 itself.
 
-    ``checkm2 database --download`` is the only supported way to get this: the file lives on Zenodo
-    under a versioned record that CheckM2 pins, and a hand-picked URL goes stale the next time
-    CheckM2 is upgraded. So this installer runs the tool rather than fetching a URL of its own.
+    Uses ``checkm2 database --download``, because CheckM2 pins a versioned Zenodo record and a
+    fixed URL would go stale on upgrade.
 
-    It is a different database from ``checkm``, which is the one thing about CheckM2 that reliably
-    catches people out - both are "the CheckM database", they share no files, and having one
-    installed does nothing for the other. ``--small`` is ignored: completeness estimates come from a
-    model trained against this exact reference, so a trimmed copy would not be a faster CheckM2 but
-    a differently-calibrated one.
+    This is separate from the ``checkm`` (CheckM1) database; they share no files. ``--small`` is
+    ignored, because CheckM2's model is trained against this exact reference.
     """
     if _already_installed("checkm2", target, small):
         print("  CheckM2 database already present.")
@@ -944,10 +853,8 @@ def _install_checkm2(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_gunc(target: str, small: bool, jobs: int = 8) -> bool:
     """The GUNC proGenomes 2.1 diamond database.
 
-    One file, so there is no indexing step and nothing to configure inside a conda env - which makes
-    this the simplest installer here. ``--small`` is ignored because GUNC's verdict is only as good
-    as the breadth of what it compares against: a capped reference would report bins as
-    under-represented rather than as clean, which is a worse answer than a slower one.
+    A single file with no indexing step. ``--small`` is ignored, because a reduced reference would
+    leave more bins unassessable.
     """
     if _already_installed("gunc", target, small):
         print("  GUNC database already present.")
@@ -963,13 +870,11 @@ def _install_gunc(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_dbcan(target: str, small: bool, jobs: int = 8) -> bool:
     """dbCAN's databases, fetched by dbCAN itself.
 
-    ``--aws_s3`` rather than the default HTTP path, and that is the whole decision here: dbCAN's
-    own help calls the HTTP route "db_current (moving snapshot)" while the S3 route is a pinned
-    release. A CAZyme family call is only reproducible against the release that produced it, so a
-    database that changes under a stable name is worse than a large one.
+    Uses dbCAN's pinned-release download source (the flag set in DOWNLOADERS) instead of the default
+    HTTP source, which dbCAN's help describes as a moving snapshot. CAZyme calls are only
+    reproducible against a fixed release.
 
-    ``--small`` is ignored: the HMM sets are the method, and the three-method agreement this module
-    reports needs all three present.
+    ``--small`` is ignored: the three-method agreement reported by annotate needs all databases.
     """
     if _already_installed("dbcan", target, small):
         print("  dbCAN database already present.")
@@ -983,13 +888,10 @@ def _install_dbcan(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_eggnog(target: str, small: bool, jobs: int = 8) -> bool:
     """eggNOG's annotation database, fetched file by file from the live mirror.
 
-    Not through eggNOG-mapper's own `download_eggnog_data.py`, for the reason recorded above
-    EGGNOG_FILES: it points at a host that no longer answers and reports success regardless. The
-    three files are gunzipped into the flat layout emapper's `--data_dir` expects. 12 GB on the
-    wire and 48 GB unpacked, which is why the two figures are reported separately in `--list`.
+    See EGGNOG_FILES for why eggNOG-mapper's downloader is not used. The files are unpacked into
+    the flat layout emapper's `--data_dir` expects (12 GB download, 48 GB unpacked).
 
-    ``--small`` is ignored because eggNOG has no capped variant: its optional flags fetch *more*
-    data (Pfam HMMs, MMseqs indexes), not less. Saying so beats offering a flag that does nothing.
+    ``--small`` is ignored: eggNOG has no reduced variant.
     """
     if _already_installed("eggnog", target, small):
         print("  eggNOG database already present.")
@@ -1002,8 +904,7 @@ def _install_eggnog(target: str, small: bool, jobs: int = 8) -> bool:
         if name.endswith(".tar.gz"):
             if not _extract(archive, target):
                 return False
-            # The tarball is the only one of the three that is not a single gzipped file, and
-            # emapper looks for `eggnog.taxa.db` beside the others rather than in a subdirectory.
+            # emapper expects `eggnog.taxa.db` beside the other files, not in a subdirectory.
             _flatten_into(target, os.path.splitext(os.path.splitext(name)[0])[0])
             continue
         if not _gunzip(archive, archive[: -len(".gz")]):
@@ -1015,9 +916,7 @@ def _install_eggnog(target: str, small: bool, jobs: int = 8) -> bool:
 def _flatten_into(target: str, subdir: str) -> None:
     """Move anything the taxonomy tarball unpacked into *subdir* up into *target*, then remove it.
 
-    emapper resolves `eggnog.taxa.db` beside `eggnog.db`, so a tarball that unpacks into its own
-    directory leaves the tool looking in the wrong place - and the error it gives names a path the
-    user never typed.
+    emapper looks for `eggnog.taxa.db` beside `eggnog.db`.
     """
     inner = os.path.join(target, subdir)
     if not os.path.isdir(inner):
@@ -1030,19 +929,17 @@ def _flatten_into(target: str, subdir: str) -> None:
     try:
         os.rmdir(inner)
     except OSError:
-        # Something unexpected is still in there; leaving it is better than deleting blind.
+        # Not empty; leave the remaining files in place.
         pass
 
 
 def _install_pfam(target: str, small: bool, jobs: int = 8) -> bool:
     """Pfam-A, from EBI's current release.
 
-    The HMMs carry their own gathering thresholds, which is why no separate cutoff table is needed -
-    and why this is one file rather than the half-dozen InterProScan's data would be.
+    The HMMs include their gathering thresholds, so no separate cutoff table is needed.
 
-    `relnotes.txt` is fetched with them and is not decoration: Pfam renumbers and merges families
-    between releases, so a domain call means "PF00001 as of release 37.0" and the release is what
-    makes it reproducible. `--small` is ignored; the profile set is the method.
+    `relnotes.txt` is also fetched to record the release, since Pfam renumbers and merges families
+    between releases. `--small` is ignored.
     """
     if _already_installed("pfam", target, small):
         print("  Pfam already present (release %s)." % _pfam_release(target))
@@ -1070,14 +967,12 @@ def _pfam_release(target: str) -> str:
 def _install_card(target: str, small: bool, jobs: int = 8) -> bool:
     """CARD's data, from CARD's own `latest/data` endpoint.
 
-    Fetched by URL rather than by a tool, because RGI has no downloader: `rgi load` takes a
-    card.json that is already on disk. The tarball is 4 MB, which is why this one is listed with no
-    `--small` variant - there is nothing to trim.
+    Fetched by URL because RGI has no downloader (`rgi load` takes a card.json already on disk).
+    The tarball is 4 MB, so there is no `--small` variant.
 
-    The version inside card.json is what dates every call made against it, so it is printed here and
-    recorded per run in the AMR table. CARD releases every few months and the URL always points at
-    the newest one, so two installs months apart are different databases under one path: rename the
-    directory after the version if that matters to you.
+    The version in card.json is printed here and recorded per run in the AMR table. The URL always
+    serves the newest release, so installs made at different times can differ under the same path;
+    rename the directory after the version if needed.
     """
     marker = os.path.join(target, DATABASES["card"].key_file or "")
     if _already_installed("card", target, small):
@@ -1087,13 +982,8 @@ def _install_card(target: str, small: bool, jobs: int = 8) -> bool:
     archive = os.path.join(target, "card_data.tar.bz2")
     if not _fetch(CARD_URL, archive):
         return False
-    # Unpacked by `_extract` like every other archive here. This installer used to hand-roll the
-    # same escape check against realpath() prefixes, and that copy made CARD impossible to
-    # install: CARD's tarball has 19 members and the first is `.`, the archive root, for which
-    # realpath("<target>/.") normalises to "<target>" - not a match for "<target>" plus a
-    # separator, so the one member that could not possibly escape was the one rejected, and the
-    # installer aborted the whole run. All 18 real members passed. `_escapes` asks the question
-    # that decides it - a leading `/`, or a `..` component - under which `.` is simply fine.
+    # Uses the shared `_extract`. CARD's tarball starts with a `.` member, which an earlier
+    # realpath-prefix check in this installer rejected, so CARD could not be installed.
     if not _extract(archive, target):
         return False
     os.remove(archive)
@@ -1109,25 +999,16 @@ def _card_version(card_json: str) -> str:
     return card_version(card_json)
 
 
-# --- the five that each tool downloads for itself ----------------------------------------
+# --- databases fetched by their own tool's downloader ------------------------------------
 #
-# amrfinder, genomad, checkv, bakta and gtdbtk were advertised in the README's table and in
-# `usage.md` (`--genomad-db $GENOMAD_DB`, as though it already existed) but were not in this
-# registry, so `install-db gtdbtk` answered "Unknown database(s): gtdbtk" and four modules -
-# `amr`, `viruses`, `annotate --bakta`, `classify_bins --gtdbtk` - had no documented way to get
-# their data at all.
+# amrfinder, genomad, checkv, bakta and gtdbtk use the tool's own downloader, as checkm2 does: the
+# tool knows which database version it reads, and several build indexes after downloading. This
+# command runs the downloader in the right env, records the resolved path in the config, and skips
+# databases already installed.
 #
-# All five shell out to the tool's own downloader, the pattern `checkm2` already uses here:
-# the tool knows which database version it can read, the URL moves with the release, and several
-# of these build indexes after downloading that a plain fetch would leave undone. What this
-# command adds is the part the tools do not do - running inside the right env, recording the
-# resolved path under the key the modules read, and being idempotent on a re-run.
-#
-# They are checked as "the directory the downloader was told to fill has something in it" rather
-# than against a filename inside somebody else's data package. Those layouts change between
-# releases, and a successful 30 GB bakta download reported as FAILED because a marker file was
-# renamed upstream is a worse failure than a half-finished one reported as present - which the
-# tool itself catches the first time a module runs against it.
+# Completeness is checked as "the target directory is not empty", not by a marker filename, because
+# upstream layouts change between releases. The tool reports an incomplete database when a module
+# first uses it.
 
 
 def _has_content(path: str) -> bool:
@@ -1141,15 +1022,12 @@ def _subdirectories(path: str) -> List[str]:
 def _install_amrfinder(target: str, small: bool, jobs: int = 8) -> bool:
     """The AMRFinderPlus reference database, fetched by amrfinder_update.
 
-    `amrfinder_update` rather than a URL because it does two things a fetch would not: it picks the
-    database version the installed AMRFinderPlus can actually read, and it runs makeblastdb and
-    hmmpress over what it downloaded, without which `amr` fails at its first call.
+    `amrfinder_update` picks the database version the installed AMRFinderPlus can read and runs
+    makeblastdb and hmmpress, which `amr` needs.
 
-    It writes a dated directory per version (`2024-07-22.1`) plus a `latest` symlink, and the dated
-    one is what goes into the config - see AMRFINDER_DB in config.py. An ARG call is only as
-    datable as its database, and a rerun pointed at a symlink that has since moved is a different
-    experiment wearing the same name. `--small` is ignored: NCBI curates one per-gene threshold set
-    and a subset of it would not be a faster `amr` but an incomparable one.
+    It writes a dated directory per version (`2024-07-22.1`) plus a `latest` symlink. The dated
+    directory is configured (see AMRFINDER_DB in config.py) so results can be tied to a version.
+    `--small` is ignored.
     """
     versions = _amrfinder_versions(target)
     if versions:
@@ -1173,14 +1051,11 @@ def _amrfinder_versions(target: str) -> List[str]:
 def _install_genomad(target: str, small: bool, jobs: int = 8) -> bool:
     """geNomad's marker database, by `genomad download-database`.
 
-    One download, two answers: geNomad classifies a contig as viral, plasmid or chromosomal in one
-    pass against this database, so `viruses` and the mobile-element work in `amr` share it rather
-    than needing a second plasmid reference. That is also why it is worth installing even for a
-    study that never asks about phage.
+    geNomad classifies contigs as viral, plasmid or chromosomal in one pass, so `viruses` and
+    `amr --mobile-elements` share this database.
 
-    The command creates `genomad_db/` *inside* the destination it is given and `genomad end-to-end`
-    wants that inner directory, so GENOMAD_DB names it rather than the install directory.
-    `--small` is ignored; the markers are the method.
+    The command creates `genomad_db/` inside the destination, and GENOMAD_DB names that inner
+    directory, which `genomad end-to-end` takes. `--small` is ignored.
     """
     if _already_installed("genomad", target, small):
         print("  geNomad database already present.")
@@ -1194,11 +1069,9 @@ def _install_genomad(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_checkv(target: str, small: bool, jobs: int = 8) -> bool:
     """CheckV's reference database, by `checkv download_database`.
 
-    The command names the directory after the database release (`checkv-db-v1.5`), and that
-    versioned directory is what `checkv end_to_end -d` takes and what CHECKV_DB records: a
-    completeness figure is a comparison against this reference, so which release it was is part of
-    the number. `--small` is ignored for the same reason it is for GUNC - a trimmed reference makes
-    complete genomes look fragmentary, which is a wrong answer rather than a cheap one.
+    The command names the directory after the release (`checkv-db-v1.5`). CHECKV_DB records that
+    versioned directory, which `checkv end_to_end -d` takes. `--small` is ignored, because a reduced
+    reference would make complete genomes look fragmentary.
     """
     existing = sorted(glob.glob(os.path.join(target, DATABASES["checkv"].key_glob or "")))
     if existing:
@@ -1216,15 +1089,12 @@ def _install_checkv(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_bakta(target: str, small: bool, jobs: int = 8) -> bool:
     """Bakta's database, by `bakta_db download`.
 
-    The one database here where `--small` is a real choice rather than a stand-in: `--type light`
-    is 1.3 GB against 30 GB and is a supported Bakta configuration, not a capped sample of one. It
-    drops the UPS/IPS protein sets, so genes are annotated from the HMMs and the per-gene identity
-    evidence is weaker - fine for a run where Bakta is one input among several, not for publishing
-    Bakta's own calls.
+    `--small` installs `--type light` (1.3 GB instead of 30 GB), a supported Bakta configuration.
+    It drops the UPS/IPS protein sets, so genes are annotated from the HMMs with weaker per-gene
+    evidence. Suitable when Bakta is one input among several, not for publishing Bakta's calls.
 
-    The two land in different directories (`db-light/` and `db/`) under the output directory, which
-    is why BAKTA_DB's configured value depends on which was installed, and why installing one does
-    not hide the other.
+    The two types install into `db-light/` and `db/`, so BAKTA_DB depends on which was installed
+    and both can coexist.
     """
     if _already_installed("bakta", target, small):
         print("  Bakta %s database already present." % ("light" if small else "full"))
@@ -1238,19 +1108,16 @@ def _install_bakta(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_gtdbtk(target: str, small: bool, jobs: int = 8) -> bool:
     """The GTDB-Tk reference package, by the `download-db.sh` that ships in its env.
 
-    GTDB-Tk's own script rather than a URL of ours: the release it needs is pinned by the tool's
-    version (see envs/gtdbtk.yaml, held at 2.4.x), the script carries the matching release URL, and
-    a hand-picked tarball that disagrees with the installed GTDB-Tk fails after the 110 GB has
-    already been downloaded. It takes the destination as its one positional argument.
+    The script carries the release URL matching the installed GTDB-Tk (pinned to 2.4.x in
+    envs/gtdbtk.yaml); a mismatched tarball would fail after the 110 GB download. It takes the
+    destination as its only argument.
 
-    Two things about it are worth knowing before starting, because neither is recoverable halfway:
-    it refuses a destination that already contains a subdirectory, so a half-finished attempt has
-    to be emptied by hand rather than resumed; and it deletes the tarball only after unpacking it,
-    so the install needs room for both at once - about twice what the table's figure says.
+    It refuses a destination that already contains a subdirectory, so a partial attempt must be
+    emptied by hand. It deletes the tarball only after unpacking, so the install needs about twice
+    the listed size.
 
-    Its last step tries `conda env config vars set` to record the path in the env, which fails
-    harmlessly outside an activated conda shell: `classify_bins` reads GTDBTK_DATA_PATH out of the
-    config, which is what this command writes, so the run does not depend on it having worked.
+    Its last step, `conda env config vars set`, fails harmlessly outside an activated conda shell;
+    `classify_bins` reads GTDBTK_DATA_PATH from the config this command writes.
     """
     if _already_installed("gtdbtk", target, small):
         print("  GTDB-Tk reference data already present.")
@@ -1264,14 +1131,10 @@ def _install_gtdbtk(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_singlem(target: str, small: bool, jobs: int = 8) -> bool:
     """The SingleM metapackage, fetched by SingleM itself.
 
-    ``singlem data`` is the supported route for the same reason ``checkm2 database --download`` is:
-    the package lives in a Zenodo record whose DOI SingleM pins per release, it is distributed as a
-    ZenodoBackpack with checksums SingleM verifies after unpacking, and a hand-picked URL goes stale
-    at the next upgrade.
+    ``singlem data`` fetches the Zenodo record SingleM pins per release and verifies its checksums.
+    A fixed URL would go stale on upgrade.
 
-    ``--small`` is ignored. The metapackage is the marker set and its taxonomy; a trimmed copy would
-    not be a faster appraisal but a different reference, and the whole figure is relative to that
-    reference.
+    ``--small`` is ignored: appraise figures are relative to the full reference.
     """
     existing = glob.glob(os.path.join(target, DATABASES["singlem"].key_glob or ""))
     if existing:
@@ -1286,11 +1149,8 @@ def _install_singlem(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_host(target: str, small: bool, jobs: int = 8) -> bool:
     """The bmtagger index of the host genome: download the FASTA, then build two indexes from it.
 
-    The early return matters more here than anywhere else. read_qc opens the bitmask and the
-    srprism index, not hg38.fa, so the FASTA is an input to this installer rather than a product
-    of it - and without this check, a user who had reclaimed the 3 GB FASTA after indexing
-    re-downloaded 20 GB on every subsequent `install-db host`, to rebuild two indexes that were
-    already there.
+    Completeness is judged by the two indexes read_qc opens, not by hg38.fa, so deleting the FASTA
+    after indexing does not trigger a 20 GB re-download.
     """
     if _already_installed("host", target, small):
         print("  bmtagger index already present.")
@@ -1334,9 +1194,8 @@ def _install_host(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_kofam(target: str, small: bool, jobs: int = 8) -> bool:
     """KOfam: the HMM profiles and ko_list, their per-profile thresholds, from KEGG's FTP.
 
-    The two belong together: a profile's threshold is what makes a hit a KO call, so they are
-    downloaded into one directory and `annotate` reads the thresholds from beside the profiles.
-    `--small` is ignored; the profile set is the method.
+    Both are downloaded into one directory; `annotate` reads the thresholds from beside the
+    profiles. `--small` is ignored.
     """
     from ..kofam import KO_LIST_MD5, KOFAM_URL, ko_list_md5
 
@@ -1359,8 +1218,8 @@ def _install_kofam(target: str, small: bool, jobs: int = 8) -> bool:
 def _install_kegg(target: str, small: bool, jobs: int = 8) -> bool:
     """KEGG BRITE ko00001, projected to the per-(KO, pathway) table `pathways` reads.
 
-    The download is recorded in SNAPSHOT.json (date and md5), and every hierarchy row names it:
-    BRITE is revised, so a percentage is only comparable with one over the same hierarchy.
+    The download date and md5 are recorded in SNAPSHOT.json and referenced by every hierarchy row,
+    because BRITE is revised over time.
     """
     from ..hierarchy import BRITE_URL, HIERARCHY_FILE, project_htext, write_snapshot
 
@@ -1403,9 +1262,8 @@ INSTALLERS: Dict[str, Callable[..., bool]] = {
     "host": _install_host,
 }
 
-#: Databases whose installer runs a tool out of a conda env instead of fetching a URL itself, so
-#: without mamba there is nothing it can even start. Checked up front: finding this out after the
-#: other databases have downloaded wastes the hours they took.
+#: Databases whose installer runs a tool from a conda env and so needs mamba. Checked before any
+#: download starts.
 TOOL_INSTALLED_DBS: Tuple[str, ...] = (
     "checkm",
     "checkm2",
@@ -1422,7 +1280,7 @@ TOOL_INSTALLED_DBS: Tuple[str, ...] = (
 
 
 class Outcome(NamedTuple):
-    """What one installer produced: enough to configure it, or to say why it did not."""
+    """Result of one installer: the config key and value, success, and captured output."""
 
     name: str
     key: Optional[str]
@@ -1433,7 +1291,7 @@ class Outcome(NamedTuple):
 
 
 def _size_label(db: Database, small: bool) -> str:
-    """How a database's size is announced, for the plan and the real run alike."""
+    """Size label printed for a database, in both the plan and the real run."""
     if small and db.small_size:
         return "%s, --small" % db.small_size
     return "%s download, %s on disk" % (db.download, db.on_disk)
@@ -1442,9 +1300,7 @@ def _size_label(db: Database, small: bool) -> str:
 def _planned_text(db: Database, small: bool, on_disk: bool) -> str:
     """The size string that applies to this install: the capped one under ``--small``.
 
-    A `--small` variant is quoted as a download size and there is no separate measurement of what
-    it unpacks to, so it stands for both columns rather than being inflated into a second figure
-    nobody measured.
+    A `--small` size is only known as a download size, so it is used for both columns.
     """
     if small and db.small_size:
         return db.small_size
@@ -1459,10 +1315,8 @@ def _planned_size(db: Database, small: bool, on_disk: bool) -> float:
 def _planned_value(db: Database, target: str, small: bool) -> str:
     """The path that would go into the config for *db* installed in *target*.
 
-    Shared with the dry run, which is why an unresolved ``key_glob`` comes back as the pattern
-    rather than as the install directory: a plan that printed the parent would be describing
-    something the real run does not do. In a real run the glob always resolves, because an
-    installer that leaves no match reports failure and nothing is written.
+    Also used by the dry run, so an unresolved ``key_glob`` is returned as the pattern. In a real
+    run the glob resolves, because an installer that leaves no match reports failure.
     """
     if db.key_glob:
         matches = sorted(glob.glob(os.path.join(target, db.key_glob)))
@@ -1472,7 +1326,7 @@ def _planned_value(db: Database, target: str, small: bool) -> str:
 
 
 def _human_gb(size_gb: float) -> str:
-    """GB as bytes-with-a-unit, so a 4 MB plan does not total to "~0 GB"."""
+    """Format GB with a suitable unit, so small totals do not print as "~0 GB"."""
     from .. import limits
 
     return limits.human(size_gb * 1024**3)
@@ -1481,10 +1335,8 @@ def _human_gb(size_gb: float) -> str:
 def _disk_line(path: str, need_gb: float) -> str:
     """ "N GB needed, <filesystem> is X% full (ceiling Y%, Z of headroom)".
 
-    One sentence, printed by both the plan and the real run, and built from ``limits.disk_state``
-    like ``benchmark fetch``'s disk verdict: a download total means very little without the
-    filesystem it is going onto beside it, and this command's totals are large enough that the
-    answer is sometimes no.
+    Printed by both the plan and the real run, built from ``limits.disk_state`` as in
+    ``benchmark fetch``.
     """
     from .. import limits
 
@@ -1500,14 +1352,9 @@ def _disk_line(path: str, need_gb: float) -> str:
 
 # --- the dry run -------------------------------------------------------------------------
 #
-# `metawrap2 --dry-run install-db <name>` prints what it would fetch, where it would put it, and
-# which config key it would set - and touches nothing. It used to ignore the flag completely,
-# because `_run` goes straight to subprocess and nothing here consulted `command.runner`: the
-# first user to type it with `gtdbtk` got 110 GB they were explicitly trying not to commit to.
-#
-# The plan is composed from the same URL constants and DOWNLOADERS entries the installers use, and
-# the "already present" test is the same `_already_installed` they short-circuit on - so this is a
-# description of what would happen rather than a second implementation of it.
+# `metawrap2 --dry-run install-db <name>` prints what would be fetched, where it would go and
+# which config key would be set, without changing anything. The plan uses the same URL constants,
+# DOWNLOADERS entries and `_already_installed` check as the installers.
 
 
 def _fetch_step(url: str) -> str:
@@ -1521,9 +1368,8 @@ def _env_step(env: str, argv: List[str]) -> str:
 def _plan_steps(name: str, target: str, small: bool, present: bool) -> List[str]:
     """The steps installing *name* would run, in order."""
     if present:
-        # checkm is the only one with anything left to do once its data is there: it re-points
-        # CheckM at the directory on every install, because that setting lives inside the conda
-        # env and does not survive the env being rebuilt.
+        # checkm reruns setRoot on every install, because the setting lives in the conda env and
+        # is lost when the env is rebuilt.
         if name == "checkm":
             return [_env_step(MODULE_ENVS["bin_refinement"], ["checkm", "data", "setRoot", target])]
         return []
@@ -1589,7 +1435,7 @@ def _plan_steps(name: str, target: str, small: bool, present: bool) -> List[str]
             _env_step(MODULE_ENVS["read_qc"], ["bmtool", "-d", "hg38.fa", "-o", "hg38.bitmask"]),
             _env_step(MODULE_ENVS["read_qc"], ["srprism", "mkindex", "-i", "hg38.fa"]),
         ]
-    # Unreachable while every registered database is planned above, which a test asserts.
+    # Unreachable while every registered database is handled above (checked by a test).
     return ["install %s" % name]
 
 
@@ -1597,7 +1443,7 @@ def _print_plan(
     names: List[str], directory: str, small: bool, config_path: str, update_config: bool
 ) -> int:
     """Print the plan for *names* and return the exit code. Writes nothing, runs nothing."""
-    print("\n[dry-run] this is the plan. Nothing is downloaded, unpacked, indexed or written.\n")
+    print("\n[dry-run] Plan only: nothing is downloaded, unpacked, indexed or written.\n")
     download: List[str] = []
     on_disk: List[str] = []
     globbed = False
@@ -1638,8 +1484,8 @@ def _print_plan(
     else:
         print("  Nothing to do: every database asked for is already installed.")
     if globbed:
-        print("  A path with a `*` in it is named by the download; the real run resolves it.")
-    print("\n  Drop --dry-run to do any of this.\n")
+        print("  A `*` in a path stands for a name set by the download; the real run fills it in.")
+    print("\n  Run again without --dry-run to install.\n")
     return 0
 
 
@@ -1653,8 +1499,8 @@ def _config_path(explicit: Optional[str]) -> str:
 def _set_config_keys(path: str, values: Dict[str, str]) -> None:
     """Set ``key = "value"`` under [databases] in *path*, creating the file/section if needed.
 
-    Deliberately a line edit rather than a parse-and-rewrite: TOML comments in a user's
-    config are worth preserving, and the standard library has no TOML writer.
+    Edits lines instead of parsing and rewriting, to keep the user's TOML comments; the standard
+    library also has no TOML writer.
     """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     lines = []
@@ -1705,16 +1551,16 @@ def main(argv: List[str]) -> int:
     ap.add_argument(
         "--small",
         action="store_true",
-        help="where a capped-but-real variant exists, install that instead "
-        "(much faster; good for testing, not for production analysis)",
+        help="install the smaller variant where one exists "
+        "(much faster; for testing, not for production analysis)",
     )
     ap.add_argument(
         "-t",
         "--threads",
         type=int,
         default=DEFAULT_PARALLEL_DBS,
-        help="how many databases to fetch concurrently (default %d). Also sets "
-        "the parallelism of the many small downloads inside a single "
+        help="number of databases to fetch at once (default %d). Also sets "
+        "the number of parallel downloads within a single "
         "database build." % DEFAULT_PARALLEL_DBS,
     )
     ap.add_argument("--config", help="config file to update (default: the one in effect)")
@@ -1740,13 +1586,11 @@ def main(argv: List[str]) -> int:
     if not shutil.which("mamba") and needs_mamba:
         if not dry_run():
             print(
-                "mamba is not on PATH, and these are downloaded by a tool from a module env: %s\n"
+                "mamba is not on PATH; a tool in a module env downloads these databases: %s\n"
                 "Install the envs first: metawrap2 install-env --all" % ", ".join(needs_mamba)
             )
             return 1
-        # Not fatal while planning: deciding whether to commit to a 110 GB download is exactly
-        # what somebody does before building the envs, and a plan is still the answer they asked
-        # for. The note says what would have to happen first.
+        # Not fatal for a dry run: print the plan with a note that the envs are needed first.
         print(
             "\n[dry-run] note: mamba is not on PATH, so these could not run yet: %s\n"
             "          `metawrap2 install-env --all` builds the envs they come from."
@@ -1757,7 +1601,7 @@ def main(argv: List[str]) -> int:
         return _print_plan(names, args.dir, args.small, config_path, not args.no_config_update)
 
     installed: Dict[str, str] = {}
-    #: What has already been written to the config, so the summary pass does not rewrite it.
+    #: Keys already written to the config, so the summary pass does not rewrite them.
     written: Dict[str, str] = {}
     failed: List[str] = []
 
@@ -1776,8 +1620,7 @@ def main(argv: List[str]) -> int:
         ok, output = _install_capturing(name, target, args.small, args.threads)
         value = _planned_value(db, target, args.small)
         if db.key_glob:
-            # The path is not known until the download names it; take the newest match so an
-            # upgraded metapackage beside an old one points at the new one.
+            # The path is named by the download; use the newest match when several versions exist.
             matches = sorted(glob.glob(os.path.join(target, db.key_glob)))
             if len(matches) > 1:
                 _say(
@@ -1787,9 +1630,7 @@ def main(argv: List[str]) -> int:
         return Outcome(name, db.key, value, ok, output)
 
     workers = max(1, min(args.threads, len(names)))
-    # Only what is actually missing counts towards the headroom line: on a re-run after a failure
-    # most of these are already on the disk being measured, and totalling them again would warn
-    # about space that is in use by the very databases it is about to skip.
+    # Only missing databases count towards the space needed; installed ones are already on disk.
     missing = [
         n for n in names if not _already_installed(n, os.path.join(args.dir, n.upper()), args.small)
     ]
@@ -1798,9 +1639,7 @@ def main(argv: List[str]) -> int:
         "\nInstalling %d database(s) into %s with %d worker(s).\n%s\n"
         % (len(names), args.dir, workers, _disk_line(args.dir, needed))
     )
-    # A scheduler's SIGTERM, or a dropped SSH session's SIGHUP, now unwinds like Ctrl-C so the
-    # cleanup below runs. Without it those signals killed this process outright and every download
-    # it had started carried on in its own session - the orphan, by another route.
+    # Make SIGTERM and SIGHUP unwind like Ctrl-C, so the cleanup below kills running downloads.
     _interrupt.install_handlers()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         try:
@@ -1810,32 +1649,22 @@ def main(argv: List[str]) -> int:
                     if done.key:
                         installed[done.key] = done.value
                         if not args.no_config_update:
-                            # Written here, as this database lands, not once after the whole pool
-                            # has finished. `--all` is hundreds of gigabytes over many hours, so
-                            # being interrupted is the ordinary case rather than the exception: a
-                            # user who stopped a 9-database run after 4 had completed - 17 GB on
-                            # disk - got a config that named none of them and a TAXDUMP still
-                            # holding the `config init` placeholder. Every key that got as far as
-                            # being installed is now on disk before the next download starts.
-                            #
-                            # Safe to do per key despite -t N: pool.map hands results back to this
-                            # thread, so the read-modify-write of the config file stays serialised.
+                            # Written as each database finishes, so an interrupted run keeps
+                            # the keys of completed databases. pool.map returns results on this
+                            # thread, so config writes stay serialised under -t N.
                             _set_config_keys(config_path, {done.key: done.value})
                             written[done.key] = done.value
                 else:
                     _say("  FAILED: %s" % done.name, *_failure_tail(done.output))
                     failed.append(done.name)
         finally:
-            # Before the pool is joined, not after: the worker threads are blocked in
-            # ``child.wait()`` on children that no longer share this process's session, so a
-            # Ctrl-C does not reach them and the executor's own shutdown would wait for the
-            # downloads to finish - turning an interrupt into "it ignored me". Killing the groups
-            # first is what lets those waits return. A normal finish leaves nothing to kill.
+            # Runs before the pool is joined: workers wait on children in their own sessions,
+            # which Ctrl-C does not reach, so the pool shutdown would otherwise wait for the
+            # downloads to finish.
             _terminate_downloads()
 
     if installed and not args.no_config_update:
-        # Only what the incremental writes above did not already cover - normally nothing, but a
-        # key whose value changed is rewritten rather than left stale.
+        # Write any keys not already written above with the same value.
         pending = {k: v for k, v in installed.items() if written.get(k) != v}
         if pending:
             _set_config_keys(config_path, pending)
@@ -1845,10 +1674,7 @@ def main(argv: List[str]) -> int:
 
     print()
     if failed:
-        # The retry advice is here because the idempotency it relies on is invisible: every
-        # installer short-circuits on an already-complete database, so re-running the same command
-        # retries only what is missing. Without saying so, a transient failure in one database of
-        # nine reads like "start the whole thing again".
+        # Tell the user a re-run retries only the failed databases.
         print(
             "%d database(s) failed: %s. Re-run the same command to retry; completed databases "
             "are detected and skipped." % (len(failed), ", ".join(failed))

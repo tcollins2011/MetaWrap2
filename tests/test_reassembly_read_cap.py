@@ -1,8 +1,8 @@
 """Thinning each bin's recruited reads to a target coverage before SPAdes sees them.
 
-Read recruitment is per bin, so an abundant organism hands SPAdes hundreds of times the coverage
-short-read assembly can use - and SPAdes time grows with reads, not with genome size, so a few
-high-abundance outliers set the pace of the whole step.
+Reads are recruited per bin, so an abundant organism can give SPAdes hundreds of times more
+coverage than it needs. SPAdes time grows with read count, so a few abundant bins dominate the
+step's runtime.
 """
 
 from __future__ import annotations
@@ -52,14 +52,14 @@ def _count_pairs(path):
 
 
 def test_both_mates_keep_exactly_the_same_reads(tmp_path):
-    """SPAdes is handed a paired library; a file where one mate survived is worse than a smaller one."""
+    """Thinning keeps the same reads in both mate files, and leaves bins below the target alone."""
     bins, reads = tmp_path / "bins", tmp_path / "reads"
     bins.mkdir()
     reads.mkdir()
     # 10 kb bin, 10,000 pairs of 100 bp: 200x before thinning.
     _bin(str(bins), "bin.1", 10000)
     r1, r2 = _pair(str(reads), "bin.1.permissive", pairs=10000)
-    # A bin already below the target is the common case, and must not be touched at all.
+    # A bin already below the target (the common case) is left unchanged.
     _bin(str(bins), "bin.2", 100000)
     q1, q2 = _pair(str(reads), "bin.2.strict", pairs=50)
     before = (_text(q1), _text(q2))
@@ -71,7 +71,7 @@ def test_both_mates_keep_exactly_the_same_reads(tmp_path):
     assert 2000 < _count_pairs(r1) < 3000, _count_pairs(r1)
     assert (_text(q1), _text(q2)) == before
 
-    # Same seed, same reads kept: a re-run must not produce a different assembly input.
+    # Same seed, same reads kept on a re-run.
     again = tmp_path / "again"
     again.mkdir()
     a1, _ = _pair(str(again), "bin.1.permissive", pairs=10000)

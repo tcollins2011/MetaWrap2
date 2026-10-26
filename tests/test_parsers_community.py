@@ -1,18 +1,15 @@
-"""Community-level tables: SingleM's two, Nonpareil's .npo, PPanGGOLiN's, and IQ-TREE's Newick.
+"""Tests for community-level parsers: SingleM's two tables, Nonpareil's .npo, PPanGGOLiN and
+IQ-TREE's Newick.
 
-The unit confusion in this group cost the most. SingleM's ``read_fraction`` is **already a
-percentage** - ``read_fraction.py`` computes ``account / metagenome_size * 100`` and caps it at 100 -
-and the first version of the reader guessed from the magnitude instead: "above 1 must be a
-percentage". That rule is right for a typical sample at 85.3 and catastrophic for a host-dominated
-one at 0.8, where it reads 0.8% as 80% and scales every gene abundance in that sample by 100x.
+SingleM's ``read_fraction`` is a percentage (``read_fraction.py`` computes
+``account / metagenome_size * 100``, capped at 100). Guessing the unit from the magnitude reads a
+host-dominated sample's 0.8% as 80%.
 
-The other three are shape problems rather than unit problems, and each produced a plausible number:
-PPanGGOLiN's statistics table opens with two ``#`` settings lines, so a bare DictReader keys every
-row by ``#soft_core=0.95`` and reports a pangenome with no genes; and IQ-TREE writes *both* support
-tests as ``)97.5/100:`` under ``--alrt``, so a pattern matching one number found zero supported
-branches on a tree whose every branch was labelled 100/100.
+PPanGGOLiN's statistics table starts with two ``#`` settings lines, which a plain DictReader takes
+as the header. IQ-TREE writes both support values (``)97.5/100:``) under ``--alrt``, which a
+single-number pattern does not match.
 
-All four fixtures are vendored real output; see the SOURCE.md beside each.
+All fixtures are vendored tool output; see the SOURCE.md beside each.
 """
 
 from __future__ import annotations
@@ -30,9 +27,8 @@ PANGENOME = os.path.join(FIXTURES, "pangenome")
 TREEFILE = os.path.join(FIXTURES, "phylogeny", "core.treefile")
 NPO = os.path.join(FIXTURES, "nonpareil", "HumanGut.npo")
 
-#: `singlem microbial_fraction`'s table, in the layout read_fraction.py writes. Two samples chosen
-#: to break a magnitude heuristic in both directions: one host-dominated at 0.80% and one typical
-#: at 85.30%. Hand-written here rather than vendored because the column name is the thing pinned.
+#: `singlem microbial_fraction`'s table, in read_fraction.py's layout: one host-dominated sample at
+#: 0.80% and one typical at 85.30%, which a magnitude heuristic would treat differently.
 MICROBIAL_FRACTION = (
     "sample\tbacterial_archaeal_bases\tmetagenome_size\tread_fraction\n"
     "host_dominated\t8000000\t1000000000\t0.80\n"
@@ -44,27 +40,24 @@ MICROBIAL_FRACTION = (
 
 
 def test_singlems_read_fraction_is_already_a_percentage(tmp_path):
-    """0.80 in the file is 0.8% of the reads, i.e. 0.008 - not 80%.
+    """0.80 in the file is 0.8% of the reads, i.e. 0.008.
 
-    Division by 100 is unconditional for exactly this reason. Inferred from the magnitude, the
-    host-dominated sample's 0.80 is read as 0.80 of the reads and its gene abundances are divided by
-    a denominator 100x too large; every number stays in a plausible range.
+    Values are always divided by 100.
     """
     path = tmp_path / "microbial_fraction.tsv"
     path.write_text(MICROBIAL_FRACTION)
     fractions = funcabund.parse_singlem_fraction(str(path))
     assert fractions["host_dominated"] == pytest.approx(0.008)
     assert fractions["typical"] == pytest.approx(0.853)
-    # The same rule applied to both rows, which is what a magnitude heuristic cannot do.
+    # The same rule is applied to both rows.
     assert fractions["typical"] / fractions["host_dominated"] == pytest.approx(85.30 / 0.80)
 
 
 def test_the_read_fraction_column_has_had_three_names_and_all_are_accepted(tmp_path):
     """``read_fraction``, ``prokaryotic_fraction``, ``bacterial_archaeal_fraction`` across releases.
 
-    A column SingleM has renamed is the likeliest upstream break here, and it is not an error
-    unless it is looked for: an unmatched name would leave the sample out of the dictionary, and a
-    sample with no microbial fraction is dropped from the abundance table rather than flagged.
+    An unknown column name raises KeyError naming the accepted ones, instead of dropping the
+    samples.
     """
     assert funcabund.SINGLEM_FRACTION_COLUMNS == (
         "read_fraction",
@@ -84,12 +77,7 @@ def test_the_read_fraction_column_has_had_three_names_and_all_are_accepted(tmp_p
 
 
 def test_a_fraction_above_one_hundred_is_refused_rather_than_rescaled(tmp_path):
-    """SingleM caps its own output at 100, so a value above it means the file is not what it claims.
-
-    Rescaled silently, a malformed or differently-scaled file would produce fractions above 1 that
-    every downstream percentage inherits. Refusing is the only safe response to a unit that cannot
-    be looked up in the file itself.
-    """
+    """A value above 100 raises ValueError, since SingleM caps its output at 100."""
     path = tmp_path / "microbial_fraction.tsv"
     path.write_text(MICROBIAL_FRACTION.replace("85.30", "8530.0"))
     with pytest.raises(ValueError) as caught:
@@ -101,11 +89,9 @@ def test_a_fraction_above_one_hundred_is_refused_rather_than_rescaled(tmp_path):
 
 
 def test_singlems_own_total_and_average_rows_are_not_samples():
-    """The summary table lists ``total`` and ``average`` in the ``sample`` column beside real samples.
+    """``total`` and ``average`` rows in the ``sample`` column are skipped.
 
-    Averaged back in, every sample is counted roughly three times and the cohort's community-binned
-    share becomes an average of averages. The fixture has two real rows and four summary rows, so
-    reading them all would report six samples where there is one.
+    The fixture has two real rows and four summary rows.
     """
     assert recovery.APPRAISAL_SUMMARY_ROWS == ("total", "average")
     with open(APPRAISE_SUMMARY, newline="") as fh:
@@ -116,16 +102,15 @@ def test_singlems_own_total_and_average_rows_are_not_samples():
     assert {row.sample for row in rows} == {"ERR011347_1"}
     assert len(rows) == 2, "one row per domain for the one real sample"
     bacteria = next(row for row in rows if row.domain == "d__Bacteria")
-    # 23 of 199 coverage units: the appraisal this fixture exists to record.
+    # 23 of 199 coverage units.
     assert bacteria.percent_binned == pytest.approx(11.56, abs=0.01)
 
 
 def test_an_absent_assembled_coverage_column_is_none_and_not_zero():
     """``coverage_assembled`` appears only when an assembly was appraised alongside the genomes.
 
-    None means "no assembly was given"; 0.0 means "an assembly was given and none of it reached a
-    bin", which is a finding about the binning. Read as zero, the second claim is made every time
-    the column is simply absent - and it is absent in the common case.
+    None means no assembly was given; 0.0 would mean none of the given assembly was binned. The
+    column is absent in the common case.
     """
     header = set()
     with open(APPRAISE_SUMMARY, newline="") as fh:
@@ -135,7 +120,7 @@ def test_an_absent_assembled_coverage_column_is_none_and_not_zero():
     rows = recovery.parse_appraisal(APPRAISE_SUMMARY)
     assert all(row.assembled is None for row in rows)
     assert all(row.percent_assembled_not_binned is None for row in rows)
-    # The absent value is blank in the output table rather than a zero a reader would believe.
+    # The absent value is written as blank, not zero.
     assert recovery.appraisal_row(rows[0])["coverage_assembled_not_binned"] == ""
     assert recovery.appraisal_row(rows[0])["percent_community_assembled_not_binned"] == ""
 
@@ -144,11 +129,10 @@ def test_an_absent_assembled_coverage_column_is_none_and_not_zero():
 
 
 def test_npo_metadata_keys_are_nonpareils_own_single_letter_names():
-    """``# @R``, ``# @L``, ``# @overlap``, ``# @divide`` - one-letter keys in ``# @key: value`` lines.
+    """Keys such as ``# @R``, ``# @L``, ``# @overlap``, ``# @divide`` are read as Nonpareil's.
 
-    ``R`` is the read count and ``L`` the mean read length, and nothing in the file says so. Swapped,
-    the effort axis is rescaled by a factor of 50,000 on this sample and the coverage estimate that
-    comes off the curve is meaningless while still lying between 0 and 1.
+    ``R`` is the read count and ``L`` the mean read length; the file does not say so. Swapping
+    them would rescale the effort axis by about 50,000 on this sample.
     """
     curve = nonpareil.read_npo(NPO, label="HumanGut")
     assert curve.reads == pytest.approx(4158944.0)
@@ -156,8 +140,7 @@ def test_npo_metadata_keys_are_nonpareils_own_single_letter_names():
     assert curve.overlap == pytest.approx(50.0)
     assert curve.log_sample == pytest.approx(0.70)
     assert curve.version == "2.40"
-    # No k-mer size in the header, so this is the alignment kernel - which changes both the overlap
-    # and where the read length comes from.
+    # No k-mer size in the header, so this is the alignment kernel.
     assert curve.kernel == "alignment"
     assert 0.0 < curve.C <= 1.0, "coverage is a fraction, not a percentage"
 
@@ -165,9 +148,8 @@ def test_npo_metadata_keys_are_nonpareils_own_single_letter_names():
 def test_ppanggolins_statistics_table_opens_with_two_comment_lines():
     """``#soft_core=0.95`` and ``#duplication_margin=0.05`` come *before* the header row.
 
-    Handed to csv.DictReader directly, the first settings line becomes the column names and every
-    lookup of ``Genome_name`` or ``Genes`` returns None - which reads as a pangenome with no genes
-    rather than as a parse failure.
+    A plain csv.DictReader takes the first settings line as the header, so ``Genome_name`` and
+    ``Genes`` lookups return None.
     """
     path = os.path.join(PANGENOME, "genomes_statistics.tsv")
     with open(path, newline="") as fh:
@@ -188,20 +170,19 @@ def test_ppanggolins_statistics_table_opens_with_two_comment_lines():
 def test_partition_families_are_counted_per_group_and_a_missing_run_is_none():
     """``partitions/persistent.txt`` is one family name per line - a group-level count.
 
-    The statistics table's ``Persistent_families`` column is per *genome*, so summing it over a
-    group multiplies every shared family by the number of genomes carrying it. Counted from the
-    partition files instead: 1,509 persistent, 3,406 shell, 2,446 cloud for this group.
+    The statistics table's ``Persistent_families`` is per genome, so summing it would count
+    shared families once per genome. From the partition files: 1,509 persistent, 3,406 shell,
+    2,446 cloud.
     """
     summary = pangenome.parse_partitions(PANGENOME, "group_1", reliable=True)
     assert summary.families == {"persistent": 1509, "shell": 3406, "cloud": 2446}
     assert summary.total_families == 7361
     assert summary.mean_genes == pytest.approx(3214.0)
-    # The openness is a percentage of families, not a fraction, and well above the suspect floor.
+    # Openness is a percentage of families, not a fraction.
     assert summary.openness == pytest.approx(100.0 - 1509 / 7361 * 100.0)
     assert summary.shares["persistent"] + summary.openness == pytest.approx(100.0)
 
-    # A directory PPanGGOLiN never wrote to is None, not a summary of zero families: a pangenome
-    # with no persistent genes is a finding, and a run that did not happen is not.
+    # A directory PPanGGOLiN never wrote to gives None, not zero families.
     assert pangenome.parse_partitions(str(PANGENOME) + "-never-ran", "group_2", True) is None
 
 
@@ -209,12 +190,10 @@ def test_partition_families_are_counted_per_group_and_a_missing_run_is_none():
 
 
 def test_iqtree_writes_two_support_values_and_the_bootstrap_is_the_second():
-    """``)100/100:`` is SH-aLRT then ultrafast bootstrap, and the threshold is calibrated for UFBoot.
+    """In ``)100/100:`` the values are SH-aLRT then UFBoot; the threshold applies to UFBoot.
 
-    A pattern matching a single number reads the combined form as no branches at all - which is what
-    the first real tree reported: four taxa, one internal branch labelled 100/100, counted as zero
-    supported out of zero. Reading the first value instead applies a UFBoot threshold to an SH-aLRT
-    value, which is a different and stricter test.
+    A single-number pattern found no branches in the combined form, and the first value is
+    SH-aLRT, a different test.
     """
     summary = phylogeny.support_summary(TREEFILE)
     assert summary.branches == 1
@@ -222,17 +201,16 @@ def test_iqtree_writes_two_support_values_and_the_bootstrap_is_the_second():
     assert summary.fraction_supported == pytest.approx(1.0)
     assert summary.threshold == phylogeny.SUPPORTED_BRANCH == 95.0
 
-    # Both of IQ-TREE's forms, and the second value is the one compared.
+    # Both IQ-TREE forms; the second value is the one compared.
     values = phylogeny._SUPPORT.findall("(a:0.1,(b:0.1,c:0.1)80.5/92:0.3,d:0.1);")
     assert values == [("80.5", "92")]
     assert phylogeny._SUPPORT.findall("(a:0.1,(b:0.1,c:0.1)100:0.3,d:0.1);") == [("100", "")]
 
 
 def test_a_tree_with_no_branches_reports_none_support_rather_than_zero(tmp_path):
-    """No tree, or a tree with no internal branches, is "not measured" and not "nothing supported".
+    """No tree, or one with no internal branches, gives None, not 0.0.
 
-    0.0 is a measured result that would rank a variant last on resolution; None is the absence of
-    the measurement. A three-taxon unrooted tree genuinely has no internal branch to support.
+    0.0 would rank a variant last on resolution. A three-taxon unrooted tree has no internal branch.
     """
     absent = phylogeny.support_summary(str(tmp_path / "iqtree-never-ran.treefile"))
     assert absent.branches == 0

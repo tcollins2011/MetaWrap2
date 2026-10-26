@@ -13,20 +13,10 @@ nav:
   - Tutorial: tutorial.md
   - Usage: usage.md
   - Modules: modules.md
+  - Scoring genomes: score.md
   - Benchmarks: benchmarks.md
-  - Release notes:
-      - Overview: releases/index.md
-      - 2.1.3: releases/2.1.3.md
-      - 2.1.2: releases/2.1.2.md
-      - 2.1.1: releases/2.1.1.md
-      - 2.1.0: releases/2.1.0.md
-      - 2.0.1: releases/2.0.1.md
-      - 2.0.0: releases/2.0.0.md
+  - Release notes: https://github.com/ursky/MetaWrap2/tree/main/releases
   - Provenance & reproducibility: provenance.md
-  - Plans:
-      - 2.1.3 scope and decisions: plan_2.1.3.md
-      - Functional annotation: plan_functional_annotation.md
-      - Other modules: plan_other_modules.md
   - Contributing: contributing.md
 markdown_extensions:
   - admonition

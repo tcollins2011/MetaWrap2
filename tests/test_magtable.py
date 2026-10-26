@@ -1,9 +1,7 @@
-"""The per-genome table, which is the row that did not exist anywhere before.
+"""Tests for the per-genome table that joins quality, taxonomy and coverage.
 
-Quality was in one file, taxonomy in another and coverage in a third, and the join between them is
-where this can go wrong in ways a reader cannot see. These tests pin the two failures that would
-make the table worse than no table at all: a genome lost because two files spell its name
-differently, and an unmeasured cell written as a zero.
+The two failures checked most: a genome lost because two files spell its name differently, and an
+unmeasured cell written as a zero.
 """
 
 from __future__ import annotations
@@ -44,9 +42,8 @@ STATS_HEADER = "bin\tcompleteness\tcontamination\tGC\tlineage\tN50\tsize\n"
 def _study(tmp_path, bins_per_sample: dict, gunc: dict | None = None) -> list:
     """A per-sample study, laid out as ``metawrap2 run`` writes one.
 
-    One ``BIN_REFINEMENT/<sample>/`` per sample, each with its own consolidated bin set and its own
-    ``work_files/gunc/`` report - which is the real layout of the study this was written against,
-    and the one a single-bin-set reader got wrong. Every sample numbers its bins from ``bin_001``.
+    One ``BIN_REFINEMENT/<sample>/`` per sample, each with its own consolidated bin set and
+    ``work_files/gunc/`` report. Every sample numbers its bins from ``bin_001``.
     """
     root = tmp_path / "study" / "BIN_REFINEMENT"
     for sample, count in bins_per_sample.items():
@@ -77,8 +74,7 @@ def _study(tmp_path, bins_per_sample: dict, gunc: dict | None = None) -> list:
 def test_a_genome_is_joined_across_three_spellings_of_its_name(tmp_path):
     """``bin_001`` in the stats table, ``bin_001.fasta`` in taxonomy, ``bin_001.fa`` in GUNC.
 
-    One genome, three files, three conventions. Without a shared stripping rule this is three
-    genomes with two thirds of the columns blank in each - and nothing on the row says so.
+    One genome named three ways must join into one row.
     """
     row = _by_genome(_table(tmp_path))["bin_001"]
     assert row["completeness"] == "98.65"  # from the stats table
@@ -90,8 +86,7 @@ def test_a_genome_is_joined_across_three_spellings_of_its_name(tmp_path):
 def test_a_bin_named_with_a_dot_is_not_collapsed_to_bin(tmp_path):
     """``bin.2`` is a whole genome's name; ``os.path.splitext`` would make it ``bin``.
 
-    Every metaWRAP-era bin set is named this way, so a join that used splitext would merge an
-    entire bin set into one row called ``bin`` and keep whichever file was read last.
+    metaWRAP-era bin sets are named this way; splitext would merge the whole set into one row.
     """
     rows = _by_genome(_table(tmp_path))
     assert "bin.2" in rows
@@ -100,10 +95,10 @@ def test_a_bin_named_with_a_dot_is_not_collapsed_to_bin(tmp_path):
 
 
 def test_a_genome_only_in_the_abundance_matrix_still_gets_a_row(tmp_path):
-    """No input may drop a genome, or the table silently answers a narrower question.
+    """A genome present in any input gets a row.
 
-    ``bin_004`` was quantified but never scored or classified - the state of every bin in a run
-    where quantification covered the pre-refinement set.
+    ``bin_004`` was quantified but never scored or classified, as happens when quantification
+    covered the pre-refinement set.
     """
     row = _by_genome(_table(tmp_path))["bin_004"]
     assert row["abundance.sampleB"] == "4.200000"
@@ -111,10 +106,10 @@ def test_a_genome_only_in_the_abundance_matrix_still_gets_a_row(tmp_path):
 
 
 def test_the_consolidated_bin_set_is_preferred_over_a_binners_raw_table(tmp_path):
-    """A bin_refinement directory holds four stats tables and alphabetical order picks CONCOCT's.
+    """The consolidated stats table is chosen from the four in a bin_refinement directory.
 
-    The decoy in the fixture names genomes nothing else mentions, so choosing it would produce a
-    report about a different set of genomes with no page saying which.
+    Alphabetical order would pick CONCOCT's. The decoy in the fixture names genomes no other
+    input mentions.
     """
     inputs = M.discover(_run(tmp_path, "REFINEMENT"))
     (bin_set,) = inputs.bin_sets
@@ -123,10 +118,7 @@ def test_the_consolidated_bin_set_is_preferred_over_a_binners_raw_table(tmp_path
 
 
 def test_the_unbinned_catch_all_is_not_a_genome(tmp_path):
-    """`binning` writes concoct_bins/unbinned.fasta on purpose; it is leftovers, not a MAG.
-
-    A row for it would be counted in every per-genome total on the report's pages.
-    """
+    """concoct_bins/unbinned.fasta (leftover contigs, not a MAG) gets no row."""
     stats = os.path.join(FIXTURES, "REFINEMENT", "concoct_bins.stats.tsv")
     assert "unbinned" not in M.read_stats(stats)
     assert "concoct_42" in M.read_stats(stats)
@@ -136,22 +128,14 @@ def test_the_unbinned_catch_all_is_not_a_genome(tmp_path):
 
 
 def test_a_measured_zero_survives_as_a_zero(tmp_path):
-    """A contamination of 0 is a finding and has to read as one.
-
-    The guard below only matters because this one holds: if unmeasured cells became zeros, a
-    genuine 0.0 would be indistinguishable from a bin CheckM never scored.
-    """
+    """A measured contamination of 0 is written as 0."""
     row = _by_genome(_table(tmp_path))["bin.2"]
     assert row["contamination"] == "0.0"
     assert row["abundance.sampleA"] == "0.0"
 
 
 def test_an_unscored_genome_has_blank_scores_and_no_tier(tmp_path):
-    """CheckM wrote the row but could not score it, so nothing is written where a score goes.
-
-    This project has been burned by exactly this in three other tools' tables: a 0 completeness
-    reads as a total failure of the genome rather than of the measurement, and it gets believed.
-    """
+    """A row CheckM wrote but could not score gets blank score cells, not zeros."""
     row = _by_genome(_table(tmp_path))["bin_003"]
     assert row["completeness"] == M.BLANK
     assert row["contamination"] == M.BLANK
@@ -160,17 +144,14 @@ def test_an_unscored_genome_has_blank_scores_and_no_tier(tmp_path):
 
 
 def test_an_uncounted_contig_count_is_blank_rather_than_zero(tmp_path):
-    """A genome absent from the membership table has an unknown contig count, not zero contigs.
-
-    Zero contigs is an empty FASTA, which is a different and much more alarming result.
-    """
+    """A genome absent from the membership table has a blank contig count, not zero."""
     rows = _by_genome(_table(tmp_path))
     assert rows["bin_001"]["contigs"] == "2"
     assert rows["bin_003"]["contigs"] == M.BLANK
 
 
 def test_a_bin_gunc_did_not_score_is_blank_rather_than_failed(tmp_path):
-    """Writing it as passing defeats the check; writing it as failed condemns it unmeasured."""
+    """A bin GUNC did not score gets a blank gunc_pass, neither yes nor no."""
     rows = _by_genome(_table(tmp_path))
     assert rows["bin.2"]["gunc_pass"] == "no"  # GUNC did score this one, and it failed
     assert rows["bin_003"]["gunc_pass"] == M.BLANK
@@ -180,8 +161,8 @@ def test_a_bin_gunc_did_not_score_is_blank_rather_than_failed(tmp_path):
 def test_a_classified_but_unplaced_genome_is_blank_not_missing(tmp_path):
     """classify_bins writes a row with no lineage for a bin it could not place.
 
-    That is a different statement from the bin never having been classified, and the only way to
-    tell them apart on a report page is which inputs the table reports as absent.
+    This differs from a bin never classified; the two are told apart by which inputs the table
+    reports as absent.
     """
     table = _table(tmp_path)
     assert _by_genome(table)["bin_003"]["taxonomy"] == M.BLANK
@@ -192,10 +173,9 @@ def test_a_classified_but_unplaced_genome_is_blank_not_missing(tmp_path):
 
 
 def test_a_run_that_skipped_classification_and_quantification_still_gets_a_table(tmp_path):
-    """The table is the point; the optional inputs are columns, not preconditions.
+    """Every input is optional: a missing one leaves its columns blank and is named in ``absent``.
 
-    A missing module leaves its column blank for every genome and is named in ``absent``, so a
-    reader is told the difference between "not classified" and "classified as nothing".
+    This separates "not classified" from "classified as nothing".
     """
     table = _table(tmp_path, "REFINEMENT")
     assert [row[0] for row in table.rows] == ["bin_001", "bin.2", "bin_003"]
@@ -205,24 +185,23 @@ def test_a_run_that_skipped_classification_and_quantification_still_gets_a_table
 
 
 def test_a_run_with_only_an_abundance_matrix_is_still_a_table(tmp_path):
-    """Nothing scored, nothing classified - and still one row per genome quantified."""
+    """With only quantification, there is still one row per quantified genome."""
     table = _table(tmp_path, "QUANT")
     assert [row[0] for row in table.rows] == ["bin.2", "bin_001", "bin_004"]
     assert sorted(table.absent) == ["contigs", "gunc", "stats", "taxonomy"]
 
 
 def test_no_inputs_at_all_is_an_empty_table_rather_than_an_error(tmp_path):
-    """The report asks for a table before it knows whether there is one to build."""
+    """Building from a run with none of the inputs is not an error."""
     table = M.build(M.discover([str(tmp_path)]))
     assert table.rows == []
     assert sorted(table.absent) == sorted(M.INPUT_KINDS)
 
 
 def test_an_older_runs_suffixes_are_still_found(tmp_path):
-    """``.stats`` and ``.tab`` predate the normalised suffixes and the output still exists.
+    """The older ``.stats`` and ``.tab`` suffixes are still read.
 
-    A reader that only knew ``.stats.tsv`` would call this repo's own reference run absent in its
-    entirety, which is the one answer a report must not give about a run that finished.
+    This repo's reference run uses them.
     """
     root = tmp_path / "old"
     (root / "REFINE").mkdir(parents=True)
@@ -240,10 +219,9 @@ def test_an_older_runs_suffixes_are_still_found(tmp_path):
 
 
 def test_each_genome_gets_one_tier_rather_than_every_tier_it_clears(tmp_path):
-    """The benchmark counts tiers non-exclusively; a table needs one label per row.
+    """Each genome gets one tier, unlike the benchmark's non-exclusive counts.
 
-    Counted the benchmark's way, the same genome would appear in three bars of the report's chart
-    and the bars would sum to more than the number of genomes.
+    Otherwise one genome would appear in several bars of the chart.
     """
     assert M.quality_tier(98.65, 1.21) == "near_complete"
     assert M.quality_tier(75.4, 0.0) == "high_quality"
@@ -252,7 +230,7 @@ def test_each_genome_gets_one_tier_rather_than_every_tier_it_clears(tmp_path):
 
 
 def test_the_tier_chart_counts_every_genome_including_the_unmeasured_ones(tmp_path):
-    """A chart that dropped unscored genomes would make a failed CheckM look like fewer MAGs."""
+    """Unscored genomes are counted under NOT_MEASURED, not dropped."""
     table = _table(tmp_path)
     counts = M.tier_counts(table)
     assert sum(count for _label, count in counts) == len(table.rows)
@@ -260,14 +238,14 @@ def test_the_tier_chart_counts_every_genome_including_the_unmeasured_ones(tmp_pa
 
 
 def test_the_written_tsv_is_the_table_with_its_header(tmp_path):
-    """One header, one row per genome, tab separated, and no cell invented on the way out."""
+    """The written TSV has one header, one row per genome, and keeps blank cells."""
     table = _table(tmp_path)
     path = M.write(table, str(tmp_path / "out" / M.TABLE_NAME))
     lines = Path(path).read_text().splitlines()
     assert lines[0].split("\t") == table.columns
     assert len(lines) == len(table.rows) + 1
-    # The blank cells have to survive being written: a row of a TSV is where they are easiest to
-    # lose, because a writer that skipped empty trailing cells would shorten the row.
+    # Blank cells must survive writing; a writer that skipped empty trailing cells would shorten
+    # the row.
     assert lines[3].split("\t") == table.rows[2]
     assert lines[3].endswith("\t\t")
 
@@ -276,10 +254,9 @@ def test_the_written_tsv_is_the_table_with_its_header(tmp_path):
 
 
 def test_every_samples_bin_set_is_in_the_table_not_just_the_first(tmp_path):
-    """A per-sample study recovered 62 genomes and the table said 24 - one sample's bin set.
+    """Every sample's bin set in a per-sample study is read, not only the first.
 
-    `find_stats` returned one path, so two of three samples were missing and nothing on the page
-    said so. A reader would conclude the study recovered a third of what it did.
+    `find_stats` once returned one path, and a 62-genome study was reported as 24.
     """
     table = M.build(M.discover(_study(tmp_path, {"sample_6": 24, "sample_7": 15, "sample_13": 23})))
     assert table.bin_sets == 3
@@ -289,14 +266,14 @@ def test_every_samples_bin_set_is_in_the_table_not_just_the_first(tmp_path):
 
 
 def test_more_than_one_bin_set_carries_a_sample_column_in_front_of_the_genome(tmp_path):
-    """The sample is the directory the stats table sat in, and it has to come before the genome."""
+    """The sample column, from the directory holding the stats table, comes before the genome."""
     table = M.build(M.discover(_study(tmp_path, {"sample_6": 2, "sample_7": 2})))
     assert table.columns[:2] == [M.SAMPLE_COLUMN, "genome"]
     assert sorted({row[0] for row in table.rows}) == ["sample_6", "sample_7"]
 
 
 def test_a_single_bin_set_gets_no_sample_column(tmp_path):
-    """A per-run report should not grow a field that says the same thing on every row."""
+    """A single-bin-set run has no sample column."""
     table = M.build(M.discover(_study(tmp_path, {"sample_6": 3})))
     assert table.bin_sets == 1
     assert M.SAMPLE_COLUMN not in table.columns
@@ -304,11 +281,7 @@ def test_a_single_bin_set_gets_no_sample_column(tmp_path):
 
 
 def test_two_samples_each_with_a_bin_001_are_two_rows_not_one(tmp_path):
-    """Every sample numbers its bins from bin_001, so the name alone cannot key a row.
-
-    Keyed on the name, each sample's bin_001 overwrites the last and a study collapses into the
-    distinct names of its largest bin set - with no duplicate left to notice.
-    """
+    """Rows are keyed on sample and name, since every sample numbers its bins from bin_001."""
     table = M.build(M.discover(_study(tmp_path, {"sample_6": 1, "sample_7": 1})))
     assert [(row[0], row[1]) for row in table.rows] == [
         ("sample_6", "bin_001"),
@@ -317,12 +290,11 @@ def test_two_samples_each_with_a_bin_001_are_two_rows_not_one(tmp_path):
 
 
 def test_each_bin_set_is_paired_with_its_own_gunc_report(tmp_path):
-    """One GUNC report was found for the whole study and joined onto every sample's genomes.
+    """Each sample's genomes are joined to that sample's GUNC report.
 
-    They join because both sets are numbered from bin_001, so the verdicts are wrong rather than
-    missing: on the reference study that was 23 wrong chimerism calls plus a phantom genome from
-    the larger bin set. Here sample_6's bin_001 passes and sample_7's fails, so a crossed join
-    shows up as the wrong verdict rather than as no verdict.
+    A single report joined onto every sample gave 23 wrong chimerism calls and an extra genome on
+    the reference study. Here sample_6's bin_001 passes and sample_7's fails, so a crossed join
+    gives the wrong value.
     """
     study = _study(
         tmp_path,
@@ -336,7 +308,7 @@ def test_each_bin_set_is_paired_with_its_own_gunc_report(tmp_path):
 
 
 def test_a_sample_whose_gunc_did_not_run_is_blank_rather_than_the_neighbours_verdict(tmp_path):
-    """Half a study scored is not a reason to lend one sample's verdicts to another."""
+    """A sample without a GUNC report gets blank GUNC cells, not another sample's values."""
     study = _study(tmp_path, {"sample_6": 1, "sample_7": 1}, gunc={"sample_6": {"bin_001": 0.02}})
     table = M.build(M.discover(study))
     at = table.columns.index("gunc_pass")
@@ -346,10 +318,10 @@ def test_a_sample_whose_gunc_did_not_run_is_blank_rather_than_the_neighbours_ver
 
 
 def test_the_intermediate_tables_in_work_files_are_not_bin_sets(tmp_path):
-    """bin_refinement leaves seven per sample - binsA, binsAB, binsO.to_score - beside one answer.
+    """Only the consolidated set is read, not the intermediate sets bin_refinement leaves.
 
-    They are the arithmetic of consolidation, and counting them would report every genome several
-    times over and inflate the study's yield.
+    bin_refinement leaves seven per sample (binsA, binsAB, binsO.to_score, ...); reading them
+    would count every genome several times.
     """
     study = _study(tmp_path, {"sample_6": 2})
     work = tmp_path / "study" / "BIN_REFINEMENT" / "sample_6" / "work_files"
@@ -365,9 +337,8 @@ def test_the_intermediate_tables_in_work_files_are_not_bin_sets(tmp_path):
 def test_a_study_wide_table_matching_no_bin_is_recorded_rather_than_guessed(tmp_path):
     """A cohort's taxonomy is keyed on dereplicated names, which match no sample's bin_001.
 
-    There is no join to make, so the cells stay blank and the bin set is named in `unjoined` - the
-    page then says which, because a present-but-inapplicable input leaves the same blank cells as
-    an input that was never written.
+    The cells stay blank and the bin set is named in `unjoined`, so it can be told apart from an
+    input that was never written.
     """
     study = _study(tmp_path, {"sample_6": 2, "sample_7": 2})
     classify = tmp_path / "study" / "CLASSIFY"
@@ -382,7 +353,7 @@ def test_a_study_wide_table_matching_no_bin_is_recorded_rather_than_guessed(tmp_
 
 
 def test_a_genome_named_only_by_a_study_wide_table_has_a_blank_sample(tmp_path):
-    """It is still a row - nothing drops a genome - but which bin set it came from is unknown."""
+    """A genome from an unknown bin set still gets a row, with the sample left blank."""
     study = _study(tmp_path, {"sample_6": 1, "sample_7": 1})
     classify = tmp_path / "study" / "CLASSIFY"
     classify.mkdir()

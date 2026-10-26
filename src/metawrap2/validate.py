@@ -1,23 +1,19 @@
-"""Checking that inputs and intermediates are actually usable, before a tool is handed them.
+"""Checking that inputs and intermediates are usable before a tool is given them.
 
-A metagenomics pipeline is a long chain, and a file that is present but empty or truncated
-propagates quietly: an empty FASTQ produces an empty assembly, which produces zero bins,
-which fails in CheckM with a message about file extensions. The cause is then hours and
-several modules behind the symptom.
+A file that is present but empty or truncated propagates down the pipeline: an empty FASTQ gives an
+empty assembly, then zero bins, then a CheckM error about file extensions, several modules later.
 
-These checks are cheap - a stat, or reading the last few kilobytes - and are applied both to
-what the user supplies and to what one module hands the next:
+The checks are cheap (a stat, or reading the last few kilobytes) and are applied to user inputs and
+to what one module passes to the next:
 
 * :func:`require_file` - exists, is a file, and is not zero bytes
 * :func:`require_nonempty_dir` - exists and contains something
-* :func:`check_fastq` / :func:`check_fasta` - the format is what the extension claims, and
-  the file does not end mid-record
-* :func:`require_inputs` - the module-level entry point, reporting *all* the problems at once
-  rather than one per re-run
+* :func:`check_fastq` / :func:`check_fasta` - the format matches the extension, and the file does
+  not end mid-record
+* :func:`require_inputs` - the module-level entry point, reporting all problems at once
 
-Truncation is detected by reading only the tail of the file, so the cost does not scale with a
-100 GB library. Compressed files are read through :mod:`metawrap2.io.seqio`, which also means
-a truncated gzip stream surfaces here as a clear message rather than a CRC error from a tool.
+FASTA truncation is detected from the tail of the file. Compressed files are read through
+:mod:`metawrap2.io.seqio`, so a truncated gzip stream is reported here with a clear message.
 """
 
 from __future__ import annotations
@@ -35,7 +31,7 @@ from .io.seqio import detect_compression, smart_open
 TAIL_BYTES = 128 * 1024
 
 #: Everything a damaged or truncated (possibly compressed) file can raise on read. zlib.error
-#: is the one a corrupt deflate stream produces, and it is not an OSError subclass.
+#: (corrupt deflate stream) is not an OSError subclass.
 _READ_ERRORS = (OSError, EOFError, zlib.error, gzip.BadGzipFile)
 
 
@@ -89,8 +85,8 @@ def require_nonempty_dir(
 def _tail_text(path: str) -> str:
     """The last :data:`TAIL_BYTES` of *path* as text, decompressing if needed.
 
-    For a compressed file the whole stream has to be read to reach the end, but only the tail
-    is retained - and a truncated compressed stream raises here, which is itself the answer.
+    For a compressed file the whole stream is read to reach the end, keeping only the tail. A
+    truncated compressed stream raises here.
     """
     if detect_compression(path) == "none":
         size = os.path.getsize(path)
@@ -108,23 +104,21 @@ def _tail_text(path: str) -> str:
     return chunk
 
 
-#: How much is read at a time when counting a FASTQ's lines. Big enough that the newline count is
-#: one memchr per chunk rather than a Python loop per line, small enough to stay in cache.
+#: Read size when counting a FASTQ's lines. Large enough for one memchr per chunk, small enough to
+#: stay in cache.
 SCAN_CHUNK = 8 * 1024 * 1024
 
 
 def _scan_lines(path: str):
     """Stream *path* once and return ``(first_line, line_count, ends_with_newline)``.
 
-    Counting newlines over binary chunks rather than iterating lines in Python, and through `pigz`
-    when it is installed. The check itself is worth keeping - it catches a truncated gzip member,
-    which is what a concatenated download leaves behind, and a user's run died on exactly that -
-    but it was costing ~17 minutes of one core on a 21 GB + 23 GB pair before MEGAHIT even started:
-    the decompression is C, the per-line loop was not.
+    Counts newlines over binary chunks, decompressing through `pigz -dc` when it is installed. The
+    check catches truncated gzip members (left by interrupted or concatenated downloads). A
+    per-line Python loop took ~17 minutes of one core on a 21 GB + 23 GB pair before MEGAHIT
+    started.
 
-    `pigz -dc` parallelises the decompression itself; without it this falls back to the same
-    streaming read, which is still several times faster than a line loop. Either way the whole
-    stream is read, so a partial member still raises.
+    Without pigz it falls back to a streaming read, still several times faster than a line loop.
+    The whole stream is read in both cases, so a partial member raises.
     """
     first = b""
     count = 0
@@ -156,15 +150,15 @@ def _scan_lines(path: str):
             if process.stderr is not None:
                 process.stderr.close()
             if process.wait() != 0:
-                # Raised as a read error so the caller reports it the way it reports a bad gzip:
-                # pigz exits non-zero on a truncated member, which is the case this check is for.
+                # Raised as a read error so it is reported like a bad gzip: pigz exits non-zero on
+                # a truncated member.
                 raise OSError(
                     "pigz could not read %s: %s" % (path, stderr.decode("utf-8", "replace").strip())
                 )
     ends_with_newline = last_byte == b"\n"
     if last_byte and not ends_with_newline:
-        # The unterminated tail is a line too, which is what makes the multiple-of-four check see
-        # a truncated record rather than a round number.
+        # Count the unterminated tail as a line, so a truncated record fails the multiple-of-four
+        # check.
         count += 1
     return first.decode("utf-8", "replace"), count, ends_with_newline
 
@@ -174,10 +168,9 @@ def check_fastq(path: str, what: str = "FASTQ file") -> Optional[str]:
     problem = require_file(path, what)
     if problem:
         return problem
-    # One streaming pass: validate the first line, count the total lines (a complete FASTQ is a
-    # multiple of four), and remember the last line. Reading the whole stream also surfaces a
-    # truncated gzip (a partial member raises here). We must count *all* lines, not a tail window:
-    # the number of lines in an arbitrary byte-tail is not a multiple of four even for a valid file.
+    # One streaming pass: validate the first line, count all lines (a complete FASTQ has a multiple
+    # of four), and keep the last line. Reading the whole stream also detects a truncated gzip. A
+    # tail window cannot be used, because its line count is arbitrary even for a valid file.
     try:
         first, n_lines, ends_with_newline = _scan_lines(path)
     except _READ_ERRORS as exc:
@@ -232,11 +225,9 @@ def check_fasta(path: str, what: str = "FASTA file") -> Optional[str]:
             exc,
             what,
         )
-    # A header with no sequence after it means the file stops immediately after a '>' line.
-    # rpartition covers the single-line case too: with no newline it returns ("", "", tail), so
-    # a file that is nothing but ">c1" is caught by this one condition. (It used to be followed
-    # by an `or ... and ...` clause for that case, which Python read as `A or (B and C)` and
-    # which was therefore unreachable.)
+    # A header with no sequence after it means the file ends right after a '>' line. rpartition
+    # also covers the single-line case: with no newline it returns ("", "", tail), so a file that
+    # is only ">c1" is caught too.
     stripped = tail.rstrip("\n")
     if stripped.rpartition("\n")[2].startswith(">"):
         return "%s ends with a header line and no sequence, so it is truncated (%s)" % (
@@ -249,9 +240,8 @@ def check_fasta(path: str, what: str = "FASTA file") -> Optional[str]:
 def require_inputs(checks: Sequence[tuple], context: str = "") -> None:
     """Run several checks and raise :class:`InputProblem` listing every failure.
 
-    *checks* is a sequence of ``(callable, path, description)``. Reporting all the problems at
-    once matters: a user with five samples and three bad files should learn that in one run,
-    not across three successive failures.
+    *checks* is a sequence of ``(callable, path, description)``. All problems are reported in one
+    run.
     """
     problems: List[str] = []
     for check, path, description in checks:

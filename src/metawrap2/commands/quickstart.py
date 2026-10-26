@@ -1,24 +1,20 @@
-"""`metawrap2 quickstart` - one command from a fresh checkout to a pipeline that runs.
+"""`metawrap2 quickstart`: set up a fresh checkout in one command.
 
-Getting started used to mean four commands and a reading of the docs before anything ran: create
-the environments, download the databases, point the config at them, check the result. Each step is
-simple, and none of them is what the user came to do. This runs them in the right order.
+Runs the setup steps in order: create the environments, optionally download the databases and
+write their paths to the config, then check the result.
 
     metawrap2 quickstart -t 8                     # environments, then verify
     metawrap2 quickstart --binning-only           # just what genome recovery needs
     metawrap2 quickstart --databases small        # also fetch the capped test databases
     metawrap2 quickstart --databases full         # also fetch the production databases
 
-It is a *composition*, not a reimplementation: it calls the same ``install-env``, ``install-db``
-and ``doctor`` code paths you would have run by hand, and stops at the first failing step with the
-specific command to resume from. Nothing it does is unavailable separately.
+It calls the same ``install-env``, ``install-db`` and ``doctor`` code as the separate commands,
+and stops at the first failing step with the command to resume from.
 
-**It never downloads a database you did not ask for.** The databases run from 550 MB to ~300 GB
-and take hours to days, and where they go is a decision about the machine, not something to
-default. So ``--databases`` is required to fetch anything. With no answer given, quickstart
-installs the environments, then prints what each module needs, how large it is, and the exact
-command - and, if it is running interactively, offers to do it. On a non-interactive run (CI, a
-batch script) it never asks and never downloads.
+Databases are only downloaded with ``--databases`` (they range from 550 MB to ~300 GB and take
+hours to days). Without it, quickstart installs the environments, then prints what each module
+needs, its size and the command to fetch it, and offers to run it when interactive. A
+non-interactive run (CI, a batch script) never prompts and never downloads.
 """
 
 from __future__ import annotations
@@ -32,8 +28,7 @@ from ..cliformat import make_parser
 from ..config import MODULE_ENVS
 from ..logging import announcement, comm, warning
 
-#: The modules genome recovery actually needs. `--binning-only` installs these, which is a much
-#: smaller commitment than all thirteen environments and covers the path most users came for.
+#: The modules genome recovery needs; `--binning-only` installs only these environments.
 BINNING_PATH: Tuple[str, ...] = (
     "read_qc",
     "assembly",
@@ -43,24 +38,22 @@ BINNING_PATH: Tuple[str, ...] = (
     "quant_bins",
 )
 
-#: Databases the genome-recovery path needs. The Kraken2 and BLAST databases are the enormous
-#: ones and are only needed by kraken2/blobology/classify_bins, so they are left out here.
-BINNING_DATABASES: Tuple[str, ...] = ("checkm", "host")
+#: Databases the genome-recovery path needs: CheckM2's and GUNC's for bin_refinement's default
+#: scoring and chimerism check, and the host genome for read_qc. CheckM1's data is only needed for
+#: --checkm1 (`install-db checkm`). The large Kraken2 and BLAST databases are only used by
+#: kraken2/blobology/classify_bins and are left out.
+BINNING_DATABASES: Tuple[str, ...] = ("checkm2", "gunc", "host")
 
-#: How many database downloads to run at once. Network-bound, so a few in parallel is close to
-#: linear, but more than this mostly just saturates a link.
+#: Parallel database downloads. They are network-bound; more than a few saturates the link.
 DEFAULT_DB_JOBS = 3
 
 
 def _default_tier_envs() -> List[str]:
-    """Opt-in env names the shipped binning tier needs, so an install covers a plain run.
+    """Opt-in env names the default binning tier needs, so an install covers a plain run.
 
-    The shipped tier is metaBAT2 + SemiBin2, and SemiBin2 lives in metawrap2-learned with the other
-    learned binners because they are all pytorch. Without this, `quickstart` finished reporting
-    everything healthy and the first `metawrap2 run` stopped at binning asking for an env.
-
-    Derived from the tier rather than listed, so moving binning.DEFAULT_PRESET moves this with it:
-    a tier of classical binners only needs nothing extra, and this returns an empty list.
+    The default tier is metaBAT2 + SemiBin2; SemiBin2 is in metawrap2-learned with the other
+    pytorch binners. Derived from binning.DEFAULT_PRESET, so a tier of classical binners returns
+    an empty list.
     """
     from ..config import OPTIONAL_ENVS
     from ..modules.binning import DEFAULT_PRESET, PRESETS
@@ -72,6 +65,23 @@ def _default_tier_envs() -> List[str]:
             name = env.removeprefix("metawrap2-")
             if name not in names:
                 names.append(name)
+    return names
+
+
+def _default_run_envs(modules: Sequence[str]) -> List[str]:
+    """The envs outside MODULE_ENVS that a default run of *modules* uses, as install-env names.
+
+    *modules* empty means a full install. bin_refinement scores with CheckM2, which has its own
+    env (config.DEFAULT_OPTIONAL_ENVS); the default binning tier needs metawrap2-learned.
+    """
+    from ..config import DEFAULT_OPTIONAL_ENVS
+
+    names: List[str] = []
+    for key, users in DEFAULT_OPTIONAL_ENVS.items():
+        if not modules or any(module in modules for module in users):
+            names.append(key)
+    if not modules or "binning" in modules:
+        names += [n for n in _default_tier_envs() if n not in names]
     return names
 
 
@@ -91,10 +101,8 @@ def _elapsed(started: float) -> str:
     return "%.1fh" % (seconds / 3600)
 
 
-#: quickstart always has the same three steps. They are numbered against this rather than against
-#: the steps that happen to run, because what runs is not known when step 1 prints: with
-#: ``--databases`` unset and a terminal attached, whether step 2 happens is decided by a question
-#: asked after step 1 has finished.
+#: quickstart always numbers three steps, because whether step 2 runs may only be decided by a
+#: prompt after step 1 finishes.
 TOTAL_STEPS = 3
 
 
@@ -105,9 +113,7 @@ def _step(number: int, title: str) -> None:
 def _skipped_step(number: int, title: str, why: str) -> None:
     """Announce a step that is not going to run, and why.
 
-    A skipped step used to print nothing, so `--databases none` showed "STEP 1/3" then "STEP 3/3"
-    and `--skip-envs` began the whole command at "STEP 3/3". Numbering that skips is a numbering a
-    user has to reverse-engineer, and the obvious reading - that step 2 failed silently - is wrong.
+    Printed so the step numbering has no gaps (e.g. "STEP 2/3 ... (skipped: --databases none)").
     """
     announcement("STEP %d/%d: %s (skipped: %s)" % (number, TOTAL_STEPS, title, why))
 
@@ -115,10 +121,8 @@ def _skipped_step(number: int, title: str, why: str) -> None:
 def _unique_envs(names: Sequence[str]) -> List[str]:
     """The distinct conda environments *names* resolve to, in first-seen order.
 
-    Several modules share one environment - metawrap2-reads serves five of them - so counting the
-    names given is counting modules, not installs. A full install said "creating 23 conda
-    environment(s)" and then built 11, which misstates the slowest part of the install by a factor
-    of two in the one message a user uses to decide whether to wait.
+    Several modules share one environment (metawrap2-reads serves five), so the count of names is
+    not the count of installs; a full install names 23 and builds 11.
     """
     from ..config import resolve_env_name
 
@@ -131,13 +135,9 @@ def _unique_envs(names: Sequence[str]) -> List[str]:
 
 
 def _print_modules_without_envs() -> None:
-    """Kept as a no-op: `doctor` now reports every module, including those with no conda env.
+    """No-op: `doctor` now reports every module, including those with no conda env.
 
-    This used to name the two modules missing from a 22-row table against `metawrap2 -h`'s 24. The
-    table lists all 24 now - a module with no environment shows its real dependency instead, which
-    is what the sentence was standing in for - so there is nothing left to explain. Left in place
-    rather than deleted because `quickstart` calls it at the end of a successful install and a
-    future dependency kind (a system library, say) would belong here.
+    Kept as the place to report a future dependency kind (a system library, say).
     """
     return
 
@@ -145,11 +145,11 @@ def _print_modules_without_envs() -> None:
 def _explain_failure(step: str, command: str) -> None:
     warning(
         "%s failed.\n"
-        "Nothing quickstart does is special - it runs the ordinary commands in order - so you\n"
-        "can pick up exactly where it stopped:\n"
+        "quickstart runs the ordinary metawrap2 commands in order, so you can continue from\n"
+        "this step with:\n"
         "    %s\n"
-        "The step's own output above says what went wrong. `metawrap2 doctor` reports what is\n"
-        "already working, so a retry only redoes what is missing." % (step, command)
+        "The step's output above shows the error. `metawrap2 doctor` reports what already\n"
+        "works; a retry skips what is installed." % (step, command)
     )
 
 
@@ -162,11 +162,11 @@ def _database_command(names: Sequence[str], jobs: int, small: bool) -> str:
 
 
 def _print_database_guidance(names: Sequence[str], jobs: int) -> None:
-    """Say what is still needed, how big it is, and exactly what to type."""
+    """Print the databases still needed, their sizes and the commands to install them."""
     from .install_db import DATABASES
 
-    print("\n  Databases are installed separately, because they are large and where they go is")
-    print("  your decision. What each one is for, and how big:\n")
+    print("\n  Databases are installed separately because they are large and you choose where")
+    print("  they go. What each one is used for, and its size:\n")
     print("    %-10s %-12s %-10s %s" % ("name", "full size", "--small", "needed by"))
     print("    " + "-" * 76)
     listed = list(DATABASES) if names == ["--all"] else [n for n in names if n in DATABASES]
@@ -174,12 +174,12 @@ def _print_database_guidance(names: Sequence[str], jobs: int) -> None:
         db = DATABASES[name]
         print("    %-10s %-12s %-10s %s" % (name, db.size, db.small_size or "-", db.used_by))
     print(
-        "\n  Capped-but-real variants, enough to see the pipeline work end to end:\n"
+        "\n  Small capped variants, enough to test the pipeline end to end:\n"
         "      %s\n"
         "  The production databases:\n"
         "      %s\n"
-        "  Either way the paths are written into your config for you. `metawrap2 install-db\n"
-        "  --list` shows the full set, and --dir puts them somewhere other than ~/metawrap2_dbs.\n"
+        "  Both commands write the paths into your config. `metawrap2 install-db --list`\n"
+        "  shows the full set; --dir installs them somewhere other than ~/metawrap2_dbs.\n"
         % (
             _database_command(listed or names, jobs, True),
             _database_command(listed or names, jobs, False),
@@ -188,16 +188,11 @@ def _print_database_guidance(names: Sequence[str], jobs: int) -> None:
 
 
 def _print_database_status(config: Optional[str]) -> bool:
-    """Print what each known database key is set to and whether it is there. True if none is broken.
+    """Print each database key's value and whether it exists. True if none is broken.
 
-    This is what `--skip-envs` reports instead of the environment table. `--skip-envs` is
-    documented as "databases only", and it used to print the ENVIRONMENT status table - every
-    module MISSING, because environment creation had just been skipped on purpose - and exit 1.
-    Reporting the half of the install the user explicitly asked about is the whole point of the
-    flag.
-
-    "Configured but missing" and "not configured" are different states needing different actions,
-    so they are printed differently rather than both appearing as a path with a cross next to it.
+    Used by `--skip-envs` ("databases only") in place of the environment table, which would show
+    every module MISSING. Keys that are configured but missing and keys that are not set are
+    listed separately.
     """
     from ..config import check_databases, load_settings
 
@@ -219,22 +214,18 @@ def _print_database_status(config: Optional[str]) -> bool:
     if broken:
         warning(
             "These database paths are in your config but are not on disk: %s\n"
-            "Either the path is wrong or the download did not finish. `metawrap2 install-db "
-            "<name>` fetches one and rewrites its path for you." % ", ".join(broken)
+            "The path is wrong or the download did not finish. `metawrap2 install-db "
+            "<name>` downloads one and updates its path in the config." % ", ".join(broken)
         )
     return not broken
 
 
 def _announce_non_interactive_default(names: Sequence[str], jobs: int) -> None:
-    """Say out loud that an unattended run is downloading nothing, and what to pass instead.
+    """Report that an unattended run downloads no databases, and what to pass instead.
 
-    The non-blocking behaviour is correct and stays: under `sbatch` or in CI there is nobody to
-    answer a prompt, and a multi-hundred-gigabyte download must never start because a script was
-    not watching. What was missing is the sentence saying so - without it, a user who asked for
-    `--skip-envs` in a batch job got a run that touched no database and never said why.
+    Under `sbatch` or in CI no one can answer a prompt, so nothing is downloaded.
     """
-    # The command goes on a line of its own: mixed into the prose it wraps mid-command, and a
-    # command a user has to rejoin from two lines is a command they will mistype.
+    # The command is on its own line so it does not wrap mid-command.
     comm(
         "No --databases given and stdin is not a terminal; downloading nothing.\n"
         "Pass --databases small or --databases full to fetch them here, or run this later:\n"
@@ -245,9 +236,7 @@ def _announce_non_interactive_default(names: Sequence[str], jobs: int) -> None:
 def _ask_about_databases(names: Sequence[str], jobs: int) -> str:
     """Offer to install databases, but only when a person is there to answer.
 
-    Returns "none", "small" or "full". A non-interactive run always gets "none": a batch script
-    or a CI job must never be able to start a multi-hundred-gigabyte download because nobody was
-    watching to say no.
+    Returns "none", "small" or "full". A non-interactive run (batch script, CI) always gets "none".
     """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         _announce_non_interactive_default(names, jobs)
@@ -276,8 +265,8 @@ def _print_next_steps(threads: int, small: bool) -> None:
     )
     if small:
         comm(
-            "Those are the capped databases - right for checking the pipeline runs, not for "
-            "publishing. Use `metawrap2 install-db --all` when you need the real ones."
+            "These are the capped databases, for testing the pipeline and not for published "
+            "results. Use `metawrap2 install-db --all` to install the full ones."
         )
 
 
@@ -290,13 +279,10 @@ def _run_install_env(
     if from_lock:
         argv.append("--from-lock")
     if log_dir:
-        # install-env writes each env's solver output to a log and only prints the path on
-        # failure, so an install that succeeded with warnings left no retrievable record unless
-        # the logs went somewhere the user chose. `install-env --log-dir` already did this;
-        # quickstart simply had no way to ask for it.
+        # install-env only prints its log paths on failure; --log-dir keeps the logs of a
+        # successful install too.
         argv += ["--log-dir", log_dir]
-    # --no-test because the final doctor step verifies everything anyway; testing each env as it
-    # is built and then again at the end doubles the slowest part for no extra information.
+    # --no-test: the final doctor step verifies every env, so testing each one here is redundant.
     argv.append("--no-test")
     return install_env_main(argv)
 
@@ -330,9 +316,9 @@ def _run_doctor(modules: Sequence[str], config: Optional[str], databases: bool) 
 def main(argv: List[str]) -> int:
     ap = make_parser(
         prog="metawrap2 quickstart",
-        description="Build MetaWrap2's conda environments, optionally fetch databases, and verify both "
-        "- in one command. It does not install MetaWrap2's own Python extras: `diff_abundance` "
-        "needs `pip install 'metawrap2[stats]'`, and `doctor` says so if it is missing.",
+        description="Build MetaWrap2's conda environments, optionally download databases, and "
+        "check both. It does not install MetaWrap2's Python extras: `diff_abundance` "
+        "needs `pip install 'metawrap2[stats]'`, and `doctor` reports if it is missing.",
         epilog="Every step is an ordinary metawrap2 command; run them separately if you prefer.",
     )
     ap.add_argument(
@@ -341,7 +327,7 @@ def main(argv: List[str]) -> int:
         type=int,
         default=4,
         help="how many conda environments to build at once (default 4). More is faster if "
-        "your machine and network can take it",
+        "the machine and network allow it",
     )
     ap.add_argument(
         "--binning-only",
@@ -356,9 +342,9 @@ def main(argv: List[str]) -> int:
         "--databases",
         choices=("none", "small", "full"),
         default=None,
-        help="whether to download databases too. 'small' fetches capped-but-real variants "
-        "(good for a first run), 'full' the production ones (hundreds of GB, many hours), "
-        "'none' skips them. Omit it and nothing is downloaded without asking you first",
+        help="whether to download databases. 'small' downloads capped variants "
+        "(for a first run), 'full' the production ones (hundreds of GB, many hours), "
+        "'none' skips them. Without this option, quickstart asks before downloading",
     )
     ap.add_argument(
         "--skip-envs",
@@ -381,8 +367,8 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--config", help="config file to write database paths into")
     ap.add_argument(
         "--log-dir",
-        help="keep the per-environment build logs here (default: a temp directory). Worth "
-        "setting: an install that succeeded with warnings otherwise leaves no record",
+        help="keep the per-environment build logs here (default: a temp directory, so the "
+        "warnings of a successful install are not kept)",
     )
     args = ap.parse_args(argv)
 
@@ -398,10 +384,8 @@ def main(argv: List[str]) -> int:
     elif args.binning_only:
         modules = list(BINNING_PATH)
     else:
-        # No module list at all: `doctor` then reports every module the CLI has, which is what a
-        # user comparing this table against `metawrap2 -h` expects. Passing the environment names
-        # held the table at 22 of 24 rows, and the two it dropped were the ones with no conda
-        # environment - including the one whose Python extra can actually be missing.
+        # An empty list makes `doctor` report every CLI module, including the two without a
+        # conda env.
         modules = []
 
     # Only the genome-recovery path has a short database list; a full install needs all of them.
@@ -410,22 +394,24 @@ def main(argv: List[str]) -> int:
     if not _package_manager():
         warning(
             "No conda, mamba or micromamba on PATH.\n"
-            "MetaWrap2 runs each module's tools inside a conda environment, so one of them has\n"
-            "to exist first. Miniforge is the usual choice:\n"
+            "MetaWrap2 runs each module's tools inside a conda environment, so one of these\n"
+            "is required. To install Miniforge:\n"
             "    https://github.com/conda-forge/miniforge#install\n"
-            "(If you would rather manage the tools yourself, set use_conda_envs = false in\n"
-            "metawrap2.toml and MetaWrap2 will call them straight off your PATH.)"
+            "(To manage the tools yourself, set use_conda_envs = false in metawrap2.toml and\n"
+            "MetaWrap2 will run them from your PATH.)"
         )
         return 1
 
     started = time.time()
     announcement("METAWRAP2 QUICKSTART")
 
-    # The modules' own envs plus whatever opt-in env the default binning tier reaches into. The
-    # modules alone are what `doctor` is asked about, since "learned" is not a module.
-    envs_to_build = list(modules)
-    if "binning" in modules:
-        envs_to_build += _default_tier_envs()
+    # The modules' envs (every module env for a full install) plus the separate envs a default
+    # run uses: CheckM2 and the learned binners. `doctor` is only asked about the modules, since
+    # "checkm2" and "learned" are not modules.
+    from ..config import ALL_MODULE_ENVS
+
+    envs_to_build = list(modules) or [env.removeprefix("metawrap2-") for env in ALL_MODULE_ENVS]
+    envs_to_build += _default_run_envs(modules)
 
     if args.skip_envs:
         _skipped_step(1, "conda environments", "--skip-envs")
@@ -433,13 +419,11 @@ def main(argv: List[str]) -> int:
         unique = _unique_envs(envs_to_build)
         _step(1, "creating %d conda environment(s)" % len(unique))
         comm(
-            "This is the slow part, and a quiet one: each environment's solver output goes to its\n"
-            "own log, so the lines below are the only progress there is. Eleven environments\n"
-            "measured 29 minutes at -t 4, so expect tens of minutes rather than seconds.\n"
-            "Existing environments are skipped, which is what makes a retry cheap."
+            "This step is slow. Each environment's solver output goes to its own log, so the\n"
+            "lines below are the only progress shown. Eleven environments took 29 minutes at\n"
+            "-t 4. Existing environments are skipped on a retry."
         )
-        # Forwarded only when asked for, so with no --log-dir install-env keeps choosing its own
-        # temp directory.
+        # Without --log-dir, install-env uses its own temp directory.
         if args.log_dir:
             rc_env = _run_install_env(envs_to_build, args.threads, args.from_lock, args.log_dir)
         else:
@@ -475,9 +459,8 @@ def main(argv: List[str]) -> int:
             return 1
 
     if args.skip_envs:
-        # `--skip-envs` means "databases only", so the report is about databases. Running the
-        # module check here would report every environment as missing - correctly, since creating
-        # them was skipped on purpose - and exit 1 on a run that did exactly what was asked.
+        # `--skip-envs` means "databases only", so check databases, not modules (which would all
+        # be missing and give exit 1).
         _step(3, "checking the databases")
         healthy = _print_database_status(args.config)
         announcement("QUICKSTART FINISHED IN %s" % _elapsed(started))
@@ -488,17 +471,17 @@ def main(argv: List[str]) -> int:
         return 0
 
     _step(3, "checking what works")
-    # Databases nobody asked for would be reported as missing and make the check look failed, so
-    # they are only part of the verdict once they have actually been installed.
+    # Databases are only checked if they were installed in this run; otherwise they would all be
+    # reported missing.
     healthy = _run_doctor(modules, args.config, databases=choice != "none") == 0
     _print_modules_without_envs()
 
     announcement("QUICKSTART FINISHED IN %s" % _elapsed(started))
     if not healthy:
         warning(
-            "Some of it is not ready - the table above says which.\n"
-            "`metawrap2 doctor --fix` recreates exactly the environments that are broken and\n"
-            "leaves the healthy ones alone. Everything that did install is still installed."
+            "Some modules are not ready; the table above says which.\n"
+            "`metawrap2 doctor --fix` recreates only the broken environments. The environments\n"
+            "that did build are still installed."
         )
         return 1
 

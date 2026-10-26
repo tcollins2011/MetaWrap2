@@ -1,45 +1,40 @@
 # Viral contigs: geNomad to find them, CheckV to say how complete they are.
 #
-# The pair is the viral counterpart of binning plus CheckM2, and both halves are needed for the
-# output to mean anything: geNomad says "this is a virus", CheckV says "and it is 40% of one".
+# The viral counterpart of binning plus CheckM2: geNomad identifies viruses, CheckV estimates how
+# complete each one is (for example 40% of a genome).
 #
-# geNomad earns its place twice over, which is why there is no second plasmid tool here: it
-# classifies a contig as viral, plasmid or chromosomal in one pass against one database, so the
-# mobility work the `amr` module needs shares this download rather than requiring another.
+# geNomad classifies a contig as viral, plasmid or chromosomal in one pass against one database,
+# so the `amr` module's mobility analysis shares this download and no second plasmid tool is
+# needed.
 #
-# CheckV does the thing that makes viral output usable rather than merely present: it trims host
-# flanks off proviruses, so an integrated prophage is reported as a virus plus a piece of bacterial
-# chromosome instead of one chimeric contig.
+# CheckV trims host flanks off proviruses, so an integrated prophage is reported as a virus plus a
+# piece of bacterial chromosome instead of one chimeric contig.
 #
-# Deliberately not here: VIBRANT and VirSorter2. Both are stale relative to geNomad and neither is
-# maintained at the pace this subfield moves.
+# VIBRANT and VirSorter2 are not included: both are behind geNomad and less actively maintained.
 name: metawrap2-viruses
 channels:
   - conda-forge
   - bioconda
 dependencies:
-  # geNomad imports numba, whose numpy compatibility is narrow and version-specific: an env built
-  # without this pin raised "Numba needs NumPy 1.26 or less" on `genomad --version`. Pinned so the
-  # env is deterministic rather than depending on which numba happens to be current.
+  # geNomad imports numba, whose numpy compatibility is narrow: an env built without this pin raised
+  # "Numba needs NumPy 1.26 or less" on `genomad --version`.
   #
-  # Worth knowing if you reproduce that error by hand: it is not necessarily the env's fault.
-  # `~/.local/lib/python3.12/site-packages` precedes a conda env on sys.path, so a user-installed
-  # numpy shadows whatever this file pins. MetaWrap2 sets PYTHONNOUSERSITE=1 for every env-wrapped
-  # command (see command.Runner._child_env) so a pipeline run is protected; a bare `mamba run` is
-  # not, and will import the user's numpy instead of this one.
+  # The same error can come from outside the env: `~/.local/lib/python3.12/site-packages` precedes
+  # a conda env on sys.path, so a user-installed numpy shadows this pin. MetaWrap2 sets
+  # PYTHONNOUSERSITE=1 for every env-wrapped command (see command.Runner._child_env); a bare
+  # `mamba run` does not.
   - numpy <1.27
   - genomad >=1.8
   - checkv >=1.0.3
-  # CRISPR arrays off the prokaryotic bins, for host prediction (`viruses --crispr-hosts`). Its
-  # spacers are a record of past infections, so a match in a viral contig is evidence rather than a
-  # compositional guess, and the genomes it needs are the ones binning already produced.
+  # CRISPR arrays from the prokaryotic bins, for host prediction (`viruses --crispr-hosts`). A
+  # spacer is a record of past infection, so a match in a viral contig is direct evidence of a
+  # host.
   - cctyper >=1.8
-  # Forced by the numpy pin above, not a preference: pandas 3 is built against numpy 2, and conda
-  # will install that np2 build next to numpy 1.26 without complaint. cctyper then dies on
-  # `import pandas`. Pinned below 3 so the two agree.
+  # Required by the numpy pin above: pandas 3 is built against numpy 2, and conda will install that
+  # build next to numpy 1.26, after which cctyper fails on `import pandas`.
   #
-  # Worth knowing if cctyper fails here with "Could not find HMM profile database": bioconda's
-  # build ships an activation script exporting CCTYPER_DB=$CONDA_PREFIX/cct_data, which is a
-  # 1.8-era data directory without 1.9's profiles. MetaWrap2 passes --db pointing at the data
-  # inside the Python package instead, so a pipeline run works; a bare `cctyper` does not.
+  # If cctyper fails here with "Could not find HMM profile database": bioconda's build ships an
+  # activation script exporting CCTYPER_DB=$CONDA_PREFIX/cct_data, a 1.8-era data directory without
+  # 1.9's profiles. MetaWrap2 passes --db pointing at the data inside the Python package; a bare
+  # `cctyper` does not.
   - pandas <3

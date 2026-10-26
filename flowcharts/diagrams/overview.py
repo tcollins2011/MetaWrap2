@@ -63,7 +63,7 @@ def build() -> Diagram:
         w=360,
     )
 
-    # One size for every box, grown about its centre: the layout is the same, the gaps are not.
+    # Give every box the same minimum size, grown about its centre so positions stay fixed.
     for node in d.nodes.values():
         if node.kind == "note":
             continue

@@ -1,17 +1,21 @@
-# What the benchmark compares, and therefore what decides MetaWrap2's defaults.
+# What the benchmark compares, and so what decides MetaWrap2's defaults.
 #
-# Every default in MetaWrap2 is chosen on measured quality, with measured cost reported beside it -
-# never on a quality-per-cost ratio. The ratio was tried, and it is dominated by whichever arm is
-# cheapest rather than by which recovers the most genomes: following it produced a default that
-# recovers fewer MAGs than metaWRAP 1 does. So the rule is that quality decides, and where cost has to
-# drive a choice it is a tier the user picks (`binning --preset`) rather than a ratio that picks for
-# them. A tool that recovers 3% more of the truth for four times the compute is still a reasonable
-# `--flag` and a poor default - but that is a judgement stated in the note, not a number that hides it.
+# Defaults are chosen on measured quality, with measured cost reported beside it, not on a
+# quality-per-cost ratio. The ratio favoured the cheapest arm over the one that recovers the most
+# genomes, and following it gave a default that recovers fewer MAGs than metaWRAP 1. Where cost
+# has to drive a choice, the user picks a tier (`binning --preset`). A tool that recovers 3% more
+# of the truth for four times the compute can be a reasonable `--flag` but a poor default; that
+# judgement is stated in the note.
 #
-# Each `[<comparison>]` names one decision to settle. Its variants are the options, run on the
-# same inputs with the same budget, so the only thing that differs between two rows of the results
-# TSV is the thing being compared. `default = true` marks the option MetaWrap2 currently ships, so
-# a results table always shows the incumbent next to its challengers.
+# Each `[<comparison>]` names one decision. Its variants are the options, run on the same inputs
+# with the same budget, so rows of the results TSV differ only in the thing compared.
+# `default = true` marks the option MetaWrap2 currently ships, so results show it next to the
+# alternatives.
+#
+# A variant can also be another pipeline: give it an `[<comparison>.variants.external]` table
+# instead of `args` (for example metaWRAP 1.3.0 in its own conda env). It runs on the same inputs
+# and samples, is measured the same way, and its bins go to the same scorer. See the example at the
+# bottom of this file and `docs/benchmarks.md`.
 
 schema = 1
 
@@ -20,9 +24,9 @@ schema = 1
 module = "read_qc"
 question = "Which trimmer should `metawrap2 read_qc` use when not told?"
 metrics = ["reads_kept", "bases_kept", "q30_bases_kept"]
-# Host removal and both FastQC reports are off for every variant: they are the same work whichever
-# trimmer ran, and leaving them on would bury the difference under several minutes of identical
-# cost. The synthetic benchmark datasets have no host reads to remove in the first place.
+# Host removal and both FastQC reports are off for every variant: they are the same work for every
+# trimmer and would add several minutes of identical cost. The synthetic datasets have no host
+# reads anyway.
 common_args = ["--skip-bmtagger", "--skip-pre-qc-report", "--skip-post-qc-report"]
 
 [[trimmer.variants]]
@@ -66,12 +70,11 @@ that settles it - a default that needs 140 GB is not a default."""
 [binner_set]
 module = "binning"
 question = "Which binners should run by default, given each one costs a full pass over the reads?"
-# gunc_pass_fraction is here despite being the expensive one - 3.2 to 5.7 cpu-hours per bin set,
-# mostly diamond - because without it this comparison cannot answer its own question. AMBER's
-# precision is bp-weighted, so a bin that is 95% one genome and 5% another costs almost nothing:
-# metabat2_maxbin2 and metabat2_concoct differ by 1.3 points of AMBER purity and by 2.8-fold in
-# chimeric bins, and ranking the arms on AMBER alone picked the wrong one. Scoring skips any bin set
-# whose report is already there, so the cost is paid once per set rather than once per score.
+# gunc_pass_fraction is included despite its cost (3.2 to 5.7 cpu-hours per bin set, mostly
+# diamond). AMBER's precision is bp-weighted, so a bin that is 95% one genome and 5% another loses
+# almost nothing: metabat2_maxbin2 and metabat2_concoct differ by 1.3 points of AMBER purity but
+# 2.8-fold in chimeric bins, and ranking on AMBER alone picked the wrong arm. Scoring skips any bin
+# set whose GUNC report already exists, so the cost is paid once per set.
 metrics = [
     "bins_near_complete",
     "bins_high_quality",
@@ -152,7 +155,7 @@ classical one rather than joining it."""
 [[binner_set.variants]]
 name = "vamb"
 args = ["--vamb"]
-note = """the other learned binner, and a genuinely different bet from SemiBin2's: a variational \
+note = """the other learned binner, with a different model from SemiBin2's: a variational \
 autoencoder over composition and abundance jointly, where SemiBin2 contrastively pretrains on \
 composition and treats abundance as a feature. Run alone for the same reason - what it has to \
 justify is its training time, since it reads the BAMs that were going to be produced anyway. VAMB \
@@ -178,27 +181,24 @@ args = ["--metabat2", "--comebin"]
 note = """the ensemble arm, comparable to metabat2_semibin2 and metabat2_vamb because all three cost one alignment pass plus one network. If COMEBin's internal bin selection already does what bin_refinement would do, this arm gains less from refinement than the others and that difference is the thing worth measuring."""
 
 # --- GPU arms -------------------------------------------------------------------------------
-# The three learned binners above all ran on the CPU, deliberately: a default chosen on an
-# accelerator is a default chosen on hardware most people running a metagenomics pipeline do not
-# have. These arms measure what that decision costs, which turned out to be the largest single
-# number in this comparison - COMEBin on CPU passed 280 cpu-hours on three samples
-# without finishing, against 7.1 for metaBAT2 and MaxBin2 together.
+# The three learned binners above ran on the CPU, because most users of a metagenomics pipeline
+# do not have a GPU. These arms measure the cost of that choice: COMEBin on CPU passed 280
+# cpu-hours on three samples without finishing, against 7.1 for metaBAT2 and MaxBin2 together.
 #
-# They are separate variants rather than a re-measurement of the arms above, because they are not
-# comparable to them on cost: cpu_hours counts CPU, and a GPU arm's work has partly moved somewhere
-# cpu_hours does not look. Read them as "is this binner reachable at all on a machine with a GPU",
-# not as a cheaper version of the same number.
+# They are separate variants, not a re-measurement of the arms above, and are not comparable on
+# cost: cpu_hours counts only CPU time, and part of a GPU arm's work runs on the GPU. They answer
+# whether a binner can finish at all on a machine with a GPU.
 
 [[binner_set.variants]]
 name = "semibin2_gpu"
-args = ["--semibin2", "--device", "cuda"]
+args = ["--semibin2", "--device", "cuda", "--gpu-strict"]
 note = """SemiBin2 with its training on the GPU. Measured 2026-10-03: 17.3 cpu-hours against the CPU \
 arm's 85.5, a 4.9x saving, and 41 minutes of wall time against 82. Its CPU arm's cost is almost all \
 training - the alignment pass is a small part - which is why the saving is this large."""
 
 [[binner_set.variants]]
 name = "vamb_gpu"
-args = ["--vamb", "--device", "cuda"]
+args = ["--vamb", "--device", "cuda", "--gpu-strict"]
 note = """VAMB with --cuda. Measured 2026-10-03: 4.9 cpu-hours against the CPU arm's 66.9, a 13.8x \
 saving and the largest of the three - 17 minutes of wall time against 49. Intended as the control for \
 the other two (if the GPU barely helped here, the saving elsewhere would be about model size rather \
@@ -210,7 +210,7 @@ ships 20 all-N records. binning.copy_assembly now drops them."""
 
 [[binner_set.variants]]
 name = "comebin_gpu"
-args = ["--comebin", "--device", "cuda"]
+args = ["--comebin", "--device", "cuda", "--gpu-strict"]
 note = """COMEBin on the GPU, which is how its authors run it - its own default device is plain \
 `cuda`, with no CPU fallback. This arm decided whether COMEBin is usable at all, and the answer is \
 yes, but only here. Measured 2026-10-03: 39.6 cpu-hours and 66 minutes of wall time, against a CPU \
@@ -224,8 +224,8 @@ with the consolidated arms."""
 
 [[binner_set.variants]]
 name = "metabat2_semibin2_comebin_gpu"
-args = ["--metabat2", "--semibin2", "--comebin", "--device", "cuda"]
-note = """The three-binner ensemble, and the `--preset slow` tier: 183 bins at 70/10, 177 of them \
+args = ["--metabat2", "--semibin2", "--comebin", "--device", "cuda", "--gpu-strict"]
+note = """The three-binner ensemble, and the `--preset gpu` tier: 183 bins at 70/10, 177 of them \
 non-chimeric by GUNC, for 52.8 cpu-hours on a GPU.
 
 It was briefly dropped in favour of COMEBin alone, on a comparison against a wrong number, and was \
@@ -234,7 +234,7 @@ is also the reason it is the tier to reach for on a dataset nothing here has mea
 
 COMEBin alone had been credited with 158 clean MAGs - 178 HQ bins times an 88.8% GUNC pass rate. GUNC had \
 run over all 376 bins COMEBin emits, 198 of which never pass 70/10 and were never MAG candidates, so that \
-percentage was partly about bins nobody was counting. This arm's 96.7% was undiluted, its GUNC having run \
+percentage partly covered bins that were not counted as MAGs. This arm's 96.7% was undiluted, its GUNC having run \
 on an already-consolidated 183-bin set, so the two percentages were never comparable. Counted per bin, 176 \
 of COMEBin's 178 HQ bins pass GUNC: 98.9%, the cleanest set measured here.
 
@@ -243,7 +243,7 @@ tie. That tie is why this comparison alone could not settle the tier, and the en
 did: on real per-sample assemblies the trio returns 64 high-quality and 60 clean MAGs for 120.7 \
 cpu-hours and 2.36 gpu-hours, against COMEBin alone at 61 and 57 for 80.9 and 1.73. Ensembles help \
 more on a fragmented self-assembly than on a gold one, which is the general lesson here and the reason \
-a binner comparison run only on gold assemblies understates them. `--preset slow` is \
+a binner comparison run only on gold assemblies understates them. `--preset gpu` is \
 metaBAT2+SemiBin2+COMEBin.
 
 metaBAT2 is the third member on cost and cleanliness rather than on the union: the best trio by clean-MAG \
@@ -253,27 +253,26 @@ cleaner set. The arm stays here because the question recurs with every new binne
 "does consolidating a strong binner with weaker ones still pay"."""
 
 # --------------------------------------------------------------------------------------------
-# Multi-split binning: bin the concatenated catalogue of a cohort, then split the clusters back out
-# per sample. Söding's analysis reports 19% more bins and 79% more high-quality bins from splitting
-# the embedding space by sample, and nf-core/mag has the mode; this is the cheap half of testing it
-# here, because it is a re-bin rather than a re-assembly.
+# Multi-split binning: bin the concatenated catalogue of a cohort, then split the clusters back
+# out per sample. Söding's analysis reports 19% more bins and 79% more high-quality bins from
+# splitting the embedding space by sample, and nf-core/mag has the mode. Testing it needs only a
+# re-bin, not a re-assembly.
 #
-# Both variants bin the *same* sequence - the three-sample concatenated catalogue, passed with
-# --assembly - and differ only in whether the resulting clusters are split by their sample prefix.
-# That is the only way to isolate the splitting: a per-sample-assembly arm bins different sequence,
-# so it belongs in the cohort benchmark rather than in this comparison, and B5 arm c is the row to
-# read it against.
+# Both variants bin the same sequence (the three-sample concatenated catalogue, passed with
+# --assembly) and differ only in whether the clusters are split by sample prefix. A
+# per-sample-assembly arm bins different sequence, so it belongs in the cohort benchmark; compare
+# against B5 arm c.
 #
-# No AMBER metrics. The truth table is written against CAMI2's pooled gold assembly and these are
-# self-assembled contigs renamed with a sample prefix, so AMBER would score nothing; CheckM2 tiers
-# and GUNC are what the cohort benchmark uses for the same reason.
+# No AMBER metrics: the truth table is written against CAMI2's pooled gold assembly, and these are
+# self-assembled contigs renamed with a sample prefix, so AMBER would score nothing. CheckM2 tiers
+# and GUNC are used, as in the cohort benchmark.
 [multisplit]
 module = "binning"
 question = "Does splitting a concatenated-catalogue bin set by sample beat leaving it whole?"
 metrics = ["bins_near_complete", "bins_high_quality", "gunc_pass_fraction"]
-# metaBAT2 + MaxBin2, which is what B5's cohort arms used, so the quality numbers here can be read
-# against arm c's row. Neither binner splits natively, so this exercises the post-hoc path in
-# metawrap2.binsplit rather than SemiBin2's or VAMB's own.
+# metaBAT2 + MaxBin2, as in B5's cohort arms, so the quality numbers can be compared with arm c.
+# Neither binner splits natively, so this uses the post-hoc split in metawrap2.binsplit instead of
+# SemiBin2's or VAMB's own.
 common_args = ["--metabat2", "--maxbin2"]
 
 [[multisplit.variants]]
@@ -313,11 +312,10 @@ bins a catalogue, and binning a catalogue is not the better route on this data."
 [aligner]
 module = "binning"
 question = "Which aligner should measure coverage, given no binner ever reads the alignment?"
-# Bin metrics, not alignment metrics, and that is the whole point. None of the three binners reads
-# a BAM - they read a depth table - so an aligner is an implementation detail of a coverage
-# estimator, and the only place a depth difference can be shown to matter is in the bins. Ranking
-# on agreement with bwa would rank candidates on resembling the incumbent, which is not the goal:
-# minimap2 won here while agreeing with bwa *less* closely than bwa-mem2 did.
+# Bin metrics, not alignment metrics. None of the three binners reads a BAM (they read a depth
+# table), so the aligner matters only through the bins. Ranking on agreement with bwa would favour
+# candidates that resemble the incumbent: minimap2 won here while agreeing with bwa less closely
+# than bwa-mem2 did.
 metrics = ["bins_near_complete", "bins_high_quality", "amber_f1_bp", "amber_ari_bp"]
 
 [[aligner.variants]]
@@ -352,9 +350,9 @@ metrics = ["bins_near_complete", "bins_high_quality", "amber_f1_bp"]
 name = "c70_x10"
 args = ["-c", "70", "-x", "10"]
 default = true
-note = """what bin_refinement actually ships (DEFAULT_MIN_COMPLETION = 70). This marker used to sit \
-on c50_x10, which no module default has ever matched - the one thing `default = true` exists to \
-prevent, since a results table would have shown the incumbent on a row nobody runs."""
+note = """the bin_refinement default (DEFAULT_MIN_COMPLETION = 70). This marker used to sit \
+on c50_x10, which no module default has matched. `default = true` marks the module default, so \
+a results table would have labelled a configuration no run uses as the default."""
 
 [[refinement_completeness.variants]]
 name = "c50_x10"
@@ -373,12 +371,11 @@ note = "stricter contamination; fewer bins, and the question is whether the ones
 [consolidator]
 module = "bin_refinement"
 question = "Is hybridising every bin-set combination worth what it costs over DAS_Tool?"
-# The accuracy metrics plus the cost, because this comparison is almost entirely about cost. The
-# two routes do the same job from opposite directions: MetaWrap2 builds every combination of the
-# input sets and asks CheckM which version of each bin is best, which means CheckM runs on 2^n-1
-# bin sets; DAS_Tool scores the input bins once on single-copy genes and aggregates. On a 3-binner
-# arm that is four Binning_refiner runs and four CheckM runs against one prodigal pass, so a tie on
-# accuracy is a win for DAS_Tool and a small loss for it may still be one.
+# The accuracy metrics plus the cost, since this comparison is mostly about cost. MetaWrap2 builds
+# every combination of the input sets and runs CheckM on all 2^n-1 of them to pick the best
+# version of each bin; DAS_Tool scores the input bins once on single-copy genes and aggregates. On
+# a 3-binner arm that is four Binning_refiner runs and four CheckM runs against one prodigal pass,
+# so DAS_Tool is preferable on a tie in accuracy and possibly on a small loss.
 metrics = ["bins_near_complete", "bins_high_quality", "amber_f1_bp"]
 
 [[consolidator.variants]]
@@ -416,10 +413,10 @@ DAS_Tool's R assembly reader and makes it blame 36,854 contigs."""
 [quantifier]
 module = "quant_bins"
 question = "Which quantifier estimates bin abundance best, and what does each one cost?"
-# Scale-free metrics, and they have to be: the tools report four different units (median contig
-# coverage, relative abundance %, k-mer sequence abundance %, length-weighted mean depth), so any
-# metric comparing absolute values would rank the units rather than the tools. Spearman is the one to
-# lean on - an abundance table is usually read for which bins are most abundant, which is an ordering.
+# Scale-free metrics, because the tools report four different units (median contig coverage,
+# relative abundance %, k-mer sequence abundance %, length-weighted mean depth); comparing
+# absolute values would rank the units. Spearman is the main one, since an abundance table is
+# usually read for which bins are most abundant.
 metrics = ["abundance_spearman", "abundance_pearson", "abundance_l1_similarity"]
 
 [[quantifier.variants]]
@@ -456,3 +453,44 @@ ahead of CoverM on both; Spearman 0.7802 puts it last on ordering, which is the 
 is a coherent split rather than noise - Pearson is dominated by the abundant bins and Spearman weights \
 every bin alike, so a method slightly noisy on low-coverage bins reads well on one and badly on the \
 other. Worth having for magnitudes when the table is already on disk; not a candidate for the default."""
+
+# ============================================================================================
+# EXAMPLE ONLY, commented out so no run picks it up. It shows an external arm: a variant that
+# runs another pipeline instead of MetaWrap2 under different flags.
+#
+# metaWRAP 1.3.0 is the baseline the benchmarks compare MetaWrap2 against. As an arm it runs on
+# the same inputs and samples as the native arms, and its cost is measured the same way.
+#
+# To use it, uncomment it and run `metawrap2 benchmark run cami2_gi binner_set --max-samples 3`.
+# `metawrap2 benchmark list` then shows the arm as external.
+#
+# [[binner_set.variants]]
+# name = "mw1"
+# note = """metaWRAP 1.3.0's own binning and refinement, the baseline in docs/benchmarks.md. Its
+# trio is metaBAT2 + MaxBin2 + CONCOCT, refined at 70/10 by CheckM 1.0.18. The arm's bins are
+# re-scored with CheckM2 like every other arm; its own CheckM 1 tables are not used."""
+#
+# [binner_set.variants.external]
+# # Run through `mamba run -n <env>`, the same wrapper as every MetaWrap2 tool. metaWRAP 1.3.0
+# # pins Python 2.7 and CheckM 1.0.18, so it needs its own env.
+# env = "metawrap-1.3.0"
+# version = "1.3.0"
+# # Or read the version from the env instead of pinning it, for a pipeline installed from a
+# # branch: version_command = "metawrap --version"
+#
+# # Where its bins are written, relative to {output}. The runner publishes this directory as
+# # `mw1_bins` for the scorer. Keep it one level below {output}: the scorer finds a
+# # `metawrap_<c>_<x>_bins` directly under an arm by itself, and would score the bins twice.
+# bins = "refine/metawrap_70_10_bins"
+#
+# # The command. Placeholders stand for the inputs the runner resolved: {assembly} is the
+# # gold-standard assembly the native arms bin, {reads} the selected samples' reads, {threads} the
+# # budget's thread grant. The command cannot name input paths of its own.
+# # Binning and refinement are two steps inside one `bash -c`, so they are one process tree and
+# # one rusage measurement.
+# command = """bash -c 'metawrap binning -o {output}/binning -t {threads} -a {assembly} \
+#   --metabat2 --maxbin2 --concoct {reads} \
+#   && metawrap bin_refinement -o {output}/refine -t {threads} -c 70 -x 10 \
+#   -A {output}/binning/metabat2_bins \
+#   -B {output}/binning/maxbin2_bins \
+#   -C {output}/binning/concoct_bins'"""

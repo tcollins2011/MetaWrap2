@@ -1,18 +1,15 @@
-"""MetaWrap2 diff_abundance: which features differ between groups of samples, tested compositionally.
+"""MetaWrap2 diff_abundance: features that differ between sample groups, tested compositionally.
 
-The pipeline used to stop at feature tables, and every user then wrote the same analysis script -
-usually with the same mistake in it. A relative abundance table is compositional: the values are
-sum-constrained, so one feature rising forces the others down, and an ordinary t-test or Wilcoxon on
-it tests the constraint rather than the biology.
+Relative abundance tables are compositional: values are sum-constrained, so one feature rising
+pushes the others down, and a t-test or Wilcoxon on them tests the constraint. The pipeline
+previously stopped at feature tables and left this analysis to users.
 
-So the test is ANCOM-BC, which scikit-bio ships natively. That is the whole reason this module can
-exist: every other implementation is an R package, and a statistics step that needs R is a statistics
-step most users will not run.
+The test is ANCOM-BC from scikit-bio, which avoids a dependency on R (other implementations are R
+packages).
 
-It takes the long tables `quantify_function` writes and a two-column sample sheet of groups. The
-design is ``feature ~ group`` and nothing more - covariates, repeated measures and interactions are
-the experiment, not a default, and a module that guessed at one would produce a number for any input
-including those where the comparison means nothing.
+Input is the long tables `quantify_function` writes and a two-column sample sheet of groups. The
+design is ``feature ~ group`` only; covariates, repeated measures and interactions depend on the
+experiment and are not guessed.
 """
 
 from __future__ import annotations
@@ -44,8 +41,8 @@ from ._common import (
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 #: One row per feature tested.
 RESULTS_TABLE = "differential_abundance" + TSV_SUFFIX
-#: The settings that produced them, because an adjusted p-value without its correction method and
-#: prevalence filter cannot be compared with another one.
+#: The settings used (correction method, prevalence filter, ...), needed to compare adjusted
+#: p-values between runs.
 SETTINGS_FILE = "differential_abundance_settings" + TSV_SUFFIX
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -85,8 +82,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--p-adjust",
         default=_da.P_ADJUST,
-        help="multiple-testing correction (default: %(default)s). Testing 573 modules or 28,000 "
-        "KOs at once needs one, and the choice changes which results survive",
+        help="multiple-testing correction (default: %(default)s), needed when testing e.g. 573 "
+        "modules or 28,000 KOs at once. The method chosen changes which results are significant",
     )
     p.add_argument(
         "--min-prevalence",
@@ -94,8 +91,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=_da.MIN_PREVALENCE,
         metavar="FRACTION",
         help="only test features present in at least this fraction of samples (default: "
-        "%(default)s, test everything). Filtering is not free: dropping a feature changes every "
-        "other feature's multiple-testing correction",
+        "%(default)s, test everything). Dropping a feature changes every other feature's "
+        "multiple-testing correction",
     )
     p.add_argument(
         "--biom",
@@ -122,8 +119,8 @@ def _read_long_table(path: str) -> Dict[str, Dict[str, float]]:
 def _read_groups(path: str) -> Dict[str, str]:
     """sample -> group, from a two-column TSV.
 
-    A header is required rather than sniffed: a file whose first line is data loses one sample
-    silently if the header is assumed, and loses nothing if it is required and absent.
+    A header with ``sample`` as its first column is required, so a data row is never taken for a
+    header and dropped.
     """
     groups: Dict[str, str] = {}
     with open(path) as fh:
@@ -133,8 +130,8 @@ def _read_groups(path: str) -> Dict[str, str]:
     header = [cell.strip().lower() for cell in rows[0]]
     if header[:1] != ["sample"]:
         error(
-            "%s needs a header whose first column is 'sample' (found %r). A header is required so "
-            "a data row is never mistaken for one" % (path, rows[0][:2])
+            "%s needs a header whose first column is 'sample' (found %r). The header is required "
+            "so that a data row is not read as a header" % (path, rows[0][:2])
         )
     for row in rows[1:]:
         if len(row) < 2 or not row[0].strip():
@@ -210,8 +207,7 @@ def main(argv: List[str]) -> int:
                 settings_writer.writerow([key, value])
 
         significant = [r for r in results if r.significant]
-        # The settings dict is deliberately open (it goes straight into a provenance file), so the
-        # one field read back for a message is narrowed here rather than widening the dict's type.
+        # The settings dict is untyped (it is written to a provenance file), so narrow this field.
         compared = used.get("groups")
         group_names = [str(g) for g in compared] if isinstance(compared, list) else []
         comm(

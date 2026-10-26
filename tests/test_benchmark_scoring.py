@@ -1,9 +1,7 @@
-"""Scoring and running: the tidy table, the parsers, and the ratio the defaults are decided on.
+"""Tests for benchmark scoring and running: the tidy table, the parsers, and the ranking.
 
-The arithmetic here is the whole basis for "MetaWrap2 picks defaults on accuracy per CPU-hour", so
-these tests are mostly about that claim being true of the code: that cost is summed the same way
-accuracy is, that a variant with no measured cost is not silently ranked first, and that the
-incumbent is visible in the table someone reads to make the decision.
+Checks that cost is aggregated the same way as accuracy, that a variant with no measured cost is
+not ranked first, and that the current default is marked in the table.
 """
 
 import json
@@ -33,9 +31,8 @@ CHECKM1 = "Bin Id\tMarker lineage\tCompleteness\tContamination\nbin_001\tk__Bact
 
 
 def test_quality_counts_use_the_community_thresholds(tmp_path):
-    """Both CheckM spellings are read; the two tools disagree, and a benchmark that knew one would
-    score nothing. A bin CheckM could not judge is skipped, because counting it as zero would make a
-    failed bin look like a bad one."""
+    """Both CheckM1 and CheckM2 column layouts are read. Bins with NA scores are skipped, so a
+    bin CheckM could not assess is not counted as a poor one."""
     path = tmp_path / "quality_report.tsv"
     path.write_text(CHECKM2 + "bin_004\tNA\tNA\n")
     counts = scoring.quality_counts(scoring.bin_quality(str(path)))
@@ -52,10 +49,9 @@ def test_quality_counts_use_the_community_thresholds(tmp_path):
 
 
 def test_ambers_own_column_names_are_the_ones_read(tmp_path):
-    """The prose headings ("F1 score (bp)") are on AMBER's HTML page; its TSV is snake_case.
+    """AMBER's TSV uses snake_case column names; the prose headings are only on its HTML page.
 
-    Reading only the prose spelling left a results.tsv that parsed to nothing at all, which the
-    scorer reported as "nothing to score" - a real run of a working tool, recorded as absent.
+    Reading the prose names parsed nothing, and the scorer reported "nothing to score".
     """
     path = tmp_path / "results.tsv"
     path.write_text(
@@ -78,11 +74,10 @@ def test_ambers_own_column_names_are_the_ones_read(tmp_path):
 
 
 def test_a_variant_that_scores_higher_for_far_more_compute_wins_the_ranking():
-    """This assertion used to run the other way, and that is the correction.
+    """Variants are ranked on quality alone; cost is reported but does not reorder the table.
 
-    Ranking on quality-per-cost put the cheap arm first and MetaWrap2 shipped it as a default - which
-    then recovered fewer MAGs end to end than the tool it replaces. Cost is for the reader to weigh
-    against their own budget, and for `--preset` to express; it does not get to reorder the table.
+    Ranking on quality per cost once made a cheaper variant the default, and it recovered fewer
+    MAGs end to end than the tool it replaced. Cost trade-offs are expressed through `--preset`.
     """
     rows = [
         row("incumbent", "amber_f1_bp", 0.80),
@@ -105,8 +100,8 @@ def test_a_variant_that_scores_higher_for_far_more_compute_wins_the_ranking():
     assert ranked[0].value == 10
     assert ranked[0].cost == 4.0
 
-    # A fraction is averaged, not summed: summing would rank by how many samples were measured.
-    # The cost side is still a total, because ten samples really do cost ten samples' CPU-hours.
+    # A fraction is averaged across samples, since a sum would depend on the sample count.
+    # Cost is still a total over samples.
     rows = [
         row("v", "amber_purity_bp", 0.9, sample="sample_0"),
         row("v", "amber_purity_bp", 0.7, sample="sample_1"),
@@ -120,12 +115,10 @@ def test_a_variant_that_scores_higher_for_far_more_compute_wins_the_ranking():
 
 
 def test_a_rescore_that_reads_a_different_file_replaces_the_old_number(tmp_path):
-    """A re-score can change *which* bin set is the variant's answer, not just re-read the same one.
+    """A re-score from a different source file replaces the earlier row instead of adding to it.
 
-    Fixing bin_dirs so a consolidated set one level down is found did exactly that, and because the
-    dedup key included the source file the stale row sat beside the new one and the two were summed:
-    COMEBin's 178 high-quality MAGs read as 356. Same dataset/comparison/variant/sample/metric is one
-    measurement whatever file it came from.
+    Rows are deduplicated on dataset/comparison/variant/sample/metric, not on the source file.
+    When the source file was part of the key, COMEBin's 178 high-quality MAGs were summed to 356.
     """
     rows = [
         scoring.Row("d", "c", "v", "bins_high_quality", 178.0, source="comebin_bins.stats.tsv"),
@@ -141,12 +134,10 @@ def test_a_rescore_that_reads_a_different_file_replaces_the_old_number(tmp_path)
 
 
 def test_a_failed_variant_is_not_scored_from_its_partial_output(tmp_path, capsys):
-    """The runner records a non-zero exit; scoring never read it.
+    """A variant with a non-zero exit in the run record is not scored.
 
-    A variant that died after its first binner wrote a directory still has bins on disk, so CheckM
-    and AMBER scored them and the number was written to the committed TSV - and because the runner
-    discards a failed variant's cost rows, the arm appeared with a quality value and cost
-    "unmeasured", which is also what a finished arm whose rusage was lost looks like.
+    A failed variant can leave partial bins on disk. Scoring them gave a quality value with cost
+    "unmeasured", which looked like a finished variant with missing rusage.
     """
     import json
 
@@ -192,7 +183,7 @@ def _comparison(name):
 
 
 def test_a_failing_variant_is_recorded_and_the_others_still_run(tmp_path, monkeypatch):
-    """One variant failing is a result about that variant; the rest are still worth having."""
+    """A failing variant is recorded and the remaining variants still run."""
     calls = []
 
     def fake(argv, **_kw):
@@ -218,14 +209,14 @@ def test_a_failing_variant_is_recorded_and_the_others_still_run(tmp_path, monkey
     assert len(calls) == 2
     variants = {r.variant for r in rows}
     assert "metabat2" in variants
-    # The failed variant contributes no cost rows, so it cannot be ranked as cheap-and-good.
+    # The failed variant contributes no cost rows, so it cannot rank as cheap.
     assert "maxbin2" not in variants
 
     with open(work / "binner_set.run.json") as fh:
         record = json.load(fh)
     assert record["variants"]["maxbin2"]["returncode"] == 1
     assert record["variants"]["metabat2"]["returncode"] == 0
-    # The grant is recorded next to the results, so a table can be read against what it was given.
+    # The resource grant is recorded with the results.
     assert "threads" in record["budget"]
 
 
@@ -258,11 +249,9 @@ def _inputs_for(tmp_path):
 
 
 def test_a_cohort_assembly_is_fed_one_concatenated_pair_not_a_comma_list(tmp_path):
-    """`assembly` takes one file per mate; a comma-separated list made it exit immediately.
+    """A co-assembly gets one concatenated file per mate, since `assembly` takes one file per mate.
 
-    This is the regression test for that: the runner built ``-1 a_1.fastq,b_1.fastq``, which the
-    module reported as "does not exist" in under a second, so both variants of the comparison
-    failed identically and the results table came out empty.
+    The runner used to pass ``-1 a_1.fastq,b_1.fastq``, which the module rejected as missing.
     """
     inputs = _inputs_for(tmp_path)
     work = tmp_path / "work"
@@ -271,7 +260,7 @@ def test_a_cohort_assembly_is_fed_one_concatenated_pair_not_a_comma_list(tmp_pat
     assert len(joined.pairs) == 1
     label, r1, r2 = joined.pairs[0]
     assert label == "coassembly"
-    # Every selected sample is in there, and the mates stay separated.
+    # Every selected sample is included, and the mates stay separate.
     for path, mate in ((r1, 1), (r2, 2)):
         with open(path) as fh:
             expected = "".join("@%s/%d\nACGT\n+\nIIII\n" % (s, mate) for s in ("a", "b", "c"))
@@ -283,7 +272,7 @@ def test_a_cohort_assembly_is_fed_one_concatenated_pair_not_a_comma_list(tmp_pat
     assert argv[argv.index("-1") + 1] == r1
     assert "," not in argv[argv.index("-1") + 1]
 
-    # More than one pair reaching build_argv is the bug itself, so it is refused rather than joined.
+    # build_argv refuses more than one pair instead of joining them.
     with pytest.raises(runner.RunnerError):
         runner.build_argv(
             _comparison("assembler"),

@@ -1,26 +1,20 @@
-"""Differential abundance over a feature table, done compositionally because the data is.
+"""Compositional differential abundance over a feature table, using ANCOM-BC.
 
-The pipeline stops at feature tables and every user then writes the same analysis script. The script
-is usually wrong in the same way: a relative abundance table is **compositional** - the values are
-constrained to sum to one, so one feature rising forces every other down - and a t-test or Wilcoxon
-on it answers a question about the constraint rather than about the biology. That is not a subtlety
-nobody acts on; it is why the field moved to CoDA methods.
+A relative abundance table is compositional: values sum to one, so one feature rising forces the
+others down. A t-test or Wilcoxon on such data tests the constraint as much as the biology, which is
+why compositional (CoDA) methods are used instead.
 
-So the default here is **ANCOM-BC**, which scikit-bio ships natively as of 0.7.1. That matters more
-than it sounds: the alternative implementations are R packages, and a pipeline that needs R for its
-statistics step does not get a statistics step. There is no new language, no new container, and the
-dependency is one already in the scientific-Python stack.
+The default is ANCOM-BC from scikit-bio (>= 0.7.1). The other implementations are R packages; this
+one needs no R and no extra container.
 
-What this file deliberately does not do:
+Scope:
 
-* **It does not pick a formula for you.** ANCOM-BC takes a design, and the design is the experiment.
-  A module that silently compared "the first two groups it found" would produce a number for any
-  input, including inputs where the comparison is meaningless.
-* **It does not hide the multiple-testing correction.** 573 modules or 28,000 KOs tested at once
-  need one, the choice changes which results survive, and it is recorded per row.
-* **It does not drop features quietly.** A feature absent from most samples has no power and will
-  not reach significance, but removing it changes every other feature's correction. The prevalence
-  filter is explicit, recorded, and off by default.
+* **No design is inferred.** The caller supplies the grouping. Comparing whichever groups happen to
+  be present would give a number for any input, including meaningless comparisons.
+* **The multiple-testing correction is recorded per row.** Testing 573 modules or 28,000 KOs at once
+  needs one, and the method changes which results pass.
+* **The prevalence filter is explicit and off by default.** Rare features have little power, but
+  removing them changes the correction for every other feature.
 """
 
 from __future__ import annotations
@@ -28,21 +22,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Tuple
 
-#: Multiple-testing correction. Holm rather than Benjamini-Hochberg as the default because it
-#: controls the family-wise error rate rather than the false discovery rate, and a resistome or
-#: metabolic claim is usually reported one feature at a time rather than as a set - which is the
-#: situation FWER control is for. Both are available; which one ran is in every row.
+#: Multiple-testing correction. Holm (family-wise error rate) is the default instead of
+#: Benjamini-Hochberg (false discovery rate) because resistome or metabolic findings are usually
+#: reported one feature at a time. Both are available; the method used is in every row.
 P_ADJUST = "holm"
-#: Significance threshold, passed through rather than applied here: the test reports adjusted
-#: p-values and the caller decides. Recorded so a table says what it was filtered at.
+#: Significance threshold passed to ANCOM-BC for its `Signif` column. Recorded in the output.
 ALPHA = 0.05
-#: Minimum fraction of samples a feature must appear in to be tested. 0 keeps everything, which is
-#: the default - see the module docstring on why filtering is not free.
+#: Minimum fraction of samples a feature must appear in to be tested. The default 0 keeps every
+#: feature (see the module docstring).
 MIN_PREVALENCE = 0.0
 
 
 class StatsUnavailable(RuntimeError):
-    """Raised when scikit-bio is missing, with what to do about it."""
+    """Raised when scikit-bio is missing; the message says how to install it."""
 
 
 def _require_skbio():
@@ -90,12 +82,11 @@ def to_frame(
     values: Mapping[str, Mapping[str, float]],
     min_prevalence: float = MIN_PREVALENCE,
 ):
-    """A samples x features DataFrame, which is the orientation ANCOM-BC takes.
+    """Return a samples x features DataFrame (the orientation ANCOM-BC takes) and the pseudo-count.
 
-    Zeros are replaced with a pseudo-count, because ANCOM-BC needs strictly positive values and a
-    log-ratio of zero is undefined. Half the smallest observed non-zero value is the conventional
-    choice and is recorded in the output: a pseudo-count is an assumption, and a different one gives
-    different answers for the sparsest features.
+    Zeros are replaced with a pseudo-count because ANCOM-BC needs strictly positive values. Half the
+    smallest observed non-zero value is used, the conventional choice. It is recorded in the output
+    because a different pseudo-count changes the results for the sparsest features.
     """
     import pandas as pd
 
@@ -122,13 +113,11 @@ def test_groups(
 ) -> Tuple[List[Result], Dict[str, object]]:
     """Test every feature for a difference between sample groups.
 
-    *groups* maps sample to group label; the design is ``feature ~ group``, which is the simplest
-    thing ANCOM-BC can be asked and the only one this function offers. Anything more - covariates,
-    repeated measures, interactions - is a study design, and a pipeline that guessed at one would be
-    inventing the experiment.
+    *groups* maps sample to group label. The design is ``feature ~ group``; covariates, repeated
+    measures and interactions are not supported.
 
-    Returns the per-feature results and the settings that produced them, because an adjusted
-    p-value without its correction method and its prevalence filter cannot be compared with another.
+    Returns the per-feature results and the settings used (correction method, prevalence filter,
+    pseudo-count), which are needed to compare adjusted p-values across runs.
     """
     ancombc = _require_skbio()
     import pandas as pd
@@ -150,10 +139,8 @@ def test_groups(
 
     output = ancombc(frame, metadata, "group", alpha=alpha, p_adjust=p_adjust)
     # scikit-bio 0.7.4 returns an ANCOMBCResult whose .result is a DataFrame indexed by
-    # (FeatureID, Covariate), with the covariate for a two-level factor named after the non-reference
-    # level - "group[T.B]", which is not knowable before the call. So the term is discovered from
-    # the index rather than assumed, and the Intercept row is dropped: it tests whether a feature's
-    # abundance differs from zero, which is not a question anyone asked.
+    # (FeatureID, Covariate). The covariate of a two-level factor is named after the non-reference
+    # level ("group[T.B]"), so the term is read from the index. The Intercept row is dropped.
     table = output.result
     covariates = [
         name for name in table.index.get_level_values("Covariate").unique() if name != "Intercept"
@@ -211,12 +198,11 @@ RESULT_COLUMNS: Tuple[str, ...] = (
     "caveat",
 )
 
-#: On every row. The reason the default is a CoDA method rather than a t-test, stated where a reader
-#: of the output will see it.
+#: Written on every row: why a compositional method is used instead of a t-test.
 COMPOSITIONAL_CAVEAT = (
-    "relative abundances are compositional: the values are sum-constrained, so one feature rising "
-    "forces others down and an ordinary t-test or Wilcoxon tests the constraint rather than the "
-    "biology. ANCOM-BC estimates and corrects the sampling-fraction bias instead"
+    "relative abundances are compositional: they sum to a constant, so one feature rising pushes "
+    "others down and a t-test or Wilcoxon test is biased by that constraint. ANCOM-BC estimates "
+    "and corrects the sampling-fraction bias"
 )
 
 

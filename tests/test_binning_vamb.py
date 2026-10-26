@@ -1,11 +1,12 @@
-"""binning --vamb: the command it builds, and the bins it hands over.
+"""Tests for binning --vamb: the command line and the bins it produces.
 
-Three of VAMB's defaults are wrong for this module in ways that do not look like failures, and each
-has a test here. ``--minfasta`` has no default at all, so without it VAMB writes a cluster TSV and
-zero FASTA files - a binner that exited 0 and found nothing. ``-o`` defaults to the separator ``C``,
-which splits every bin apart on a letter that appears mid-identifier in ordinary contig names. And
-VAMB refuses to run into an existing ``--outdir``, so a ``--resume`` after an interrupted VAMB would
-fail on its own leftovers rather than on anything real.
+Three VAMB defaults do not suit this module:
+
+* ``--minfasta`` has no default, and without it VAMB writes a cluster TSV and no FASTA files.
+* ``-o`` defaults to the separator ``C``, which splits bins on a letter found inside ordinary
+  contig names.
+* VAMB refuses an existing ``--outdir``, so ``--resume`` after an interrupted VAMB would fail on its
+  leftovers.
 """
 
 import os
@@ -23,10 +24,9 @@ class _Args:
 
 
 def _capture(monkeypatch, work, names=()):
-    """Stub run() to write *names* where VAMB would, and record the calls it was asked to make.
+    """Stub run() to write *names* where VAMB would, and record the calls.
 
-    The bins have to be created *by* the stub rather than before it: VAMB creates its own --outdir,
-    and the module clears any leftover one first, so anything staged in advance is correctly gone.
+    The stub creates the bins because the module clears any existing --outdir before running VAMB.
     """
     calls = []
     produced = os.path.join(str(work), "vamb_out", binning.VAMB_BIN_DIR)
@@ -51,8 +51,8 @@ def _work(tmp_path):
 
 def test_the_command_asks_for_fastas_and_turns_binsplitting_off(tmp_path, monkeypatch):
     work = _work(tmp_path)
-    # VAMB raises FileExistsError on its own --outdir, which would break every --resume; the
-    # checkpoint has already decided this stage is to be redone, so the leftovers are cleared.
+    # VAMB raises FileExistsError on an existing --outdir. The checkpoint has marked this stage
+    # for a rerun, so the leftovers are cleared.
     (work / "vamb_out").mkdir()
     stale = work / "vamb_out" / "stale.log"
     stale.write_text("from the attempt that died")
@@ -62,13 +62,13 @@ def test_the_command_asks_for_fastas_and_turns_binsplitting_off(tmp_path, monkey
     assert os.listdir(tmp_path / "out" / "vamb_bins") == [bin_filename(1)]
 
     cmd = calls[0][0]
-    # The flag with no default: without it there are no FASTA files to adopt, only a cluster TSV.
+    # No default; without it VAMB writes only a cluster TSV.
     assert "--minfasta %d" % binning.VAMB_MIN_FASTA in cmd
-    # VAMB's separator default is "C", and MetaWrap2's assemblies carry no sample prefix to split.
+    # VAMB's default separator is "C"; MetaWrap2's assemblies have no sample prefix to split on.
     assert "-o ''" in cmd
     assert "--seed %d" % binning.VAMB_SEED in cmd
-    # It reads the BAM directory itself rather than a depth table, so work/ is handed over whole.
+    # VAMB reads the BAM directory directly instead of a depth table.
     assert "--bamdir %s" % work in cmd
-    # No --cuda: unlike SemiBin2, VAMB stays on the CPU unless asked, which is what the cost model
-    # that picks MetaWrap2's defaults needs.
+    # No --cuda: VAMB stays on the CPU unless asked, which the cost model behind the defaults
+    # assumes.
     assert "--cuda" not in cmd

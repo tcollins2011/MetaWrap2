@@ -1,9 +1,8 @@
-"""The contig depth table, computed here rather than by jgi_summarize_bam_contig_depths.
+"""The contig depth table, computed here instead of by jgi_summarize_bam_contig_depths.
 
-These cover the arithmetic and the two places it went wrong when checked against the tool it replaced.
-The agreement itself is not testable without real BAMs - it was verified separately, over all 210,632
-contigs of the CAMI2 GI assembly, at Pearson 0.999 on the means and 0.995 on the variances - so what is
-pinned here is the behaviour that agreement depends on.
+These tests cover the arithmetic and the two defects found in comparison with jgi. Agreement
+needs real BAMs and was verified separately over all 210,632 contigs of the CAMI2 GI assembly
+(Pearson 0.999 on means, 0.995 on variances).
 """
 
 from __future__ import annotations
@@ -20,11 +19,11 @@ def _lines(path):
 
 
 def test_a_contig_no_sample_covered_divides_by_its_length_not_by_one(tmp_path):
-    """The bug the comparison against jgi caught, pinned.
+    """A contig with no reads in some samples is divided by its length, not by one.
 
-    ``samtools depth -a`` says nothing at all about a reference with no reads, so a divisor counted
-    from emitted positions was 1 for such a contig - and any sample that *did* cover it then reported
-    the sum over the whole contig as its depth. One 4 Mbp contig came out at 1.6 million.
+    ``samtools depth -a`` emits nothing for a reference with no reads, so a divisor counted from
+    emitted positions was 1, and a sample that did cover the contig reported the sum over the
+    contig as its depth (1.6 million for a 4 Mbp contig).
     """
     widths = depth.trimmed_widths(np.array([4000000]), 75)
     total = np.array([[4000000.0]])  # a sample that does cover it, depth ~1
@@ -38,11 +37,9 @@ def test_a_contig_no_sample_covered_divides_by_its_length_not_by_one(tmp_path):
 def test_a_chatty_samtools_does_not_deadlock_the_depth_stream(tmp_path, monkeypatch):
     """More stderr than a pipe buffer holds, while stdout is still being read.
 
-    Both stderrs used to be left unread until after the whole depth stream had been consumed. These
-    are per-read tools over hundreds of millions of reads, so one warning per record fills the
-    64 KiB pipe buffer; samtools then blocks on the write, stops producing rows, and the read of its
-    stdout blocks forever. The run hung with no output and no timeout, which is why this uses a
-    real subprocess rather than a fake: the deadlock is in the pipes, not in the logic.
+    Both stderr streams used to be read only after the depth stream was consumed. With one warning
+    per read, the 64 KiB pipe buffer fills, samtools blocks on the write and the stdout read blocks
+    forever. Uses a real subprocess, since the deadlock is in the pipes.
     """
     import sys
 
@@ -74,5 +71,5 @@ def test_a_chatty_samtools_does_not_deadlock_the_depth_stream(tmp_path, monkeypa
         total,
         total_sq,
     )
-    # It returned at all, and read every row rather than stopping where the buffer filled.
+    # It returned, and read every row past the point where the buffer would have filled.
     assert total[0, 0] == 300.0

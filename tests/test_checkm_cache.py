@@ -1,14 +1,14 @@
-"""Making consolidation cheaper without changing a single reported number.
+"""CheckM caching and size pre-filtering in bin_refinement leave the reported numbers unchanged.
 
-bin_refinement scores 2^n-1 hybrid bin sets and CheckM is the whole cost of it. Two measured
-redundancies, both removable:
+bin_refinement scores 2^n-1 hybrid bin sets, and CheckM is nearly all of the cost. Two measured
+redundancies:
 
-* 32% of the bins across the seven sets of a three-binner run are the *same bin* scored again - same
-  contigs, so necessarily the same completeness.
-* 0.3% of bins hold 5.7% of all the sequence, and they are the ones whose size already rules them out.
-  metaBAT2's unbinnable remainder reaches 159 Mb; no prokaryotic genome is.
+* 32% of the bins across the seven sets of a three-binner run are the same bin (same contigs)
+  scored again.
+* 0.3% of bins hold 5.7% of all sequence and are already too large to be a genome; metaBAT2's
+  unbinnable remainder reaches 159 Mb.
 
-Both are only worth having if the answer is unchanged, which is what most of this file checks.
+Most of this file checks that the results are the same with both optimisations.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def _fake_run_checkm(monkeypatch, scored):
 
 
 def test_the_stats_are_identical_whether_or_not_the_cache_was_used(tmp_path, monkeypatch):
-    """The whole point: faster, not different."""
+    """Stats are identical with and without the cache."""
     scored = _fake_run_checkm(monkeypatch, [])
 
     def build(root):
@@ -71,13 +71,13 @@ def test_the_stats_are_identical_whether_or_not_the_cache_was_used(tmp_path, mon
             return sorted(fh.read().splitlines())
 
     assert rows(cold) == rows(warm), "a cached run must report exactly what a cold one does"
-    # And the warm run really was served from the cache: CheckM saw each distinct bin once per cache.
+    # The warm run was served from the cache: CheckM saw each distinct bin once per cache.
     assert warm_cache.hits == 2 and warm_cache.misses == 2
     assert len(scored) == 4, "two for the cold run, two to prime the warm cache, none for warm"
 
 
 def test_an_implausible_bin_is_recorded_as_failing_rather_than_omitted(tmp_path, monkeypatch):
-    """Omitting it would leave downstream code guessing; 0/100 can never win a comparison."""
+    """An out-of-bounds bin is recorded as 0/100 rather than omitted, so it never wins."""
     scored = _fake_run_checkm(monkeypatch, [])
     d = tmp_path / "set"
     d.mkdir()
@@ -94,9 +94,9 @@ def test_an_implausible_bin_is_recorded_as_failing_rather_than_omitted(tmp_path,
     row = next(ln.split("\t") for ln in text.splitlines() if ln.startswith("huge"))
     assert float(row[1]) == 0.0 and float(row[2]) == 100.0
 
-    # The bounds are calibrated against the real limits of 4,002 passing bins - smallest 0.99 Mb,
-    # largest 6.66 Mb, worst N50 2,025 bp - so those extremes have to survive the filter or it is
-    # losing genomes. There is no N50 floor: fragmentation is not evidence of a chimera.
+    # The bounds are calibrated against 4,002 passing bins (smallest 0.99 Mb, largest 6.66 Mb,
+    # worst N50 2,025 bp), so those extremes must pass. There is no N50 floor, because
+    # fragmentation does not indicate a chimera.
     for size, n50 in (
         (990_000, 15_000),
         (6_660_000, 6_530_000),

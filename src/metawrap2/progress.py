@@ -1,19 +1,15 @@
 """Progress bars for MetaWrap2's own long-running loops.
 
-MetaWrap2 spends most of its wall time inside external tools, which print their own progress.
-The loops worth instrumenting are the ones MetaWrap2 runs itself and that used to look like a
-hang: streaming millions of reads through a filter, annotating bins one at a time, reassembling
-each bin with SPAdes, downloading hundreds of files.
+External tools print their own progress. These bars cover the long loops MetaWrap2 runs itself:
+filtering reads, annotating bins one at a time, reassembling each bin with SPAdes, downloading
+many files.
 
-:func:`bar` wraps ``tqdm`` and degrades gracefully:
+:func:`bar` wraps ``tqdm``:
 
-* if tqdm is not installed, it returns the iterable unchanged, so tqdm stays an optional
-  dependency and nothing breaks without it;
-* bars are written to **stderr**, never stdout, because several modules redirect a command's
-  stdout into a data file and a progress bar in a FASTA would corrupt it;
-* bars are disabled automatically when stderr is not a terminal (a log file, a pipe, a CI
-  run), so run.stderr does not fill up with thousands of redraw lines. ``METAWRAP2_PROGRESS``
-  overrides the decision either way (``1``/``0``).
+* without tqdm installed it returns the iterable unchanged (tqdm is optional);
+* bars go to stderr, because several modules redirect a command's stdout into a data file;
+* bars are off when stderr is not a terminal (log file, pipe, CI), so run.stderr does not fill
+  with redraw lines. ``METAWRAP2_PROGRESS`` (``1``/``0``) overrides this.
 """
 
 from __future__ import annotations
@@ -54,7 +50,7 @@ def bar(
     """Wrap *iterable* in a tqdm progress bar, or return it unchanged if unavailable.
 
     ``total`` may be omitted for a streaming source; tqdm then shows a running count and rate
-    rather than a percentage, which is still the useful signal for "is this moving?".
+    instead of a percentage.
     """
     if not enabled():
         return iterable

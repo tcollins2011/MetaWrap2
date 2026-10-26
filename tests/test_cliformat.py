@@ -1,8 +1,6 @@
-"""The one help format every command wears, and the argument types that state their own range.
+"""Tests for the shared help formatter and the argument types that state their own range.
 
-The point of all of this is that a default appears in exactly one place. Two dozen entry points used to
-describe their defaults by hand, with the failure mode you would expect: the code changes and the help
-string keeps quoting the old number.
+Defaults are written in one place so help text cannot drift from the code.
 """
 
 from __future__ import annotations
@@ -11,7 +9,7 @@ import pytest
 
 
 def test_every_shipped_command_renders_its_help():
-    """A formatter that raises on one parser would only be found when someone typed --help."""
+    """Every module and command renders --help and exits 0."""
     import importlib
     import pkgutil
 

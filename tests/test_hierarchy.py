@@ -1,17 +1,13 @@
-"""The functional hierarchy, and the two ways of weighting it.
+"""The KEGG BRITE functional hierarchy and its weighting.
 
-What has to hold for a percentage over this hierarchy to mean anything:
+Checked:
 
-* **Totals are conserved.** A KO belongs to several pathways - 12,025 of 28,545 do - so the obvious
-  implementation counts a gene once per pathway and produces percentages that add to more than 100.
-  Every level of the output has to sum to the input total.
-* **A sample is not the average of its genomes.** The per-sample distribution is weighted by
-  abundance, so a rare genome with unusual metabolism contributes little. Getting this wrong by
-  averaging per-genome percentages would overstate rare organisms, which is the opposite of what a
-  community profile is for.
-* **Nothing is silently dropped.** KOs KEGG does not place, and the branches of BRITE that are
-  classification scaffolding rather than biology, stay in the table and are flagged. Dropping them
-  makes every percentage beside them an overestimate.
+* **Totals are conserved.** 12,025 of 28,545 KOs are on more than one pathway. A KO's weight is
+  split across its pathways, so every level sums to the input total.
+* **Sample profiles are abundance-weighted.** A rare genome contributes in proportion to its
+  abundance; averaging per-genome percentages would overstate rare organisms.
+* **Nothing is dropped.** KOs KEGG does not place, and BRITE's classification-only branches, stay
+  in the table and are flagged. Dropping them would inflate the other percentages.
 """
 
 from __future__ import annotations
@@ -94,7 +90,7 @@ def test_the_projection_reads_keggs_htext(brite, tree):
 
 
 def test_every_row_names_the_download_it_came_from(tree):
-    """BRITE is revised, so a percentage is only comparable with one over the same hierarchy."""
+    """Every row records the hierarchy snapshot, since BRITE is revised between downloads."""
     assert tree.snapshot.startswith("ko00001 ") and "md5:" in tree.snapshot
     rows = H.hierarchy_rows("genome", "b", H.distribute({"K00844": 1.0}, tree), tree)
     assert {r["hierarchy_snapshot"] for r in rows} == {tree.snapshot}
@@ -104,7 +100,7 @@ def test_every_row_names_the_download_it_came_from(tree):
 
 
 def test_a_kos_weight_is_split_across_its_paths_not_counted_on_each(tree):
-    """The whole reason percentages here add up."""
+    """A KO's weight is split across its pathways, so totals are conserved at every depth."""
     fake = _fake({"K1": (("Metabolism", "B1", "P1"), ("Metabolism", "B2", "P2"))})
     distribution = H.distribute({"K1": 1.0}, fake)
     assert sum(distribution.values()) == pytest.approx(1.0)
@@ -120,9 +116,9 @@ def test_a_kos_weight_is_split_across_its_paths_not_counted_on_each(tree):
 
 
 def test_a_sample_profile_weights_each_genome_by_its_abundance():
-    """Not the average of per-genome profiles: a rare genome contributes in proportion to its cells.
+    """The sample profile weights each genome by abundance.
 
-    Genome A is 10x as abundant as B, so the community's KO profile looks like A's.
+    Genome A is 10x as abundant as B, so the community's KO profile is dominated by A's.
     """
     per_genome = {"A": {"K1": 10.0}, "B": {"K2": 10.0}}
     profile = H.weighted_sample_profile(per_genome, {"A": 0.9, "B": 0.09})
@@ -135,17 +131,17 @@ def test_a_sample_profile_weights_each_genome_by_its_abundance():
 # ── weighting by gene abundance rather than by MAG abundance ─────────────────────────────────
 
 
-# ── weighting by contig depth: the route taken when no bins are passed ───────────────────────
+# ── weighting by contig depth (no bins passed) ───────────────────────────────────────────────
 
 
 # ── recovering the contig from the gene id ───────────────────────────────────────────────────
 
 
 def test_the_contig_is_split_off_at_the_last_underscore_not_the_first():
-    """MEGAHIT names contigs with five underscores in them, so the first underscore is `k141`.
+    """The contig id is split off at the last underscore.
 
-    Splitting there would put every gene in the assembly on one contig, and that contig's depth
-    would then weight the entire sample - a single number where thousands were measured.
+    MEGAHIT contig names contain several underscores; splitting at the first would put every gene
+    on contig `k141`.
     """
     gene = "k141_73537_length_916682_cov_50.9988_12"
     assert H.contig_from_gene(gene) == "k141_73537_length_916682_cov_50.9988"

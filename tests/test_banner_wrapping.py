@@ -20,9 +20,9 @@ from metawrap2.constants import BANNER_WIDTH
 #: newlines, and all. It is the regression case because its newlines are what broke the old
 #: rendering: `len(segment)` counted past them and placed the border off the end of the line.
 QUICKSTART_CLOSING_BANNER = (
-    "Some of it is not ready - the table above says which.\n"
-    "`metawrap2 doctor --fix` recreates exactly the environments that are broken and\n"
-    "leaves the healthy ones alone. Everything that did install is still installed."
+    "Some modules are not ready; the table above says which.\n"
+    "`metawrap2 doctor --fix` recreates only the broken environments. The environments\n"
+    "that did build are still installed."
 )
 
 LONG_MESSAGE = (

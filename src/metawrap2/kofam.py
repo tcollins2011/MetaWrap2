@@ -1,9 +1,8 @@
-"""Assigning KEGG orthologs to proteins, and the threshold policy that decides what counts as a hit.
+"""KEGG ortholog assignment for proteins, and the threshold policy that decides what is a hit.
 
-Everything above this file - module completeness, the functional hierarchy, the per-sample
-distribution - is a sum over KO assignments, so this is where the error budget actually lives. The
-measurement that should drive the design, on 396 genomes with *identical gene calls* (Kananen et al.,
-*Bioinform Adv* 2025, 10.1093/bioadv/vbaf039):
+Module completeness, the functional hierarchy and the per-sample distribution are all sums over
+KO assignments made here. The design follows a comparison on 396 genomes with identical gene calls
+(Kananen et al., *Bioinform Adv* 2025, 10.1093/bioadv/vbaf039):
 
 =============================  ========================  ============================  =========================
 tool                           calls confirmed by eggNOG  tool-specific calls confirmed  ... contradicted
@@ -13,31 +12,26 @@ anvi'o (adaptive thresholds)   79%                        37%                   
 MicrobeAnnotator               74%                        0.3%                           **35%**
 =============================  ========================  ============================  =========================
 
-Three things follow, and they are the whole content of this file:
+Design rules:
 
-**1. Use KOfam's curated per-profile thresholds, and use the right one.** KOfam publishes a bit-score
-threshold per KO *and* which score it applies to: ``full`` for 17,890 profiles and ``domain`` for
-8,697. Comparing a full-sequence score against a threshold calibrated for the best single domain -
-or the reverse - is a silent error that moves calls in both directions. :data:`ScoreType` exists so
-that cannot be got wrong by accident.
+1. Use KOfam's curated per-profile thresholds against the score each one is calibrated for. KOfam
+   gives a bit-score threshold per KO and its score type: ``full`` for 17,890 profiles, ``domain``
+   for 8,697. Comparing against the wrong score moves calls in both directions; see
+   :data:`ScoreType`.
 
-**2. 1,866 of 28,453 profiles (6.6%) have no threshold at all.** They are not a rounding error:
-M00851 "Carbapenem resistance" is a flat OR of 21 KOs and one of them is thresholdless, so a single
-permissive call reports the module complete. The default here is to **not** assign them, and every
-other option is flagged per call. Nothing is worse than a thresholdless hit that looks like a
-curated one, which is what MicrobeAnnotator's 35%-contradicted number is made of.
+2. 1,866 of 28,453 profiles (6.6%) have no threshold. M00851 "Carbapenem resistance" is a flat OR
+   of 21 KOs, one of them thresholdless, so a single permissive call marks the module complete. By
+   default these profiles are not assigned, and when enabled each call is flagged. Unflagged
+   thresholdless hits are what MicrobeAnnotator's 35% contradicted rate consists of.
 
-**3. A relative fallback is worth having, and worth labelling.** anvi'o's adaptive heuristic finds
-13% more genes per genome (p<2.2e-16), concentrated exactly where a MAG pipeline operates - 38% of
-Nanosynbacteraceae cases against 4.9% of Enterobacteriaceae - because a curated threshold calibrated
-on cultured relatives is too strict for a divergent lineage. So a gene with no curated-passing hit
-can take its best hit if that hit reaches a stated fraction of the profile's threshold, and the call
-carries ``evidence="relative"`` for the rest of its life. A reader can then do what the benchmark
-did: count them separately.
+3. An optional relative fallback, labelled per call. anvi'o's adaptive heuristic finds 13% more
+   genes per genome (p<2.2e-16), mostly in divergent lineages (38% of Nanosynbacteraceae cases vs
+   4.9% of Enterobacteriaceae), where thresholds calibrated on cultured relatives are too strict.
+   A gene with no curated-passing hit can take its best hit if it reaches a set fraction of the
+   profile's threshold; the call carries ``evidence="relative"`` so it can be counted separately.
 
-This file does not download anything. The profiles (``profiles.tar.gz``, 1.5 GB) are a database, and
-:mod:`metawrap2.config` treats them like every other one - named in ``metawrap2.toml``, checked by
-``doctor``, never fetched behind a user's back.
+Nothing is downloaded here. The profiles (``profiles.tar.gz``, 1.5 GB) are a database configured
+in ``metawrap2.toml`` and checked by ``doctor`` like the others (see :mod:`metawrap2.config`).
 """
 
 from __future__ import annotations
@@ -53,9 +47,8 @@ from .io.seqio import smart_open
 #: Where `metawrap2 install-db kofam` downloads the profiles and their thresholds from.
 KOFAM_URL = "https://www.genome.jp/ftp/db/kofam/"
 
-#: The threshold list this release's policy and tests were calibrated on (KOfam's ko_list.gz of
-#: 2026-09-24). A threshold is part of the method: the same profile against the same protein gives a
-#: different answer under a different cutoff, and KOfam revises them. A different list still runs,
+#: md5 of the threshold list this release's policy and tests were calibrated on (KOfam's
+#: ko_list.gz of 2026-09-24). KOfam revises thresholds, which changes calls. A different list runs
 #: with a warning, and every row records which list it used.
 KO_LIST_MD5 = "e037ff1135d820c775da78e6d5f256c7"
 
@@ -80,7 +73,7 @@ def ko_list_md5(path: str) -> str:
 
 
 def ko_list_label(path: str) -> str:
-    """What goes in each row's ``ko_list_snapshot``: the list's md5, so a result names its cutoffs."""
+    """Value for each row's ``ko_list_snapshot``: a prefix of the list's md5."""
     return "md5:%s" % ko_list_md5(path)[:8]
 
 
@@ -91,9 +84,8 @@ NO_THRESHOLD = "-"
 class ScoreType(Enum):
     """Which HMMER score a profile's threshold is calibrated against.
 
-    Not cosmetic. ``full`` is the summed score over all domains of the alignment; ``domain`` is the
-    best single domain's score. For a multi-domain protein the two differ by a lot, and KOfam picks
-    per profile which one its threshold means.
+    ``full`` is the summed score over all domains of the alignment; ``domain`` is the best single
+    domain's score. They differ a lot for multi-domain proteins, and KOfam sets it per profile.
     """
 
     FULL = "full"
@@ -110,9 +102,8 @@ class KoProfile:
     score_type: Optional[ScoreType]
     #: ``all`` or ``trim``; recorded because it describes how the profile was built.
     profile_type: str
-    #: KOfam's own F-measure for this profile at its threshold. A low number is a profile that does
-    #: not separate its family well even at the curated cutoff, which is worth carrying into a
-    #: judgement about a single call.
+    #: KOfam's F-measure for this profile at its threshold. A low value means the profile separates
+    #: its family poorly even at the curated cutoff.
     f_measure: Optional[float]
     definition: str
 
@@ -156,7 +147,7 @@ def load_ko_list(path: str) -> Dict[str, KoProfile]:
 
 @dataclass(frozen=True)
 class Hit:
-    """One profile against one protein, with both scores so the right one can be compared."""
+    """One profile against one protein, with both full and best-domain scores."""
 
     gene_id: str
     knum: str
@@ -167,10 +158,8 @@ class Hit:
     def score_for(self, score_type: Optional[ScoreType]) -> float:
         """The score this profile's threshold is calibrated against.
 
-        Defaults to the full score when the profile does not say, which is the conservative choice:
-        the full score is >= the best domain score, so using it where ``domain`` was meant would
-        *under*-reject rather than over-reject. Profiles without a score type also have no
-        threshold, so this never actually decides a curated call.
+        Defaults to the full score (which is >= the best domain score) when the profile has no
+        score type. Such profiles also have no threshold, so this never decides a curated call.
         """
         if score_type is ScoreType.DOMAIN:
             return self.domain_score
@@ -178,10 +167,9 @@ class Hit:
 
 
 class Evidence(Enum):
-    """How a KO assignment was arrived at. Carried on every call, to the end of the pipeline."""
+    """How a KO assignment was made. Carried on every call through the pipeline."""
 
-    #: Passed the profile's own curated threshold. The only kind MicrobeAnnotator's 35%-contradicted
-    #: figure does not apply to.
+    #: Passed the profile's curated threshold.
     CURATED = "curated"
     #: Best hit for a gene that nothing curated passed, reaching a stated fraction of the threshold.
     RELATIVE = "relative"
@@ -191,30 +179,28 @@ class Evidence(Enum):
 
 @dataclass(frozen=True)
 class ThresholdPolicy:
-    """What counts as a KO assignment. Every field here changes the answer, so all of it is recorded.
+    """What counts as a KO assignment. Every field affects the result and is recorded.
 
-    The defaults are the strict end on purpose: curated thresholds only, thresholdless profiles
-    dropped. That reproduces KofamScan, which is the arm with the highest confirmation rate in the
-    benchmark above, and anything more permissive is then a decision a user made rather than one
-    this file made for them.
+    The defaults are strict (curated thresholds only, thresholdless profiles dropped), which
+    reproduces KofamScan, the tool with the highest confirmation rate in the benchmark above.
     """
 
     #: Accept the best hit of an otherwise-unannotated gene when it reaches this fraction of the
-    #: profile's curated threshold. None disables the fallback entirely.
+    #: profile's curated threshold. None disables the fallback.
     relative_fraction: Optional[float] = None
     #: Accept hits to profiles that have no curated threshold when their E-value is at most this.
-    #: None drops them, which is the default - see the module docstring on M00851.
+    #: None (the default) drops them; see the module docstring on M00851.
     thresholdless_max_evalue: Optional[float] = None
-    #: An absolute ceiling applied to every call regardless of how it qualified. A hit that passes a
-    #: bit-score threshold but has a terrible E-value is usually a short alignment to a long profile.
+    #: E-value ceiling for every call. A hit that passes a bit-score threshold with a poor E-value
+    #: is usually a short alignment to a long profile.
     max_evalue: float = 1e-5
-    #: Keep at most this many KOs per gene, best first. One gene legitimately matches several
-    #: profiles of the same family; keeping all of them inflates every count downstream, and
-    #: hierarchy.weights_from_gene_kos splits a gene's weight across whatever is kept.
+    #: Keep at most this many KOs per gene, best first. A gene can match several profiles of one
+    #: family, and keeping all inflates downstream counts; hierarchy.weights_from_gene_kos splits
+    #: a gene's weight across the kept KOs.
     max_kos_per_gene: int = 1
 
     def describe(self) -> str:
-        """One line for provenance, so a table says which policy produced it."""
+        """One-line policy description recorded in each output row."""
         parts = ["curated"]
         if self.relative_fraction is not None:
             parts.append("relative>=%.2fx" % self.relative_fraction)
@@ -246,10 +232,9 @@ def assign_gene(
 ) -> List[KoCall]:
     """Accepted KO calls for one gene, best first.
 
-    The order of the three branches is the policy: a gene that has a curated-passing hit never
-    reaches the relative fallback, and a gene with no curated-passing hit tries the fallback before
-    the thresholdless profiles. That ordering is what keeps a permissive option from displacing a
-    confident call rather than merely adding to it.
+    Branches are tried in order: curated hits, then the relative fallback, then thresholdless
+    profiles. A later branch only runs when the earlier ones produce nothing, so a permissive
+    option never replaces a curated call.
     """
     usable = [h for h in hits if h.evalue <= policy.max_evalue]
     if not usable:
@@ -380,7 +365,7 @@ def ko_row(
 
 
 def _as_text(value) -> str:
-    """pyhmmer returns names as bytes in some versions and str in others; normalise once."""
+    """Normalise a pyhmmer name, which is bytes in some versions and str in others."""
     if value is None:
         return ""
     return value.decode() if isinstance(value, bytes) else str(value)
@@ -394,37 +379,29 @@ def search(
 ) -> Iterator[Hit]:
     """Search proteins against HMM profiles with PyHMMER, yielding both scores per hit.
 
-    PyHMMER rather than ``hmmsearch`` as a subprocess, for the reason Pyrodigal replaced Prodigal in
-    :mod:`metawrap2.genecall`: the threshold policy above is the substance of this step, and it
-    belongs in code that can be tested rather than in a wrapper parsing ``--tblout``. It also
-    releases the GIL, so *threads* is real parallelism.
+    PyHMMER is used instead of an ``hmmsearch`` subprocess (as Pyrodigal is in
+    :mod:`metawrap2.genecall`) so the threshold policy is tested in code instead of parsed from
+    ``--tblout``. It releases the GIL, so *threads* runs in parallel.
 
-    *max_evalue* here is a pre-filter to keep the hit list from being enormous; it is deliberately
-    looser than :attr:`ThresholdPolicy.max_evalue`, because a bit-score threshold is what decides a
-    call and discarding hits before the policy sees them would make the policy's own cutoffs
-    unreachable.
+    *max_evalue* is a pre-filter to limit the hit list. It is looser than
+    :attr:`ThresholdPolicy.max_evalue` so the policy sees every hit its cutoffs could accept.
 
-    Both the full-sequence score and the best domain score are carried on every hit, because which
-    one a KOfam threshold means varies per profile - see :class:`ScoreType`.
+    Each hit carries both the full-sequence and best-domain scores; see :class:`ScoreType`.
     """
     import pyhmmer
 
     alphabet = pyhmmer.easel.Alphabet.amino()
     with pyhmmer.easel.SequenceFile(protein_fasta, digital=True, alphabet=alphabet) as handle:
-        # pyhmmer's stubs type hmmsearch's sequence argument invariantly in its alphabet, so an
-        # amino-acid block does not satisfy Iterable[DigitalSequence[Alphabet]] even though that is
-        # exactly what it wants. A stub limitation, not a call error, hence the cast rather than a
-        # change of call.
+        # Typed Any because pyhmmer's stubs type hmmsearch's sequence argument invariantly in its
+        # alphabet, so an amino-acid block does not satisfy Iterable[DigitalSequence[Alphabet]].
         sequences: Any = list(handle.read_block())
 
-    # One search over every profile, not one search per file. hmmsearch parallelises across
-    # *queries*, so a per-file loop over KOfam's 27,930 single-profile files runs 27,930 searches
-    # of one query each: `cpus` has nothing to divide and the whole step collapses onto one core.
-    # Measured on 2,339 genes: the per-file loop sat at 108% CPU and had not finished in 10 minutes,
-    # where KOfam's concatenated profile set takes about 6 minutes for 14,171 genes.
+    # One search over all profiles. hmmsearch parallelises across queries, so looping over KOfam's
+    # 27,930 single-profile files runs on one core. On 2,339 genes the per-file loop ran at 108%
+    # CPU and had not finished after 10 minutes; one search takes about 6 minutes for 14,171 genes.
     def profiles() -> Iterator[Any]:
-        # One file open at a time: 27,930 handles at once would exhaust the descriptor limit. An
-        # HMM is fully parsed when it is yielded, so it outlives the handle it came from.
+        # One file open at a time, to stay under the descriptor limit. Each HMM is fully parsed
+        # when yielded, so it outlives its handle.
         for hmm_file in hmm_files:
             with pyhmmer.plan7.HMMFile(hmm_file) as handle:
                 yield from handle

@@ -1,48 +1,48 @@
-# eggNOG-mapper annotations, as the tool really writes them
+# eggNOG-mapper annotations
 
-**Hand-written, not captured from a run.** The eggNOG data is ~50 GB and was not downloaded for
-this, so these files are constructed rather than real output. What they are modelled on is the
-tool's own writer, which is the authority on the format regardless: eggNOG-mapper **2.1.13**,
-`eggnogmapper/annotation/output.py`, read from the PyPI source distribution
-(`eggnog_mapper-2.1.13.tar.gz`). Every structural detail below is copied from that file rather than
-from documentation or memory.
+These files are hand-written, not output from a run; the eggNOG database (~50 GB) was not
+downloaded. They follow the tool's own writer: eggNOG-mapper 2.1.13,
+`eggnogmapper/annotation/output.py`, from the PyPI source distribution
+(`eggnog_mapper-2.1.13.tar.gz`). The structural details below are taken from that file.
 
-* `ANNOTATIONS_WHOLE_HEADER = HIT_HEADER + ANNOTATIONS_HEADER` is the **21** columns, in this
-  order: `query seed_ortholog evalue score eggNOG_OGs max_annot_lvl COG_category Description
+* `ANNOTATIONS_WHOLE_HEADER = HIT_HEADER + ANNOTATIONS_HEADER` is 21 columns, in this order:
+  `query seed_ortholog evalue score eggNOG_OGs max_annot_lvl COG_category Description
   Preferred_name GOs EC KEGG_ko KEGG_Pathway KEGG_Module KEGG_Reaction KEGG_rclass BRITE KEGG_TC
   CAZy BiGG_Reaction PFAMs`.
-* `output_annotations_header` prints a bare `#` and then joins those names, so the header line is
-  `#query<TAB>seed_ortholog<TAB>...` - the first column name is not `query` on disk.
+* `output_annotations_header` prints `#` and then the joined names, so the header line is
+  `#query<TAB>seed_ortholog<TAB>...` and the first column name on disk is `#query`.
 * `get_call_info()` writes four `## ` lines above the header (date, `emapper-<version>`, the argv,
-  and a bare `##`), and `output_annotations_footer` writes three more below the last data row
-  (`## N queries scanned`, total time, rate). Those footers are single tab-free fields and parse as
-  a data row with a gene named `## 6 queries scanned` unless comments are skipped at **both** ends.
-* `output_annotations_row` fills a missing annotation with `'-'`, and its final comprehension
-  replaces any `None` or whitespace-only cell with `'-'` as well - so every column can be `-`, not
-  just the annotation ones.
-* Multi-valued fields are written `",".join(sorted(list(...)))`, i.e. comma-joined and already in a
-  stable order.
+  and a bare `##`), and `output_annotations_footer` writes three below the last data row
+  (`## N queries scanned`, total time, rate). The footers are single fields without tabs; unless
+  comments are skipped at both ends, they parse as a data row for a gene named
+  `## 6 queries scanned`.
+* `output_annotations_row` fills a missing annotation with `'-'`, and its final comprehension also
+  replaces any `None` or whitespace-only cell with `'-'`, so any column can be `-`.
+* Multi-valued fields are written `",".join(sorted(list(...)))`: comma-joined and sorted.
 
-Three files:
+Files:
 
-* `bin_006.emapper.annotations` - six genes covering the cases the parser has to get right: a fully
-  annotated gene with **three concatenated COG categories** (`EGP`, not `E,G,P`); a gene whose every
-  annotation column is `-`; comma-joined `EC` and `KEGG_ko`; a gene with a COG category and nothing
-  else; a gene with a KO and nothing orthogonal; and a gene with GO, EC and a KO together.
-* `bin_md5.emapper.annotations` - the first two genes with `--md5`'s extra trailing `md5` column, so
-  a user who passed `--md5` is not told their file is malformed.
-* `bin_renamed.emapper.annotations` - a header with `COG_category` renamed to `COG_cat` and `GOs` to
-  `GO_terms`, standing in for a future eggNOG-mapper whose columns moved. The parser must name what
-  it found; a zero-row table is indistinguishable from a genome with no annotations.
+* `bin_006.emapper.annotations`: six genes.
+  * A fully annotated gene with three concatenated COG categories (`EGP`, not `E,G,P`).
+  * A gene with `-` in every annotation column.
+  * Comma-joined `EC` and `KEGG_ko`.
+  * A gene with a COG category only.
+  * A gene with a KO only.
+  * A gene with GO, EC and a KO.
+* `bin_md5.emapper.annotations`: the first two genes with the extra trailing `md5` column that
+  `--md5` adds. The parser must accept it.
+* `bin_renamed.emapper.annotations`: a header with `COG_category` renamed to `COG_cat` and `GOs` to
+  `GO_terms`, standing in for a future eggNOG-mapper with changed columns. The parser must report
+  the columns it found, because a zero-row table looks the same as a genome with no annotations.
 
-The KO values are `ko:`-prefixed (`ko:K00059`, `ko:K00001,ko:K00002`) because that is how eggNOG
-stores them, and that prefix is the whole reason `strip_ko_prefixes` exists - `kos.tsv` from
-`annotate --kofam` holds bare `K00059`, so an unstripped prefix makes the join return nothing while
-looking like total disagreement between the two annotators.
+KO values are `ko:`-prefixed (`ko:K00059`, `ko:K00001,ko:K00002`), as eggNOG stores them.
+`strip_ko_prefixes` removes the prefix so they join with `kos.tsv` from `annotate --kofam`, which
+holds bare `K00059`. Without stripping, the join returns no rows and the two annotators appear to
+disagree on every gene.
 
 Taxids and seed orthologs are *Clostridioides difficile* 630 (`272563`), whose protein ids have the
-`CD630_` form; gene ids use the `k141_<n>_length_<n>_cov_<n>_<n>` shape `metawrap2 annotate` gives
-genes called off a MEGAHIT assembly, matching `tests/fixtures/cazy/`.
+form `CD630_`. Gene ids have the `k141_<n>_length_<n>_cov_<n>_<n>` form that `metawrap2 annotate`
+gives genes called from a MEGAHIT assembly, as in `tests/fixtures/cazy/`.
 
-Regenerated by the script recorded in this package's history; the file content is what matters and
-is checked in, since it is the format contract rather than data.
+The files were generated by a script recorded in this package's history. They are checked in as the
+format contract.

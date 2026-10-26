@@ -1,8 +1,7 @@
 """Tests for `metawrap2 status` and the manifest audit it reports.
 
-Both exist to read back information the manifest already had but nothing surfaced. The column
-worth testing is the last one: "what would --resume do?" must agree with what --resume actually
-does, which means it has to come from the same ``can_skip`` call and not a reimplementation.
+The "what would --resume do?" column must agree with what --resume does, so it comes from the
+same ``can_skip`` call.
 """
 
 from __future__ import annotations
@@ -68,7 +67,7 @@ def test_intact_steps_would_be_skipped_and_broken_ones_redone(study, capsys):
     assert "would re-run" in rows["quant_bins"]
     assert "last attempt failed" in rows["quant_bins"]
 
-    # A step reported success and its output is gone: that is a real finding, so --audit exits 1.
+    # A step reported success but its output is gone, so --audit exits 1.
     assert status_cmd.main([str(study), "--audit"]) == 1
     out = capsys.readouterr().out
     assert "MISSING" in out and "kraken.out" in out

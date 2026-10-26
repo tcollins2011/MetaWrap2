@@ -1,24 +1,16 @@
-"""Turning tool output into one tidy table, and into the ratio the defaults are decided on.
+"""Collect benchmark tool output into one long-format results table and rank variants.
 
-Every number the benchmark produces ends up as one row of ``dataset x comparison x variant x
-sample x metric``. Long format rather than a wide table with a column per metric, because the set
-of metrics grows every time a scorer is added, and a wide table means rewriting every historical
-file when it does. Long rows append.
+Each number is one row of ``dataset x comparison x variant x sample x metric``. The long format
+lets new metrics be added without rewriting older files.
 
-Cost is stored as metrics too - ``wall_seconds``, ``cpu_hours``, ``peak_rss_bytes`` - rather than
-as special columns beside the "real" results, so that cost is joinable against accuracy in the same
-way one accuracy metric joins against another. :func:`value_against_cost` is that join, and it is
-what settles which variant becomes a default.
+Cost is stored as ordinary metrics (``wall_seconds``, ``cpu_hours``, ``peak_rss_bytes``) so it can
+be joined against quality metrics. :func:`value_against_cost` does that join and is used to choose
+defaults. It ranks on the quality metric and reports cost beside it. An earlier version ranked on
+the quality/cost ratio, which favours the cheapest arm and picked a default that recovered fewer
+MAGs than metaWRAP 1. Where cost must drive the choice, it is exposed as a user-selected tier
+(``binning --preset``).
 
-It ranks on the quality metric and prints cost beside it. It used to rank on the *ratio* of the two,
-and that is the one piece of machinery in this project that produced a wrong answer rather than a
-missing one: the ratio is dominated by whichever arm is cheapest, and following it picked a default
-that recovers fewer MAGs than metaWRAP 1 does. Quality decides; cost is for the reader to weigh, and
-where it genuinely has to drive the choice it becomes a tier a user picks (``binning --preset``).
-
-The scorers here parse output rather than reimplement scoring. CheckM2, GUNC and AMBER are the
-tools that know how to judge a bin; this module's job is to get their answers into one file with
-consistent names, so that two runs a year apart can be diffed.
+The scorers parse the output of CheckM2, GUNC and AMBER and do not reimplement their scoring.
 """
 
 from __future__ import annotations
@@ -30,8 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .. import gunc as _gunc
 
-#: The TSV's columns, in order. Frozen on purpose: results tables accumulate over
-#: time, and a column reorder would make every old file unreadable by the current code.
+#: The TSV's columns, in order. Do not reorder: older results files must stay readable.
 COLUMNS = (
     "dataset",
     "comparison",
@@ -45,28 +36,20 @@ COLUMNS = (
 
 #: Bin quality tiers: ``(name, min completeness, max contamination)``.
 #:
-#: Two of the three are MIMAG's (Bowers et al. 2017) and one is ours, which is worth stating because
-#: the file used to call all three "MIMAG-style":
-#:
-#: * ``bins_medium_quality`` (>=50 / <10) is MIMAG medium exactly.
-#: * ``bins_near_complete`` (>=90 / <5) is MIMAG high-quality *minus* its rRNA and tRNA requirement -
-#:   23S, 16S and 5S present plus at least 18 tRNAs - which is the half that is hard to satisfy and
-#:   the reason this tier is not called high-quality here.
-#: * ``bins_high_quality`` (>=70 / <10) is **not a MIMAG tier at all**. It is the working threshold
-#:   this project reports on, chosen because it is where bin_refinement's defaults sit and where the
-#:   MAG-recovery literature usually counts, and it is the headline number in docs/benchmarks.md.
-#:
-#: The name stays despite being a borrowed label: it is the metric key in every recorded results
-#: row, so renaming it either invalidates those rows or needs a migration, and the
-#: label was the inaccurate part rather than the number.
+#: * ``bins_medium_quality`` (>=50 / <10) is MIMAG medium quality (Bowers et al. 2017).
+#: * ``bins_near_complete`` (>=90 / <5) is MIMAG high quality without its rRNA and tRNA requirement
+#:   (23S, 16S and 5S plus at least 18 tRNAs), so it is not called high quality here.
+#: * ``bins_high_quality`` (>=70 / <10) is not a MIMAG tier. It is this project's reporting
+#:   threshold, matching bin_refinement's defaults and common MAG-recovery practice, and is the
+#:   headline number in docs/benchmarks.md. The name is kept because it is the metric key in all
+#:   recorded results rows.
 QUALITY_TIERS = (
     ("bins_near_complete", 90.0, 5.0),
     ("bins_high_quality", 70.0, 10.0),
     ("bins_medium_quality", 50.0, 10.0),
 )
 
-#: Units, so a reader of the TSV never has to guess whether a duration is seconds or hours. A
-#: metric absent from here is recorded with an empty unit rather than a wrong one.
+#: Unit of each metric, written to the TSV. Metrics not listed get an empty unit.
 UNITS = {
     "wall_seconds": "s",
     "cpu_hours": "cpu_h",
@@ -86,15 +69,12 @@ UNITS = {
     "abundance_missing_bins": "bins",
 }
 
-#: The units whose metrics must not be summed across samples. A fraction and an index are already
-#: normalised - three samples at 0.9 purity are 0.9 purity, not 2.7 - so a variant's per-sample rows
-#: are averaged instead. Read off UNITS rather than kept as a second list, so a new fraction metric
-#: gets the right pooling by declaring its unit and nothing else.
+#: Units whose metrics are averaged across samples instead of summed (fractions and indexes are
+#: already normalised). A new metric gets this pooling by declaring one of these units in UNITS.
 _AVERAGED_UNITS = frozenset(("fraction", "index"))
 
 #: Byte lookup marking Phred+33 quality characters of 30 or better (ASCII 63, ``?``, and up). Used
-#: with :meth:`bytes.translate` so a Q30 count is one C-level pass per line rather than a Python
-#: loop over every base - the difference between seconds and minutes on a real FASTQ.
+#: with :meth:`bytes.translate` so the Q30 count runs in C instead of a per-base Python loop.
 _Q30_BYTES = bytes(1 if i >= 63 else 0 for i in range(256))
 
 
@@ -118,8 +98,7 @@ class Row:
             "variant": self.variant,
             "sample": self.sample,
             "metric": self.metric,
-            # Written with repr-ish precision rather than rounded: rounding at the storage layer
-            # loses information that a later ratio needs.
+            # Not rounded, so later calculations keep full precision.
             "value": ("%g" % self.value) if isinstance(self.value, float) else str(self.value),
             "unit": self.unit or UNITS.get(self.metric, ""),
             "source": self.source,
@@ -129,8 +108,7 @@ class Row:
 def write_tsv(rows: Iterable[Row], path: str, *, append: bool = False) -> int:
     """Write *rows* to *path*. Returns the number written.
 
-    Appending writes no second header, so a results file accumulated over several runs stays one
-    readable table rather than a concatenation of files.
+    With *append*, no header is written if the file already has content.
     """
     rows = list(rows)
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
@@ -145,7 +123,7 @@ def write_tsv(rows: Iterable[Row], path: str, *, append: bool = False) -> int:
 
 
 def read_tsv(path: str) -> List[Row]:
-    """Read a results TSV back. Rows whose value is not a number are skipped, not guessed at."""
+    """Read a results TSV. Rows whose value is not a number are skipped."""
     out: List[Row] = []
     with open(path, newline="") as fh:
         for record in csv.DictReader(fh, delimiter="\t"):
@@ -168,7 +146,7 @@ def read_tsv(path: str) -> List[Row]:
     return out
 
 
-# ── parsing what the scoring tools produce ───────────────────────────────────────────────────
+# ── parsing scoring tool output ──────────────────────────────────────────────────────────────
 
 
 def _read_table(path: str) -> List[Dict[str, str]]:
@@ -179,8 +157,7 @@ def _read_table(path: str) -> List[Dict[str, str]]:
 def _first_column(record: Dict[str, str], *names: str) -> Optional[str]:
     """The first of *names* present in *record*, case- and space-insensitively.
 
-    The bin-quality tools disagree on spelling - CheckM1 writes ``Bin Id``, CheckM2 writes
-    ``Name`` - and a benchmark that only understood one of them would quietly score nothing.
+    Used because the tools spell columns differently (CheckM1 ``Bin Id``, CheckM2 ``Name``).
     """
     normalised = {key.strip().lower(): key for key in record if key}
     for name in names:
@@ -193,9 +170,7 @@ def _first_column(record: Dict[str, str], *names: str) -> Optional[str]:
 def bin_quality(path: str) -> List[Tuple[str, float, float]]:
     """``(bin, completeness, contamination)`` from a CheckM1 or CheckM2 report.
 
-    Both are tab tables with a completeness and a contamination column; which tool wrote it is
-    decided by the columns present rather than by the filename, because the filename is whatever
-    the caller passed.
+    The format is detected from the column names, not the filename.
     """
     out: List[Tuple[str, float, float]] = []
     for record in _read_table(path):
@@ -207,8 +182,7 @@ def bin_quality(path: str) -> List[Tuple[str, float, float]]:
         try:
             out.append((name, float(completeness), float(contamination)))
         except ValueError:
-            # A header repeated mid-file, or a bin CheckM could not judge. Skipping it is right;
-            # counting it as zero would make a failed bin look like a bad one.
+            # A repeated header or a bin CheckM could not assess. Skipped, not counted as zero.
             continue
     return out
 
@@ -216,9 +190,7 @@ def bin_quality(path: str) -> List[Tuple[str, float, float]]:
 def quality_counts(bins: Sequence[Tuple[str, float, float]]) -> Dict[str, int]:
     """How many bins fall in each :data:`QUALITY_TIERS` tier, plus the total.
 
-    Tiers are not exclusive - a near-complete bin is also high-quality - because that is how the
-    thresholds are used in practice: "how many bins clear 90/5" is the question, not "how many
-    clear 90/5 and not 95/2".
+    Tiers are cumulative: a near-complete bin is also counted as high and medium quality.
     """
     counts = {name: 0 for name, _c, _x in QUALITY_TIERS}
     for _name, completeness, contamination in bins:
@@ -229,9 +201,8 @@ def quality_counts(bins: Sequence[Tuple[str, float, float]]) -> Dict[str, int]:
     return counts
 
 
-#: AMBER column headings mapped to the metric names this harness records. AMBER's own headings are
-#: long and change punctuation between versions, so matching is done case-insensitively on these
-#: exact strings and anything unrecognised is ignored rather than guessed at.
+#: AMBER column headings mapped to this harness's metric names. Matched case-insensitively;
+#: unrecognised headings are ignored.
 _AMBER_METRICS = {
     "f1 score (bp)": "amber_f1_bp",
     "ari (bp)": "amber_ari_bp",
@@ -239,12 +210,10 @@ _AMBER_METRICS = {
     "average purity (bp)": "amber_purity_bp",
     "accuracy (bp)": "amber_accuracy_bp",
     "percentage of assigned bps": "amber_assigned_bp_fraction",
-    # What AMBER 2.x actually writes into results.tsv - the prose headings above are the ones on its
-    # HTML page and in its docs. Completeness and purity appear under their information-retrieval
-    # names: AMBER's "average completeness" is recall and its "average purity" is precision, the same
-    # numbers under the vocabulary each field prefers. The ``_per_bp``, ``_cami1``, ``_sem`` and
-    # ``_var`` columns are deliberately absent: a variance is not a score, and CAMI 1's F1 is a
-    # different definition that must not be mixed into one column with this one.
+    # Column names in AMBER 2.x results.tsv (the headings above are from its HTML report and docs).
+    # Recall is AMBER's average completeness and precision its average purity. The ``_per_bp``,
+    # ``_cami1``, ``_sem`` and ``_var`` columns are omitted: variances are not scores, and CAMI 1's
+    # F1 uses a different definition.
     "f1_score_bp": "amber_f1_bp",
     "adjusted_rand_index_bp": "amber_ari_bp",
     "recall_avg_bp": "amber_completeness_bp",
@@ -257,14 +226,11 @@ _AMBER_METRICS = {
 def amber_metrics_by_tool(path: str) -> Dict[str, Dict[str, float]]:
     """Metrics from an AMBER ``results.tsv``, grouped by the binning each row describes.
 
-    AMBER takes several query binnings in one invocation and writes them all into one table, tagged
-    with the label they were submitted under. :func:`amber_metrics` folds that table into a single
-    dict, which is right when there was one query and silently wrong when there were three: the last
-    tool's numbers would be reported as though they were the run's.
+    AMBER writes all query binnings of one invocation into one table, tagged by label.
+    :func:`amber_metrics` merges them into one dict, which is only correct for a single query.
 
-    The label is taken from whichever of AMBER's identifying columns is present - it has been
-    ``Tool``, ``tool`` and ``binning label`` across versions - and rows with no label at all are
-    grouped under the empty string, which is how a single unlabelled run reads.
+    The label comes from whichever identifying column is present (``Tool``, ``tool`` or ``binning
+    label``, depending on version). Rows without a label are grouped under the empty string.
     """
     out: Dict[str, Dict[str, float]] = {}
     for record in _read_table(path):
@@ -296,10 +262,9 @@ def amber_metrics_by_tool(path: str) -> Dict[str, Dict[str, float]]:
 def amber_metrics(path: str) -> Dict[str, float]:
     """Metrics from an AMBER ``results.tsv``, keyed by this harness's metric names.
 
-    Handles both shapes AMBER has shipped: a wide table with one column per metric, and a long one
-    with ``metric``/``value`` columns. Where several rows describe the same metric - AMBER reports
-    per-sample as well as pooled figures - the last one wins, which is the pooled row in the files
-    AMBER writes.
+    Handles both the wide layout (one column per metric) and the long layout (``metric``/``value``
+    columns). When several rows give the same metric, the last one wins; in AMBER's output that is
+    the pooled row.
     """
     out: Dict[str, float] = {}
     for record in _read_table(path):
@@ -329,8 +294,7 @@ def amber_metrics(path: str) -> Dict[str, float]:
 def gunc_pass_fraction(path: str) -> Optional[float]:
     """Fraction of bins GUNC passes, or None if the file says nothing about it.
 
-    A fraction rather than a count so it is comparable between variants that produced different
-    numbers of bins - which is the whole point of comparing binners.
+    A fraction, so variants with different bin counts can be compared.
     """
     total = passed = 0
     for record in _read_table(path):
@@ -338,11 +302,9 @@ def gunc_pass_fraction(path: str) -> Optional[float]:
         if verdict is None:
             continue
         total += 1
-        # Through gunc.passed_value because GUNC writes this column as True/False or as 1.0/0.0
-        # depending on how pandas typed it, and accepting only the words reported a 166-bin set as
-        # 0% non-chimeric. `nan` - a bin with too little reference representation to assess - is
-        # neither a pass nor a fail, but it stays in the denominator, because that is what this
-        # metric's committed rows mean; gunc_unassessed_fraction says how much of it that is.
+        # gunc.passed_value accepts both True/False and 1.0/0.0, which GUNC writes depending on
+        # pandas typing. `nan` (too little reference representation to assess) is not a pass but
+        # stays in the denominator, matching recorded rows; see gunc_unassessed_fraction.
         if _gunc.passed_value(verdict) is True:
             passed += 1
     if not total:
@@ -351,12 +313,10 @@ def gunc_pass_fraction(path: str) -> Optional[float]:
 
 
 def gunc_unassessed_fraction(path: str) -> Optional[float]:
-    """Fraction of bins GUNC could not assess - the part of the denominator above that is not a
-    verdict.
+    """Fraction of bins GUNC could not assess (``nan`` verdicts), or None if there are no verdicts.
 
-    Reported separately rather than folded in, because "chimeric" and "too little of this lineage
-    in the reference to say" are different findings and only the first is about the bin set. On one
-    real 258-bin set it is 24 bins, enough to move a pass fraction by six points.
+    Kept separate from the pass fraction because an unassessed bin is a reference-coverage gap, not
+    a chimera. On one 258-bin set it was 24 bins, shifting the pass fraction by about six points.
     """
     total = unassessed = 0
     for record in _read_table(path):
@@ -374,9 +334,8 @@ def gunc_unassessed_fraction(path: str) -> Optional[float]:
 def assembly_stats(path: str) -> Dict[str, float]:
     """N50 and total length of a FASTA assembly.
 
-    Computed here rather than shelled out to a stats tool because it is twenty lines, it removes a
-    dependency from the benchmark env, and an assembly metric that disagrees with itself between
-    runs because a helper changed version is worse than no metric.
+    Computed here to avoid an extra dependency whose version could change the numbers between runs.
+    Also returns the contig count.
     """
     lengths: List[int] = []
     current = 0
@@ -414,14 +373,11 @@ def assembly_stats(path: str) -> Dict[str, float]:
 def read_stats(path: str) -> Dict[str, float]:
     """Reads, bases and Q30 bases in a FASTQ.
 
-    Counted off the FASTQ itself rather than read out of a trimmer's own report, because the
-    trimmers do not agree on what to report: fastp writes a rich JSON, Trim Galore writes a text
-    summary this pipeline switches off, and a comparison scored from two different tools'
-    self-assessments is not a comparison. Reading the surviving reads asks both the same question.
+    Counted from the FASTQ, not from trimmer reports, because fastp and Trim Galore report
+    different things and this pipeline disables Trim Galore's summary.
 
-    All three are counts, so they sum across samples and across mate files the way
-    :func:`time_to_performance` expects. Q30 is recorded as a count of bases rather than a fraction
-    for exactly that reason - a reader divides it by ``bases_kept`` themselves.
+    All three are counts so they can be summed across samples and mate files. Divide
+    ``q30_bases_kept`` by ``bases_kept`` for a fraction.
     """
     reads = bases = q30 = 0
     opener: Any = open
@@ -444,17 +400,15 @@ def read_stats(path: str) -> Dict[str, float]:
     }
 
 
-# ── the number the defaults are decided on ───────────────────────────────────────────────────
+# ── ranking variants ─────────────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class Scored:
     """One variant's result on a metric, with what it cost to get there beside it.
 
-    Deliberately not a ratio. Two variants can share a ratio with one being twice as accurate for
-    twice the cost, and which of those should be the default depends on whether the machine has the
-    hours - a judgement a reader makes, not one this dataclass makes for them. There is no ``ratio``
-    property to reach for, because when there was one it was what everything got ranked by.
+    No quality/cost ratio is provided: two variants can share a ratio at very different costs, and
+    whether the extra cost is acceptable is left to the reader.
     """
 
     comparison: str
@@ -465,8 +419,7 @@ class Scored:
     cost_metric: str
     cost: float
     is_default: bool = False
-    #: How many per-sample rows went into ``value``. Carried so a reader can tell a figure measured
-    #: once from one averaged over ten samples, which is the difference between a number and a mean.
+    #: Number of per-sample rows that went into ``value``.
     samples: int = 1
 
     def describe(self) -> str:
@@ -488,36 +441,19 @@ def value_against_cost(
 ) -> List[Scored]:
     """Pair each variant's *metric* against its *cost_metric*, best on the metric first.
 
-    Rows are combined across samples for both sides, so a ten-sample dataset yields one ratio per
-    variant rather than ten. Counts and durations are summed, because bins recovered and CPU-hours
-    spent are both totals. Metrics whose unit is a fraction or an index are averaged instead: those
-    are already normalised, and summing ten samples at 0.9 purity into 9.0 would not just inflate
-    one row, it would rank the variant that was measured on the most samples first. The cost side is
-    always summed, since ten samples really do cost ten samples' CPU-hours.
+    Rows are combined across samples, giving one result per variant. Counts and durations are
+    summed. Metrics whose unit is a fraction or an index are averaged (unweighted), since summing
+    them would favour variants measured on more samples. Cost is always summed. A figure that needs
+    weighted pooling must be recorded already pooled, with an empty sample; :attr:`Scored.samples`
+    shows how many rows were combined.
 
-    The average is unweighted - a sample holding five bins counts as much as one holding two
-    hundred. That is a pooling choice this function cannot make better, because the weights live in
-    a different metric; a figure that needs bin-weighted pooling has to be recorded already pooled,
-    with an empty sample, and :attr:`Ratio.samples` is carried so a reader can see which they have.
+    A variant with no recorded cost is kept, with ``cost`` of zero, and shown as unmeasured.
 
-    A variant with no recorded cost is returned with ``cost`` of zero and reported as unmeasured
-    rather than dropped, because a missing cost is a gap in the measurement worth seeing in the
-    table, not a variant that was free. It still ranks on its quality, which is the point of ranking
-    on quality: an arm whose cost was lost is still a comparable result.
-
-    Rows that describe the same measurement - same dataset, comparison, variant, sample, metric and
-    source - are collapsed to the last one rather than summed. The results TSV is appended to, so a
-    comparison scored twice, or re-run after a fix, holds the same measurement more than once;
-    summing those would double a variant's bins or its CPU-hours depending on which half was
-    repeated. The latest value is the answer, and the older rows stay in the file as history.
-
-    ``source`` is deliberately *not* part of that key, and leaving it in was a real defect rather than
-    a harmless one. A re-score that changes which bin set is a variant's answer - which is exactly what
-    fixing :func:`metawrap2.benchmark.assess.bin_dirs` did - records the new number against a new
-    source file, so the stale row keyed differently and the two were added: COMEBin's 178 high-quality
-    MAGs read as 356. Same dataset, comparison, variant, sample and metric is the same measurement, no
-    matter which file it was read out of, and a metric that two files contribute to additively is
-    suffixed per bin set long before it reaches here.
+    Rows for the same dataset, comparison, variant, sample and metric are collapsed to the last one,
+    because the results TSV is appended to and re-scored comparisons repeat rows. ``source`` is not
+    part of the key: a re-score that reads a different bin set records a new source, and keying on
+    it once double-counted COMEBin's 178 high-quality MAGs as 356. Metrics that several files add to
+    are suffixed per bin set before they reach here.
     """
     latest: Dict[Tuple[str, ...], Row] = {}
     for row in rows:
@@ -551,8 +487,7 @@ def value_against_cost(
         )
         for (dataset, comparison, variant), value in values.items()
     ]
-    # Ties on the metric are broken by the cheaper arm, which is the only place cost decides
-    # anything here - and only between arms that scored identically.
+    # Ties on the metric are broken by lower cost.
     out.sort(key=lambda r: (-r.value, r.cost or float("inf")))
     return out
 
@@ -572,19 +507,16 @@ def format_scores(scored: Sequence[Scored]) -> str:
     lines.extend("  " + r.describe() for r in scored)
     lines.append("")
     lines.append(
-        "  Ranked on %s, with %s reported beside it and never as a denominator: a\n"
-        "  quality-per-cost ratio is dominated by whichever arm is cheapest, and ranking on one\n"
-        "  picked a default here that recovered fewer genomes than the tool this replaces. Where\n"
-        "  cost has to drive a choice it belongs in a tier the user picks, not in the ranking."
+        "  Ranked on %s. %s is shown for reference and is not used as a denominator:\n"
+        "  a quality-per-cost ratio favours the cheapest variant. A ranking on that ratio once\n"
+        "  chose a default that recovered fewer genomes than the tool it replaced."
         % (head.metric, head.cost_metric)
     )
-    # Said out loud rather than left to the units column, because an unweighted mean over samples of
-    # different sizes is a figure a reader may want to recompute by hand, and they can only know to
-    # want that if the table admits it took one.
+    # State that the value is an unweighted mean over samples, so a reader can recompute it.
     if UNITS.get(head.metric, "") in _AVERAGED_UNITS and max(r.samples for r in scored) > 1:
         lines.append(
-            "  %s is a %s, so it is averaged over each variant's samples rather than summed,\n"
-            "  unweighted: %s. The cost column is still a total."
+            "  %s is a %s, so it is the unweighted mean over each variant's samples: %s.\n"
+            "  The cost column is a total."
             % (
                 head.metric,
                 UNITS[head.metric],

@@ -5,9 +5,8 @@ Walks a directory of Salmon output sub-directories (each holding a ``quant.sf``)
 writes one ``<dirname>.counts`` file per sample, with a ``transcript\\tcount`` header and
 one row per transcript carrying its TPM value.
 
-Ported faithfully from metaWRAP's ``summarize_salmon_files.py`` (originally
-``gather-counts.py`` by C. Titus Brown, 11/2015 —
-https://github.com/ngs-docs/2015-nov-adv-rna/). Attribution retained.
+Ported from metaWRAP's ``summarize_salmon_files.py`` (originally ``gather-counts.py`` by
+C. Titus Brown, 11/2015, https://github.com/ngs-docs/2015-nov-adv-rna/).
 """
 
 from __future__ import annotations

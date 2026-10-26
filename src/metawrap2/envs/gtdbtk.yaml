@@ -3,11 +3,10 @@
 # stays taxator-tk in classify_bins.yaml. Needs the GTDB reference data
 # downloaded separately.
 #
-# Pinned to a major-minor range rather than left open above 2.4. `>=2.4.0` now resolves to 2.7.x,
-# which wants reference release R232, about 140 GB of RAM for classify_wf, and has dropped flags
-# earlier versions accepted - so an open floor turns an install that worked into a run that cannot
-# start, on a machine the user already had. Moving this pin means checking the flags in
-# classify_bins.COMMANDS against the new release and saying which R the data must be.
+# Pinned to a major-minor range instead of open above 2.4. `>=2.4.0` now resolves to 2.7.x,
+# which needs reference release R232 and about 140 GB of RAM for classify_wf, and has dropped
+# flags earlier versions accepted. Before moving this pin, check the flags in
+# classify_bins.COMMANDS against the new release and state which R the data must be.
 name: metawrap2-gtdbtk
 channels:
   - conda-forge

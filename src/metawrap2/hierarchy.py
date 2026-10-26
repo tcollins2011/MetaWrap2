@@ -1,8 +1,6 @@
-"""Where a genome's functional capacity sits in KEGG's hierarchy, as percentages and as a Krona plot.
+"""Distribute a genome's or sample's KOs over the KEGG BRITE hierarchy, as tables and Krona input.
 
-A list of KOs answers "which genes" and nothing above it. The question a reader actually has is what
-*kind* of thing a genome spends its genome on, and how that differs between genomes and between
-samples - which is a hierarchy, and KEGG already publishes one. BRITE ko00001 has four levels:
+BRITE ko00001 has four levels:
 
 =========  =========================================  =======================================
 level      example                                    what it is
@@ -13,22 +11,15 @@ C          ``Glycolysis / Gluconeogenesis``           the pathway, 570 of them
 D          ``K00844`` hexokinase                      the gene, 28,545 of them
 =========  =========================================  =======================================
 
-So gene -> chemical process -> pathway is a projection of a table KEGG maintains, and the
-distribution over it is a sum with weights. Two weightings, and the difference between them is the
-point:
+Two weightings are supported:
 
-* **Per genome**, weight every gene equally: what fraction of this MAG's annotated genes are in
-  carbohydrate metabolism. This describes the organism.
-* **Per sample**, weight each genome by its abundance: what fraction of the *community's* functional
-  capacity is carbohydrate metabolism. This describes the sample, and it is not the average of the
-  per-genome numbers - a rare genome with an unusual metabolism contributes little, which is correct
-  and is the whole reason to weight.
+* Per genome, every gene weighted equally: the share of a MAG's annotated genes in each category.
+* Per sample, each genome weighted by its abundance: the share of the community's functional
+  capacity. This is not the average of the per-genome numbers; rare genomes contribute little.
 
-A KO belongs to more than one pathway (65k KO-pathway pairs over 28.5k KOs), so the hierarchy is
-many-to-many and a naive sum double-counts. :func:`distribute` splits each gene's weight equally
-across the paths it belongs to, so every column of the output sums to the same total as the input.
-The alternative - counting a gene once per pathway - makes percentages that do not add up, which is
-worse than being approximate about which pathway a promiscuous enzyme "really" belongs to.
+A KO can belong to several pathways (65k KO-pathway pairs over 28.5k KOs). :func:`distribute`
+splits each KO's weight equally across its paths, so the output sums to the input total and
+percentages add up to 100.
 """
 
 from __future__ import annotations
@@ -48,8 +39,8 @@ from .io.seqio import smart_open
 #: Where BRITE ko00001 is downloaded from by `metawrap2 install-db kegg`.
 BRITE_URL = "https://www.kegg.jp/kegg-bin/download_htext?htext=ko00001&format=htext&filedir="
 
-#: What `install-db kegg` writes into the KEGG_BRITE directory: the projection this module reads,
-#: one row per (KO, pathway) pair with its level A and B, and a record of the download.
+#: Files `install-db kegg` writes into the KEGG_BRITE directory: the projection this module reads
+#: (one row per (KO, pathway) pair with its level A and B), and a record of the download.
 HIERARCHY_FILE = "ko_hierarchy.tsv.gz"
 SNAPSHOT_FILE = "SNAPSHOT.json"
 
@@ -67,30 +58,24 @@ HIERARCHY_FILE_COLUMNS: Tuple[str, ...] = (
     "ec",
 )
 
-#: The levels, outermost first. Named rather than positional because the Krona input, the long table
-#: and the wide table all have to agree on the order, and "level 2" is not a thing anyone remembers.
+#: The levels, outermost first. Shared by the Krona input and the long and wide tables.
 LEVELS: Tuple[str, ...] = ("level_a", "level_b", "pathway")
 
-#: BRITE's top-level branches that are classification scaffolding rather than biology. ``09180
-#: Brite Hierarchies`` is the largest branch in the file by a factor of two - 22,768 of 64,956 rows -
-#: and holds things like "Protein families: genetic information processing", which is a way of
-#: grouping proteins rather than a chemical process a genome performs. ``09190 Not Included in
-#: Pathway or Brite`` is the leftovers.
+#: BRITE top-level branches that group proteins instead of describing pathways. ``09180 Brite
+#: Hierarchies`` is the largest branch (22,768 of 64,956 rows), with entries such as "Protein
+#: families: genetic information processing". ``09190 Not Included in Pathway or Brite`` holds the
+#: rest.
 #:
-#: They are kept in every table, because the share of a genome's genes that KEGG cannot place in a
-#: pathway is a real number and dropping it would make every percentage beside it an overestimate.
-#: They are *flagged* so that a pathway-focused view can exclude them and say that it did.
+#: They are kept in every table, so percentages include genes KEGG does not place in a pathway, and
+#: flagged so pathway-only views can exclude them.
 NON_PATHWAY_BRANCHES: Tuple[str, ...] = ("09180", "09190")
 
-#: KEGG's own branches for things a genome does, in BRITE order. Two of them need a caveat when they
-#: turn up in a metagenome: ``Organismal Systems`` and ``Human Diseases`` are annotated from host
-#: biology, so a bacterial MAG scoring in them usually reflects a KO shared with a host pathway
-#: rather than the genome participating in it.
+#: KEGG's pathway branches, in BRITE order. ``Organismal Systems`` and ``Human Diseases`` are
+#: annotated from host biology, so hits from a bacterial MAG usually reflect a KO shared with a host
+#: pathway.
 PATHWAY_BRANCHES: Tuple[str, ...] = ("09100", "09120", "09130", "09140", "09150", "09160")
 
-#: Where a KO with no place in the hierarchy goes. Kept rather than dropped: the fraction of a
-#: genome's genes that KEGG cannot classify is a real and interesting number, and silently dropping
-#: them makes every percentage below it an overestimate.
+#: Label for KOs not in the hierarchy. They are kept so percentages are not inflated.
 UNCLASSIFIED = "Unclassified"
 
 
@@ -101,15 +86,13 @@ class Hierarchy:
     paths: Mapping[str, Tuple[Tuple[str, str, str], ...]]
     #: KO -> gene symbol and name, for labelling the deepest level of a table.
     gene_names: Mapping[str, str]
-    #: Level-A name -> its BRITE id, so a row can be tested against NON_PATHWAY_BRANCHES without
-    #: matching on a display string that KEGG is free to reword.
+    #: Level-A name -> BRITE id, so branches are tested by id instead of by display name.
     level_a_ids: Mapping[str, str]
-    #: When and what was downloaded, written into every output row. The hierarchy is revised, and a
-    #: percentage over last year's hierarchy is not comparable with one over this year's.
+    #: Download date and checksum, written into every output row, since the hierarchy is revised.
     snapshot: str = ""
 
     def is_pathway_branch(self, level_a: str) -> bool:
-        """True when this top-level branch is biology rather than BRITE's own scaffolding."""
+        """True when this top-level branch is one of PATHWAY_BRANCHES."""
         return self.level_a_ids.get(level_a, "") in PATHWAY_BRANCHES
 
     def __contains__(self, ko: str) -> bool:
@@ -121,7 +104,7 @@ class Hierarchy:
 
 
 def _require(hierarchy: Optional[Hierarchy]) -> Hierarchy:
-    """The hierarchy every distribution needs. There is no bundled default: load it from KEGG_BRITE."""
+    """Return *hierarchy*, or raise if None. No default is bundled; load one from KEGG_BRITE."""
     if hierarchy is None:
         raise ValueError(
             "no KEGG hierarchy given; load one with load_hierarchy(<KEGG_BRITE directory>)"
@@ -231,9 +214,8 @@ def distribute(
     """Spread each KO's weight over the hierarchy paths it belongs to.
 
     *weights* is KO -> weight: a gene count for a per-genome distribution, or an abundance-weighted
-    gene count for a per-sample one. The weight of a KO on *n* paths is split *n* ways rather than
-    counted *n* times, so the returned values sum to ``sum(weights.values())`` and a percentage over
-    them means what it says.
+    gene count for a per-sample one. The weight of a KO on *n* paths is split *n* ways, so the
+    returned values sum to ``sum(weights.values())``.
     """
     tree = _require(hierarchy)
     out: Dict[Tuple[str, str, str], float] = defaultdict(float)
@@ -271,25 +253,22 @@ HIERARCHY_COLUMNS: Tuple[str, ...] = (
     "percent",
     "percent_of_pathway_branches",
     "is_pathway_branch",
-    # Which abundance the weights came from. A sample profile weighted by MAG abundance describes
-    # the *binned* part of the community; one weighted by gene abundance from read mapping to a gene
-    # catalogue describes the whole sample, unbinned sequence included. The two answer different
-    # questions and the rows have to say which, or a reader joining two runs cannot tell them apart.
+    # Which abundance the weights came from. MAG-abundance weighting describes the binned part of
+    # the community; gene-abundance weighting (reads mapped to a gene catalogue) describes the whole
+    # sample. Recorded so outputs from different runs can be told apart.
     "weighting",
     "hierarchy_snapshot",
 )
 
-#: What `weighting` holds. `genes` is one genome's genes counted equally - the per-genome unit.
+#: Values of `weighting`. One genome's genes counted equally (the per-genome unit).
 WEIGHTING_GENES = "gene_count"
 #: MAG abundance x per-genome gene counts: the binned community's potential.
 WEIGHTING_MAG_ABUNDANCE = "mag_abundance"
-#: Per-gene abundance from mapping reads to a gene catalogue: the whole sample's potential, with no
-#: binning step in the way.
+#: Per-gene abundance from mapping reads to a gene catalogue: the whole sample's potential.
 WEIGHTING_GENE_ABUNDANCE = "gene_abundance"
-#: Per-contig depth, with every gene on a contig weighted by that contig's depth. The same question
-#: as gene abundance - the whole sample's potential, binned or not - answered from the depth table
-#: `binning` already wrote rather than from a second round of read mapping. Less precise per gene,
-#: because every gene on a contig gets the contig's depth, and free.
+#: Per-contig depth, each gene weighted by its contig's depth. Like gene abundance it covers the
+#: whole sample, but it reuses the depth table `binning` wrote instead of mapping reads again. Less
+#: precise per gene.
 WEIGHTING_CONTIG_DEPTH = "contig_depth"
 
 
@@ -302,18 +281,13 @@ def hierarchy_rows(
 ) -> List[Dict[str, object]]:
     """Long rows for one genome or one sample, at every depth.
 
-    Every depth is emitted rather than only the deepest, because the percentages at level A are the
-    headline ("38% of this genome's genes are metabolism") and deriving them from the pathway rows
-    means re-doing the many-to-many split correctly. One table, three depths, each summing to 100%.
+    All three depths are emitted, each summing to 100%, so callers need not re-aggregate.
 
-    Two percentages per row, because there are two honest denominators and picking one silently
-    would mislead either way:
+    Each row has two percentages:
 
-    * ``percent`` is of everything annotated, including the KOs KEGG files under BRITE scaffolding
-      rather than a pathway. It is the one that adds to 100 within a level.
-    * ``percent_of_pathway_branches`` is of the biology only, which is what a reader comparing two
-      genomes' metabolism wants. A scaffolding row has this empty rather than zero - it is not a
-      small share of that denominator, it is not in it.
+    * ``percent``: of everything annotated, including NON_PATHWAY_BRANCHES. Sums to 100 per level.
+    * ``percent_of_pathway_branches``: of PATHWAY_BRANCHES only. Empty, not zero, for rows outside
+      them.
     """
     tree = _require(hierarchy)
     total = sum(distribution.values())
@@ -359,14 +333,11 @@ def write_krona_input(
 ) -> int:
     """Write the TSV ``ktImportText`` takes: a weight, then one column per level.
 
-    Krona is already a dependency here - ``kraken2`` plots its taxonomy with the same binary - so a
-    functional Krona plot costs an input file rather than an install. The format is deliberately
-    simple: ``<weight>\\tlevel_a\\tlevel_b\\tpathway``, and Krona does the nesting and the
-    percentages itself, which is why no percentage is written here.
+    Krona is already used by ``kraken2``. Each line is ``<weight>\\tlevel_a\\tlevel_b\\tpathway``;
+    Krona computes the nesting and percentages.
 
-    *pathways_only* drops BRITE's scaffolding branches. Worth having both: the full plot is the
-    honest one and shows how much of a genome KEGG cannot place in a pathway, but that branch is the
-    largest in the file and it dominates the wheel, so the pathway-only plot is the readable one.
+    *pathways_only* drops NON_PATHWAY_BRANCHES. The full plot shows how much KEGG cannot place in a
+    pathway, but that branch is the largest and dominates the chart.
     """
     tree = _require(hierarchy) if pathways_only else hierarchy
     written = 0
@@ -384,8 +355,7 @@ def write_krona_input(
 def weights_from_gene_kos(gene_kos: Iterable[Sequence[str]]) -> Dict[str, float]:
     """KO -> gene count, from an iterable of each gene's KO assignments.
 
-    A gene with several KO hits contributes a fraction to each rather than one to each, for the same
-    reason :func:`distribute` splits across paths: so the total stays the number of genes.
+    A gene with several KOs contributes an equal fraction to each, so the total is the gene count.
     """
     out: Dict[str, float] = defaultdict(float)
     for kos in gene_kos:
@@ -404,18 +374,14 @@ def weights_from_gene_abundance(
 ) -> Dict[str, float]:
     """KO -> weight for one sample, from *per-gene* abundance rather than per-genome abundance.
 
-    ``A(ko) = sum over genes of abundance(gene) * 1/|KOs(gene)|`` - the same share-splitting as
-    :func:`weights_from_gene_kos`, with each gene counted by how much of it is in the sample instead
-    of once.
+    ``A(ko) = sum over genes of abundance(gene) * 1/|KOs(gene)|``: the share-splitting of
+    :func:`weights_from_gene_kos`, weighted by each gene's abundance.
 
-    This is the whole-sample functional potential, and it differs from the MAG-weighted profile in
-    what it covers rather than only in precision: a gene catalogue built from the assembly includes
-    the ~90% of assembled sequence that never reaches a MAG, so a pathway carried only by unbinned
-    contigs appears here and cannot appear there. Neither is more correct - they are potentials of
-    different things, which is why the output records which weighting produced it.
+    This is the whole-sample functional potential. A gene catalogue from the assembly includes the
+    ~90% of assembled sequence that never reaches a MAG, so pathways on unbinned contigs appear here
+    but not in the MAG-weighted profile.
 
-    Genes with no abundance entry contribute nothing rather than defaulting to one: a gene absent
-    from the quantification was not observed in this sample.
+    Genes with no abundance entry contribute nothing.
     """
     out: Dict[str, float] = defaultdict(float)
     for gene, kos in gene_kos.items():
@@ -438,18 +404,13 @@ def weights_from_contig_depth(
 ) -> Dict[str, float]:
     """KO -> weight for one sample, from *per-contig* depth.
 
-    The no-MAG route, and the cheap one: `binning` already writes a per-contig depth table, so this
-    needs no second round of read mapping. Every gene on a contig is weighted by that contig's
-    depth, which is the approximation being made - a contig's depth is uniform across its genes by
-    assumption, where mapping reads to the genes measures each one.
+    Uses the per-contig depth table `binning` writes, so no extra read mapping is needed. Every gene
+    on a contig gets that contig's depth, which assumes uniform depth along the contig.
 
-    *contig_of* maps a gene id to its contig. Without it the contig is recovered from the gene id,
-    which :mod:`metawrap2.genecall` writes as ``<contig>_<n>`` - and recovering it that way is only
-    safe because the split is at the *last* underscore, so a contig name containing underscores
-    survives.
+    *contig_of* maps a gene id to its contig. Without it the contig is taken from the gene id
+    (``<contig>_<n>``, as :mod:`metawrap2.genecall` writes it); see :func:`contig_from_gene`.
 
-    Genes whose contig has no depth entry contribute nothing: a contig absent from the table was not
-    covered in this sample.
+    Genes whose contig has no depth entry contribute nothing.
     """
     out: Dict[str, float] = defaultdict(float)
     for gene, kos in gene_kos.items():
@@ -469,13 +430,12 @@ def weights_from_contig_depth(
 def contig_from_gene(gene: str) -> str:
     """The contig a gene id belongs to, for ids of the form ``<contig>_<n>``.
 
-    Split at the last underscore, not the first: ``k141_73537_length_916682_cov_50.9988_12`` is gene
-    12 of a contig whose own name has five underscores in it. Splitting at the first would return
-    ``k141`` for every gene in the assembly, which is one contig with every KO on it.
+    Splits at the last underscore, because contig names contain underscores:
+    ``k141_73537_length_916682_cov_50.9988_12`` is gene 12 of contig
+    ``k141_73537_length_916682_cov_50.9988``.
 
-    A catalogue gene carries its source too (``bin_003~k141_..._12``); the prefix is left in place,
-    because a depth table built over the same catalogue carries it as well and stripping it here
-    would break that join.
+    A catalogue gene's source prefix (``bin_003~k141_..._12``) is kept, because depth tables built
+    over the same catalogue carry it too.
     """
     head, _, tail = gene.rpartition("_")
     return head if head and tail.isdigit() else gene
@@ -487,14 +447,11 @@ def weighted_sample_profile(
 ) -> Dict[str, float]:
     """Community KO weights: each genome's KO weights scaled by that genome's abundance.
 
-    ``A(ko, sample) = sum over genomes of n(ko, genome) * abundance(genome, sample)``, which is the
-    same arithmetic as gene abundance and has the same trap: *abundance* must already be
-    coverage-proportional (CoverM relative_abundance or trimmed_mean), **not** divided by genome
-    size a second time. Coverage is already per-cell; dividing again double-corrects.
+    ``A(ko, sample) = sum over genomes of n(ko, genome) * abundance(genome, sample)``. *abundance*
+    must be coverage-proportional (CoverM relative_abundance or trimmed_mean) and not divided by
+    genome size.
 
-    Genomes with no abundance entry contribute nothing, rather than defaulting to 1 - a genome
-    missing from the abundance table was not observed in this sample, and treating it as present at
-    unit abundance would put a MAG from another sample into this one's profile.
+    Genomes with no abundance entry contribute nothing.
     """
     out: Dict[str, float] = defaultdict(float)
     for genome, kos in per_genome.items():

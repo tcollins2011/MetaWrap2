@@ -1,18 +1,16 @@
 # TRACS, the second strain backend.
 #
-# Its own environment for the reason RGI has one: it resolves an older scientific-python stack than
-# inStrain's environment holds, and asking for both in one place downgrades whichever is the
-# default to satisfy the opt-in one.
+# A separate env, as for RGI: it resolves an older scientific-python stack than inStrain's env,
+# and one env would downgrade the default backend.
 #
-# Why have two strain backends at all: they answer different questions. inStrain compares *allele
-# populations* and reports a population identity; TRACS estimates a *transmission distance* from a
-# consensus SNP distance after accounting for within-host diversity and a clock. Shaw & Yu's
-# evaluation found most tools overestimate SNP distances and TRACS least of all, which matters for
-# any transmission claim - so the two are run side by side and reported separately, never averaged.
+# The two backends answer different questions. inStrain compares allele populations and reports a
+# population identity; TRACS estimates a transmission distance from a consensus SNP distance after
+# accounting for within-host diversity and a clock. Shaw & Yu's evaluation found most tools
+# overestimate SNP distances and TRACS the least. The two are run side by side and reported
+# separately, not averaged.
 #
 # TRACS also needs a sourmash signature database of the reference genomes, which `strains` builds
-# per run: the database is of that genome set, and a stale one screens against the wrong references
-# without failing.
+# per run, since a stale one would screen against the wrong references without failing.
 name: metawrap2-tracs
 channels:
   - conda-forge

@@ -1,10 +1,8 @@
-"""quant_bins --quantifier sylph: the sketch-and-profile commands, and the pivot of sylph's output.
+"""quant_bins --quantifier sylph: the profile command and the pivot of sylph's output.
 
-sylph is the one quantifier whose native output is not a table of the right shape. It reports one
-line per detection, in whatever order it found them, and says nothing at all about a genome it did
-not detect - so almost everything worth pinning here is about turning that into the same
-``bin_abundance_table.tsv`` the other two quantifiers write, without inventing numbers and without
-losing bins.
+sylph writes one line per detection, in no fixed order, and omits undetected genomes. These tests
+check the pivot into the same ``bin_abundance_table.tsv`` the other quantifiers write, with every
+bin present.
 """
 
 from metawrap2.constants import TSV_SUFFIX
@@ -17,7 +15,7 @@ SYLPH_COLUMNS = (
 
 
 def _pairs(*names):
-    """``(sample, r1, r2)`` triples of the shape ``collect_read_pairs`` hands over."""
+    """``(sample, r1, r2)`` triples as ``collect_read_pairs`` returns them."""
     return [(n, "/reads/%s_1.fastq" % n, "/reads/%s_2.fastq" % n) for n in names]
 
 
@@ -56,12 +54,10 @@ def test_a_long_profile_becomes_a_bins_by_samples_table(tmp_path):
         ["bin_1", "65.0", "12.0"],
         ["bin_2", "35.0", "88.0"],
     ]
-    # Sequence abundance, not taxonomic: the other quantifiers and the benchmark truth measure
-    # sequence, and taking the wrong column would make sylph look wrong for no reason of its own.
+    # Sequence abundance, not taxonomic, to match the other quantifiers and the benchmark truth.
     assert table[1][1] != "70.0"
 
-    # sylph omits a genome below its ANI threshold entirely; that is a zero, not a missing row, or
-    # a bin the folder does contain would silently drop out of the table.
+    # sylph omits genomes below its ANI threshold; they become zeros, so every bin has a row.
     raw = _profile(tmp_path, [("/reads/s2_1.fastq", "/bins/bin_2.fasta.gz", "100.0", "100.0")])
     rows, table = _table(
         tmp_path, raw, _pairs("s1", "s2"), ["/bins/bin_1.fasta", "/bins/bin_2.fasta.gz"]
@@ -69,7 +65,7 @@ def test_a_long_profile_becomes_a_bins_by_samples_table(tmp_path):
     assert rows == 2
     assert table[1:] == [["bin_1", "0.0", "0.0"], ["bin_2", "0.0", "100.0"]]
 
-    # 95 sent 55% of one sample's abundance to bins whose genomes were absent from it; 99 did not.
+    # At 95, 55% of one sample's abundance went to bins absent from it; at 99, 25%.
     assert quant_bins.SYLPH_MIN_ANI == 99
     profile = quant_bins.SYLPH_PROFILE.format(
         db="b.syldb", sketches="a.sylsp", min_ani=quant_bins.SYLPH_MIN_ANI, threads=4, out="o.tsv"

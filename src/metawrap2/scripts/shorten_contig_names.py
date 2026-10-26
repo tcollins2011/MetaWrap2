@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 """Shorten long, underscore-heavy contig names so PROKKA will accept them.
 
-Streams a FASTA file: sequence lines pass through unchanged, and header lines are truncated
-to their first four underscore-delimited fields once a header long enough to need it is seen
-(from then on every header is shortened, matching the original one-shot latching behavior).
+Streams a FASTA file. Sequence lines pass through unchanged. Once a header longer than 20
+characters with more than five underscore-delimited fields is seen, that header and every later one
+are truncated to their first four fields, as in the original.
 
-Ported faithfully from metaWRAP's ``shorten_contig_names.py``. ``.gz`` input is supported via
-the shared sequence reader.
+Port of metaWRAP's ``shorten_contig_names.py``. ``.gz`` input is supported.
 """
 
 from __future__ import annotations

@@ -1,25 +1,20 @@
-"""Running one comparison's variants over one dataset, under one budget, and recording the cost.
+"""Run one comparison's variants over one dataset under one budget, and record the cost.
 
-The discipline this module exists to enforce is that only the thing being compared differs. Every
-variant of a comparison gets the same inputs, the same thread and memory grant, and the same
-machine; what changes is the flags under test. Without that, a results table is a table of
-coincidences - a binner that happened to run when the node was quiet looks efficient.
+Every variant of a comparison gets the same inputs, the same thread and memory grant and the same
+machine; only the flags under test differ.
 
-Three specifics follow from it:
+* The budget is resolved once and given to every variant, so a variant that starts while other
+  work is finishing gets the same grant as the rest.
+* Binning comparisons default to the gold-standard assembly, which CAMI2 provides so binners can
+  be measured without assembler variance.
+* :func:`metawrap2.usage.run_measured` reaps each child with ``wait4``, so peak RSS and CPU seconds
+  are per step, not a running maximum over every child the process has waited for.
+* A variant can be another pipeline (:class:`metawrap2.benchmark.registry.External`). It gets the
+  same inputs, budget and measurement. Only its argv and the publishing of its bins under the name
+  the scorer reads are different.
 
-* **The budget is resolved once and handed to every variant.** Not re-resolved per variant, so a
-  run that starts while something else is finishing does not give the first variant half a machine
-  and the second one all of it.
-* **Binning comparisons default to the gold-standard assembly.** CAMI2 ships one precisely so a
-  binner can be measured without an assembler's variance in front of it. Comparing binners on
-  their own assemblies measures the pair, which is a different question and a noisier one.
-* **Cost is measured, not timed by hand.** :func:`metawrap2.usage.run_measured` reaps each child
-  with ``wait4``, so peak RSS and CPU seconds are the step's own rather than a running maximum
-  across everything the process has ever waited for.
-
-What this module does not do is decide anything. It produces rows;
-:func:`metawrap2.benchmark.scoring.value_against_cost` puts them beside the result, and a person
-reads that.
+This module produces cost rows; :func:`metawrap2.benchmark.scoring.value_against_cost` sets them
+beside the accuracy results.
 """
 
 from __future__ import annotations
@@ -27,6 +22,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -36,20 +32,20 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from .. import config as _config
 from .. import limits as _limits
 from .. import usage as _usage
+from ..command import capture_in_env as _capture_in_env
 from ..command import runner as _runner
-from ..constants import is_refined_bins_dirname
+from ..constants import BIN_EXTENSION, bin_label, is_refined_bins_dirname
 from ..io import reads as _reads
 from ..utils import strip_trailing_slash
-from .registry import Comparison, Dataset, RegistryError, Variant
+from .registry import PLACEHOLDER_RE, Comparison, Dataset, RegistryError, Variant
 from .scoring import Row
 
-#: How many bin sets bin_refinement will consolidate. Its own -A..-F flags are the ceiling, and the
-#: real limit is the 2^n-1 CheckM runs behind them: six sets is 63.
+#: How many bin sets bin_refinement will consolidate: its -A..-F flags, and the 2^n-1 CheckM runs
+#: behind them (63 for six sets).
 MAX_REFINEMENT_SETS = 6
 
-#: Modules the runner knows how to feed, and what each needs beyond reads. Kept as an explicit
-#: table rather than a generic argument builder: a benchmark that guessed wrong about a module's
-#: arguments would produce numbers, and numbers from the wrong command are worse than an error.
+#: Modules the runner can feed, and what each needs beyond reads. An explicit table, so an
+#: unsupported module is an error instead of a guessed command line.
 SUPPORTED_MODULES = {
     "read_qc": "reads, one sample at a time",
     "assembly": "reads",
@@ -58,9 +54,13 @@ SUPPORTED_MODULES = {
     "quant_bins": "reads + one set of bins from a previous run (--bins-from)",
 }
 
-#: Modules that take one sample per invocation rather than a whole cohort. These are run once per
-#: sample and their cost rows carry the sample label, so a ten-sample dataset yields ten measured
-#: runs that sum into one ratio - the same arithmetic as a cohort module, from more evidence.
+#: Where an external arm writes its own output, inside the arm's directory. The scorer looks for
+#: bin sets by name directly under the arm, so the foreign pipeline's directories are kept one
+#: level down, away from the bin set the runner publishes.
+EXTERNAL_RUN_DIRNAME = "external"
+
+#: Modules that take one sample per invocation instead of a whole cohort. They run once per sample
+#: and their cost rows carry the sample label; the rows sum into one ratio, as for a cohort module.
 PER_SAMPLE_MODULES = frozenset({"read_qc"})
 
 
@@ -70,7 +70,7 @@ class RunnerError(Exception):
 
 @dataclass
 class Inputs:
-    """The prepared inputs a dataset offers, discovered on disk rather than assumed."""
+    """The prepared inputs a dataset offers, as found on disk."""
 
     pairs: List[Sequence[str]]  # (sample, r1, r2)
     assembly: Optional[str] = None
@@ -87,8 +87,7 @@ class Inputs:
 def _find(root: str, suffixes: Sequence[str]) -> List[str]:
     """Every file under *root* ending in one of *suffixes*, sorted.
 
-    Sorted because the order reads are passed to a binner changes nothing about the result but
-    everything about whether two runs are byte-comparable.
+    Sorted so two runs pass reads in the same order and their outputs are byte-comparable.
     """
     found: List[str] = []
     for base, _dirs, names in os.walk(root):
@@ -101,11 +100,9 @@ def _find(root: str, suffixes: Sequence[str]) -> List[str]:
 def read_candidates(dataset: Dataset, source: str) -> List[str]:
     """The dataset's read files: its declared ``reads_glob`` if it has one, else every FASTQ.
 
-    The glob matters more than it looks. CAMI2's ``reads/`` directory holds the 10 GB interleaved
-    FASTQ *and* a 3 MB ``subsample_0.fq`` debugging extract, both under the same ``sample_N``
-    directory - so a plain suffix scan finds two files that resolve to one sample label, and
-    whichever sorts last silently wins. Benchmarking a trimmer on 3 MB instead of 10 GB produces
-    numbers, and numbers off the wrong file are worse than no numbers.
+    CAMI2's ``reads/`` directory holds the 10 GB interleaved FASTQ and a 3 MB ``subsample_0.fq``
+    debugging extract under the same ``sample_N`` directory. A plain suffix scan finds both under
+    one sample label, so datasets like this declare a glob.
     """
     if dataset.reads_glob:
         found = sorted(glob.glob(os.path.join(source, dataset.reads_glob)))
@@ -122,9 +119,8 @@ def read_candidates(dataset: Dataset, source: str) -> List[str]:
 def abundance_truth_files(dataset: Dataset, data_dir: str) -> Dict[str, str]:
     """The dataset's per-sample read-to-genome mappings, keyed by the same sample label as the reads.
 
-    Keyed by :func:`_sample_label` rather than by directory name, because that is the label the
-    quantifier's table columns carry - the join between an estimate and its truth is that label, and
-    deriving both ends of it from one function is the only way to be sure they agree.
+    Keyed by :func:`_sample_label`, the label the quantifier's table columns carry, so estimate
+    and truth are joined on labels from the same function.
     """
     if not dataset.abundance_truth_glob:
         raise RunnerError(
@@ -155,14 +151,11 @@ def abundance_truth_files(dataset: Dataset, data_dir: str) -> Dict[str, str]:
 def _narrowing_label(path: str, layout: str) -> str:
     """The *sample* a read file belongs to, for deciding which files to prepare.
 
-    Not :func:`_sample_label`, and the difference is the mate suffix. That function labels a file,
-    which is what a results row and an abundance-truth join need; this one has to label a sample,
-    because a paired dataset has two files per sample and narrowing on the file label selects one
-    sample's two mates when asked for two samples.
+    Unlike :func:`_sample_label`, which labels a file, this strips the mate suffix so both files
+    of a paired sample get one label.
 
-    The suffix is stripped only for a paired layout. An interleaved dataset has one file per sample
-    and CAMI2's labels are ``sample_0``, ``sample_1``, ``sample_2`` - stripping a trailing ``_1``
-    there would merge two different samples into one.
+    The suffix is stripped only for a paired layout. Interleaved CAMI2 labels are ``sample_0``,
+    ``sample_1``, ``sample_2``, and stripping a trailing ``_1`` would merge two samples.
     """
     label = _sample_label(path)
     if layout == "interleaved":
@@ -182,16 +175,13 @@ def _narrow_candidates(
 ) -> List[str]:
     """The read files worth preparing, given the sample selection.
 
-    Named samples that are absent are *not* an error here: :func:`select_samples` reports those
-    against the full list of what the dataset has, and duplicating the check would report it
-    against a list this function has already shortened.
+    Named samples that are absent are not an error here; :func:`select_samples` reports them
+    against the dataset's full sample list.
     """
     if not wanted and max_samples <= 0:
         return list(candidates)
-    # Paths per sample, not one path per sample. A paired dataset has two files under one label, so
-    # keying a dict on the label keeps whichever came last - every mate file was silently dropped,
-    # and the pairing downstream then read one file per sample and mislabelled the lot: a
-    # three-sample run narrowed to two reported one. Grouping keeps both mates of every sample kept.
+    # A list of paths per sample: a paired dataset has two files under one label, and both mates
+    # must be kept.
     by_sample: Dict[str, List[str]] = {}
     for path in candidates:
         by_sample.setdefault(_narrowing_label(path, layout), []).append(path)
@@ -209,9 +199,8 @@ def _narrow_candidates(
             % (len(order), len(by_sample), ", ".join(order))
         )
     kept = set(order)
-    # Original order, so the files are prepared in the order they were found rather than in label
-    # order - the downstream pairing matches mates by name and does not care, but a stable order
-    # keeps a dry run's printed plan comparable between runs.
+    # Original order, so a dry run's printed plan is stable between runs. The downstream pairing
+    # matches mates by name.
     return [path for path in candidates if _narrowing_label(path, layout) in kept]
 
 
@@ -227,20 +216,15 @@ def prepare_reads(
 ) -> List[Sequence[str]]:
     """Locate the dataset's reads and, if interleaved, split them once into *work_dir*.
 
-    *wanted* and *max_samples* are the same narrowing :func:`select_samples` applies, passed in
-    here so the splitting is narrowed too. Without that, a comparison asked for three samples
-    deinterleaved all ten first: 190 GB written and an hour spent to use 57 GB of it, on a
-    filesystem the harness otherwise guards with a disk preflight. The selection still happens in
-    one place - this only decides which files are worth writing.
+    *wanted* and *max_samples* are the narrowing :func:`select_samples` applies, passed here so
+    only the selected samples are split. (Splitting all ten CAMI2 samples for a three-sample
+    comparison wrote 190 GB to use 57 GB.) :func:`select_samples` still makes the final selection.
 
-    Splitting is cached: the second variant of a comparison finds the pairs already there. That is
-    not just a speed-up - deinterleaving twice would put the second variant's reads on a colder
-    page cache than the first's, which is exactly the kind of difference that turns into a
-    fictitious performance gap.
+    Splitting is cached and shared by all variants, so every variant reads from the same files
+    with a similar page cache.
 
-    Under *dry_run* the paths are named but nothing is written. For CAMI2 that is the difference
-    between printing six commands and spending an hour writing 100 GB of mate files - and the
-    point of a dry run is to see the plan before committing to the work.
+    Under *dry_run* the paths are named but nothing is written (for CAMI2, about 100 GB of mate
+    files).
     """
     source = dataset.local_root if dataset.is_local else os.path.join(data_dir, "extracted")
     if not os.path.isdir(source):
@@ -264,9 +248,8 @@ def prepare_reads(
         for path in candidates:
             sample = _sample_label(path)
             if sample in claimed:
-                # A backstop for the glob above: two files under one label would mean the second
-                # deinterleave overwrites the first, and the comparison would run on whichever
-                # file happened to sort last rather than on the one meant.
+                # Backstop for the glob: two files under one label would deinterleave to the same
+                # output, and the second would overwrite the first.
                 raise RunnerError(
                     "Two read files both resolve to sample %r:\n  %s\n  %s\n"
                     "Narrow %s's reads_glob in benchmarks/datasets.toml so it names one file per "
@@ -288,8 +271,8 @@ def prepare_reads(
     try:
         triples = _reads.collect_pairs(candidates)
     except ValueError as exc:
-        # collect_pairs already explains which conventions it recognises; re-raising as a
-        # RunnerError keeps the benchmark's own errors in one class without losing that.
+        # collect_pairs' message lists the naming conventions it recognises; re-raised as a
+        # RunnerError so the benchmark's errors share one class.
         raise RunnerError("Could not pair the reads under %s.\n%s" % (source, exc))
     return sorted(triples, key=lambda triple: triple[0])
 
@@ -297,10 +280,8 @@ def prepare_reads(
 def _sample_label(path: str) -> str:
     """A stable sample label from a CAMI2-style path.
 
-    The published directories are timestamp-prefixed (``2017.12.04_18.45.54_sample_0``), and the
-    timestamp differs per sample, so the label comes from the ``sample_N`` part rather than from
-    the whole directory name - otherwise every results row would carry a publication timestamp
-    nobody needs and no two body sites would sort together.
+    The published directories are timestamp-prefixed (``2017.12.04_18.45.54_sample_0``) with a
+    different timestamp per sample, so the label is taken from the ``sample_N`` part.
     """
     for part in os.path.abspath(path).split(os.sep):
         if "sample_" in part:
@@ -326,8 +307,8 @@ def gather_inputs(
 ) -> Inputs:
     """Everything *comparison* needs to run over *dataset*, or a clear error saying what is absent.
 
-    *wanted* and *max_samples* are passed through to :func:`prepare_reads` so that preparing the
-    reads costs what the run costs rather than what the dataset holds.
+    *wanted* and *max_samples* are passed to :func:`prepare_reads` so only the selected samples
+    are prepared.
     """
     if comparison.module not in SUPPORTED_MODULES:
         raise RunnerError(
@@ -348,17 +329,14 @@ def gather_inputs(
     )
 
     resolved_assembly = assembly
-    # bin_refinement needs it too, for the same reason the command builder passes it: DAS Tool reads
-    # the assembly contigs itself and refuses to start without them, so a consolidator comparison
-    # could never run its DAS Tool arm. Resolved here rather than left to the caller, because the
-    # command builder's `if inputs.assembly` was already right and still produced a command with no
-    # -a - nothing had filled the field in.
+    # bin_refinement needs the assembly too: DAS Tool reads the contigs itself and will not start
+    # without them. build_argv passes -a only if this field is filled in here.
     if comparison.module in ("binning", "bin_refinement") and resolved_assembly is None:
         candidate = gold_path(dataset, "assembly", data_dir)
         if candidate is None:
             if comparison.module == "bin_refinement":
-                # Only DAS Tool needs it; the default consolidator works from the bins alone, so a
-                # dataset without a gold assembly can still answer part of the question.
+                # Only DAS Tool needs it; the default consolidator works from the bins alone, so
+                # the other arms can still run.
                 candidate = ""
             else:
                 raise RunnerError(
@@ -375,14 +353,14 @@ def gather_inputs(
             pass
         elif comparison.module == "binning":
             say(
-                "  binning on the gold-standard assembly (%s), which isolates the binner from the\n"
-                "  assembler's variance - pass --assembly to compare on a real assembly instead."
+                "  binning on the gold-standard assembly (%s), so assembler variation does not\n"
+                "  affect the comparison. Pass --assembly to compare on a real assembly instead."
                 % os.path.basename(candidate)
             )
         else:
             say(
-                "  passing the gold-standard assembly (%s) to every arm; DAS Tool reads the contigs\n"
-                "  itself and the arms have to be given the same inputs."
+                "  passing the gold-standard assembly (%s) to every arm, since DAS Tool reads the\n"
+                "  contigs itself and every arm needs the same inputs."
                 % os.path.basename(candidate)
             )
 
@@ -397,14 +375,12 @@ def gather_inputs(
 def one_bin_set(root: str) -> str:
     """The single bin directory under *root* a cohort module should be given.
 
-    ``bin_refinement`` takes several bin sets and consolidates them; ``quant_bins`` takes one. *root*
-    may already be that one - a folder of FASTA files - or it may be a variant's output directory
-    holding several ``*_bins`` subdirectories, which is what a binning comparison leaves behind.
+    ``bin_refinement`` takes several bin sets; ``quant_bins`` takes one. *root* may be a folder of
+    FASTA files, or a variant's output directory holding several ``*_bins`` subdirectories (what
+    a binning comparison leaves).
 
-    Where there are several, the consolidated set wins and anything else is refused rather than
-    picked. Quantifying one of three overlapping raw bin sets would produce a table that looks
-    perfectly ordinary and answers a question nobody asked, and choosing between them arbitrarily is
-    exactly the kind of silent decision a benchmark exists to avoid.
+    With several sets, the consolidated set is used. Otherwise RunnerError is raised instead of
+    picking one of several overlapping raw bin sets.
     """
     from ..io.seqio import fasta_files
 
@@ -418,9 +394,8 @@ def one_bin_set(root: str) -> str:
     consolidated = [p for p in sets if is_refined_bins_dirname(p)]
     if len(consolidated) > 1:
         raise RunnerError(
-            "%s holds %d consolidated bin sets (%s), so which one is the variant's answer is a "
-            "guess. That is a refinement run resumed at different -c/-x thresholds; point "
-            "--bins-from at the one you mean."
+            "%s holds %d consolidated bin sets (%s), usually from a refinement run resumed at "
+            "different -c/-x thresholds. Point --bins-from at the one to use."
             % (root, len(consolidated), ", ".join(os.path.basename(p) for p in consolidated))
         )
     if consolidated:
@@ -429,14 +404,13 @@ def one_bin_set(root: str) -> str:
         return sets[0]
     if not sets:
         raise RunnerError(
-            "Found neither bins nor any *_bins directory under %s. --bins-from wants either a folder "
-            "of bins or the output directory of a binning run." % root
+            "Found no bins and no *_bins directory under %s. --bins-from takes a folder of bins "
+            "or the output directory of a binning run." % root
         )
     raise RunnerError(
-        "%s holds %d bin sets (%s) and no consolidated metawrap_<c>_<x>_bins. They overlap, so "
-        "quantifying "
-        "one of them would answer a different question from the one asked - refine them into one set "
-        "first, or point --bins-from at the set you mean."
+        "%s holds %d bin sets (%s) and no consolidated metawrap_<c>_<x>_bins. The sets overlap. "
+        "Refine them into one set first, "
+        "or point --bins-from at the set to quantify."
         % (root, len(sets), ", ".join(os.path.basename(p) for p in sets))
     )
 
@@ -444,10 +418,9 @@ def one_bin_set(root: str) -> str:
 def depth_table_for(root: str) -> str:
     """The contig depth table the binning run under *root* left behind.
 
-    ``quant_bins --quantifier depth`` exists precisely so a cohort does not pay for a second round of
-    alignment, so the benchmark arm has to be handed the table binning already wrote. Searched beside
-    the bins and one level up, which covers both "--bins-from a binning output" and "--bins-from a
-    refinement output inside it".
+    ``quant_bins --quantifier depth`` reuses binning's table instead of aligning again. Searched
+    beside the bins and one level up, covering ``--bins-from`` pointing at a binning output or at
+    a refinement output inside it.
     """
     from ..modules.binning import DEPTH_TABLE
 
@@ -460,25 +433,213 @@ def depth_table_for(root: str) -> str:
             return path
     raise RunnerError(
         "The depth quantifier needs the contig depth table from the binning run, and none of these "
-        "exist:\n  %s\nThat table is written by `metawrap2 binning`, so point --bins-from at a "
-        "binning output directory (or the refinement inside one) rather than at a bare folder of "
-        "bins." % "\n  ".join(candidates)
+        "exist:\n  %s\n`metawrap2 binning` writes that table. Point --bins-from at a binning "
+        "output directory (or the refinement inside one), not at a folder of bins "
+        "alone." % "\n  ".join(candidates)
     )
 
 
 def _inherited_global_flags() -> List[str]:
-    """``--force``/``--resume`` as typed on the benchmark's own command line.
+    """``--force``, ``--resume`` and ``--gpu-strict`` as typed on the benchmark's command line.
 
-    Each variant is a separate process, so the flags the user gave ``metawrap2`` have to be handed
-    on explicitly or they apply to the harness and to nothing it runs - which is how a re-run of a
-    failed comparison ended up refused by every variant in it.
+    Each variant is a separate process, so these flags are passed on explicitly.
     """
     flags = []
     if _runner.force:
         flags.append("--force")
     if _runner.resume:
         flags.append("--resume")
+    if _limits.overrides().get("gpu_strict"):
+        flags.append("--gpu-strict")
     return flags
+
+
+def external_output_dir(out_dir: str) -> str:
+    """Where an external arm's own output goes: ``<arm>/external``."""
+    return os.path.join(out_dir, EXTERNAL_RUN_DIRNAME)
+
+
+def external_bins_dir(variant: Variant, out_dir: str) -> str:
+    """The directory the arm declared its bins land in, resolved under *out_dir*."""
+    if variant.external is None:
+        raise RunnerError("%s is not an external arm." % variant.name)
+    return os.path.join(external_output_dir(out_dir), variant.external.bins)
+
+
+def published_bins_dir(variant: Variant, out_dir: str) -> str:
+    """Where the arm's bins are presented for scoring: ``<arm>/<arm name>_bins``.
+
+    :func:`metawrap2.benchmark.assess.bin_dirs` finds bin sets by the ``_bins`` suffix, so an
+    external arm is scored by the same code as a native one.
+    """
+    return os.path.join(out_dir, "%s_bins" % variant.name)
+
+
+def external_env(variant: Variant) -> Optional[str]:
+    """The conda env an external arm runs in, or None when the config says not to use conda envs.
+
+    Resolved at call time, as :func:`assess.amber_env` is, so an edit to the config file takes
+    effect.
+    """
+    if variant.external is None:
+        return None
+    if not _config.load_settings().use_conda_envs:
+        return None
+    return variant.external.env
+
+
+def external_values(
+    inputs: Inputs,
+    out_dir: str,
+    threads: int,
+    memory_gb: int,
+    sample: str = "",
+) -> Dict[str, str]:
+    """What each placeholder resolves to for this invocation.
+
+    Only the values this run has. :func:`external_argv` refuses a placeholder missing here by
+    name, so a pipeline is never given the string "None" as a path.
+    """
+    values = {
+        "output": external_output_dir(out_dir),
+        "threads": str(threads),
+        "memory": str(memory_gb),
+    }
+    if inputs.assembly:
+        values["assembly"] = inputs.assembly
+    if inputs.read_files:
+        values["reads"] = " ".join(inputs.read_files)
+    if len(inputs.pairs) == 1:
+        # Only for one pair. A per-sample module is called once per sample, so {r1} is defined
+        # there. Filling it from the first of several pairs would run one sample and label the row
+        # with the whole dataset.
+        _sample, r1, r2 = inputs.pairs[0]
+        values["r1"] = r1
+        values["r2"] = r2
+    if inputs.bins_from:
+        values["bins"] = one_bin_set(str(inputs.bins_from))
+    if sample:
+        values["sample"] = sample
+    return values
+
+
+def external_argv(
+    variant: Variant,
+    inputs: Inputs,
+    out_dir: str,
+    threads: int,
+    memory_gb: int,
+    sample: str = "",
+) -> List[str]:
+    """The exact command an external arm runs, inside its own conda env.
+
+    The template is substituted first and then split with :mod:`shlex`, because ``{reads}`` is a
+    list of files and becomes several argv entries. A pipeline with two steps declares them as its
+    own ``bash -c '... && ...'``, which is still one measured process tree.
+    """
+    external = variant.external
+    if external is None:
+        raise RunnerError("%s is not an external arm." % variant.name)
+    values = external_values(inputs, out_dir, threads, memory_gb, sample=sample)
+    missing = [name for name in external.placeholders if name not in values]
+    if missing:
+        raise RunnerError(
+            "External arm %r uses %s, which this run has nothing to fill from.\n"
+            "The registry accepted the placeholder, so this is about the run rather than the "
+            "declaration: an {assembly} needs a gold-standard assembly or --assembly, {bins} needs "
+            "--bins-from, and {r1}/{r2} need a module that takes one sample at a time."
+            % (variant.name, ", ".join("{%s}" % name for name in missing))
+        )
+    resolved = PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], external.command)
+    return _runner.env_prefix(external_env(variant)) + shlex.split(resolved)
+
+
+def external_version(variant: Variant, *, probe: bool = True) -> str:
+    """What version an external arm ran, for the run record.
+
+    A declared ``version`` is used as given. Otherwise the arm's ``version_command`` is run in its
+    env, so the version comes from the installed binary.
+
+    A version that cannot be read is an error naming the arm, so every results row can be
+    reproduced from the table alone. *probe* is False under a dry run, where the env may not exist
+    yet.
+    """
+    external = variant.external
+    if external is None:
+        raise RunnerError("%s is not an external arm." % variant.name)
+    if external.version:
+        return external.version
+    if not probe:
+        return ""
+    output = _capture_in_env(external_env(variant), shlex.split(external.version_command))
+    for line in output.splitlines():
+        if line.strip():
+            return line.strip()
+    raise RunnerError(
+        "External arm %r: `%s` in env %r said nothing, so the version it would run is unknown.\n"
+        "A results row claiming a pipeline without a version is not reproducible. Either fix that "
+        'command or pin `version = "..."` in benchmarks/configurations.toml.'
+        % (variant.name, external.version_command, external.env)
+    )
+
+
+def publish_external_bins(variant: Variant, out_dir: str) -> str:
+    """Present an external arm's bins as ``<arm name>_bins``, and return that directory.
+
+    One symlink per file, named with the bin extension the scorer looks for:
+    :func:`metawrap2.checkm.count_bins` counts ``.fasta``, and metaWRAP 1.3.0 writes ``bin.1.fa``.
+    A link to the whole directory would show no bins.
+
+    The pipeline's own output is not changed, and nothing is copied.
+    """
+    from ..io.seqio import fasta_files
+
+    source = external_bins_dir(variant, out_dir)
+    if not os.path.isdir(source):
+        raise RunnerError(
+            "External arm %r exited 0 but wrote no bins at %s, which is where its declaration says "
+            "they land.\nEither the pipeline failed quietly or `bins` in "
+            "benchmarks/configurations.toml names the wrong path; both would otherwise be an empty "
+            "row in the results table." % (variant.name, source)
+        )
+    bins = fasta_files(source)
+    if not bins:
+        raise RunnerError(
+            "External arm %r exited 0 and %s holds no FASTA, so there is nothing to score."
+            % (variant.name, source)
+        )
+    gzipped = [path for path in bins if path.endswith(".gz")]
+    if gzipped:
+        raise RunnerError(
+            "External arm %r wrote %d gzipped bin(s) (%s). CheckM1 and prokka read uncompressed "
+            "bins only, so the arm has to decompress them itself - have its command end with a "
+            "`gunzip` over %s." % (variant.name, len(gzipped), os.path.basename(gzipped[0]), source)
+        )
+    published = published_bins_dir(variant, out_dir)
+    if os.path.islink(published):
+        os.unlink(published)
+    elif os.path.isdir(published):
+        # A previous publish is a directory of symlinks and is rebuilt. Real files under this name
+        # are other data and are not deleted.
+        real = [
+            name
+            for name in os.listdir(published)
+            if not os.path.islink(os.path.join(published, name))
+        ]
+        if real:
+            raise RunnerError(
+                "%s already exists and holds %d file(s) that are not links to an external arm's "
+                "bins (%s). Refusing to replace it - rename it, or rename the arm."
+                % (published, len(real), ", ".join(sorted(real)[:3]))
+            )
+        shutil.rmtree(published)
+    os.makedirs(published)
+    for path in bins:
+        link = os.path.join(published, bin_label(os.path.basename(path)) + BIN_EXTENSION)
+        # Relative, so the published set still resolves after the work directory is moved or
+        # copied.
+        os.symlink(os.path.relpath(path, published), link)
+    return published
 
 
 def build_argv(
@@ -489,20 +650,24 @@ def build_argv(
     threads: int,
     memory_gb: int,
     global_flags: Sequence[str] = (),
+    sample: str = "",
 ) -> List[str]:
     """The exact command a variant runs.
 
-    Spawned as a process rather than imported and called, so that what the benchmark measures is a
-    whole run - its env, its conda shim, its peak RSS - which is what a user's run is too.
+    Spawned as a process, so the measurement covers a whole run (env, conda shim, peak RSS) as a
+    user would run it.
 
-    Addressed through ``python -m metawrap2.cli``, the same way ``metawrap2 run`` spawns a study's
-    steps, because global flags are the CLI's and a module invoked as ``python -m
-    metawrap2.modules.<name>`` has no way to receive them. Without ``--force`` reaching the variant,
-    a comparison could not be re-run at all after a failure: every variant stopped at "already
-    contains a MetaWrap2 run", and the only way forward was deleting five directories by hand.
+    Invoked through ``python -m metawrap2.cli``, as ``metawrap2 run`` spawns a study's steps,
+    because global flags such as ``--force`` belong to the CLI and ``python -m
+    metawrap2.modules.<name>`` cannot receive them.
+
+    An external arm is built by :func:`external_argv`, so this one function answers what any arm
+    runs, and ``--dry-run`` prints foreign arms beside native ones.
     """
     from ..cli import MODULES
 
+    if variant.is_external:
+        return external_argv(variant, inputs, out_dir, threads, memory_gb, sample=sample)
     if comparison.module not in MODULES:
         raise RunnerError(
             "%r is not a MetaWrap2 module. Known: %s"
@@ -516,23 +681,21 @@ def build_argv(
         argv += ["-m", str(memory_gb)]
 
     if comparison.module == "read_qc":
-        # One sample per invocation, so the caller hands us a single pair.
+        # One sample per invocation, so the caller passes a single pair.
         if len(inputs.pairs) != 1:
             raise RunnerError(
                 "read_qc takes one sample at a time; got %d. This is a bug in the runner's "
-                "per-sample loop, not something the registry can fix." % len(inputs.pairs)
+                "per-sample loop." % len(inputs.pairs)
             )
         _sample, r1, r2 = inputs.pairs[0]
         argv += ["-1", r1, "-2", r2]
     elif comparison.module == "assembly":
-        # One pair, because `assembly` takes one file per mate - a comma-separated list is not a
-        # form it accepts, and passing one made it exit immediately with "does not exist". A cohort
-        # of samples is concatenated first, by prepare_coassembly, exactly as `metawrap2 run` does.
+        # One pair: `assembly` takes one file per mate, not a comma-separated list. A cohort is
+        # concatenated first by prepare_coassembly, as `metawrap2 run` does.
         if len(inputs.pairs) != 1:
             raise RunnerError(
                 "assembly takes one pair of read files; got %d. The samples should have been "
-                "concatenated first - this is a bug in the runner, not the registry."
-                % len(inputs.pairs)
+                "concatenated first. This is a bug in the runner." % len(inputs.pairs)
             )
         _sample, r1, r2 = inputs.pairs[0]
         argv += ["-1", r1, "-2", r2]
@@ -540,14 +703,11 @@ def build_argv(
         argv += ["-a", str(inputs.assembly)]
         argv += inputs.read_files
     elif comparison.module == "quant_bins":
-        # No -a: every quantifier under comparison works against the bins themselves, and giving
-        # salmon alone a whole-assembly pseudo-transcriptome would compare three tools on two
-        # different references.
+        # No -a: every quantifier under comparison works against the bins, so all use the same
+        # reference (salmon would otherwise index the whole assembly).
         argv += ["-b", one_bin_set(str(inputs.bins_from))]
         if "depth" in variant.args:
-            # The whole point of this quantifier is that the binning run already measured coverage,
-            # so the arm has to be given that table rather than re-deriving one - which would be
-            # measuring the aligner again under a different name.
+            # This quantifier reuses the coverage the binning run measured, so pass that table.
             argv += ["--depth", depth_table_for(str(inputs.bins_from))]
         argv += inputs.read_files
     elif comparison.module == "bin_refinement":
@@ -557,16 +717,13 @@ def build_argv(
             for name in os.listdir(root)
             if name.endswith("_bins") and os.path.isdir(os.path.join(root, name))
         )
-        # A previous refinement into the same directory left its own answer behind as a
-        # metawrap_<c>_<x>_bins folder. Refining a consolidated set together with the sets it was
-        # consolidated from is not the comparison anyone declared, so it is dropped.
+        # Drop a metawrap_<c>_<x>_bins folder left by an earlier refinement into this directory, so
+        # a consolidated set is not refined together with its own inputs.
         sets = [path for path in sets if not is_refined_bins_dirname(path)]
         if not sets:
             raise RunnerError("Found no *_bins directories under %s to refine." % root)
-        # --bins rather than -A/-B/-C: this used to zip the sets onto three flags, and zip
-        # truncates. A variant that binned with six binners was silently refined from the three
-        # whose directory names sort first - so metabat2_bins was dropped and the arm's published
-        # numbers came from a different input set than the one it was named for.
+        # --bins instead of -A/-B/-C. Zipping the sets onto three flags truncated a six-binner
+        # variant to the three sets that sorted first.
         if len(sets) > MAX_REFINEMENT_SETS:
             raise RunnerError(
                 "%s holds %d bin sets (%s) and bin_refinement consolidates at most %d, because it "
@@ -581,11 +738,9 @@ def build_argv(
             )
         for path in sets:
             argv += ["--bins", path]
-        # The assembly too, when the dataset has one. MetaWrap2's own consolidation works from the
-        # bins alone, but DAS Tool reads the assembly contigs itself and refuses to start without
-        # them - so a consolidator comparison could never run its DAS Tool arm. Passed to every
-        # variant rather than only the ones that ask, because an unused -a changes nothing and a
-        # comparison whose arms are handed different inputs is not a comparison.
+        # The assembly too, when there is one: DAS Tool reads the contigs itself and will not start
+        # without them. Passed to every variant so all arms get the same inputs; MetaWrap2's own
+        # consolidation ignores it.
         if inputs.assembly:
             argv += ["-a", str(inputs.assembly)]
     return argv
@@ -598,11 +753,10 @@ def cost_rows(
     measured: Dict[str, Any],
     sample: str = "",
 ) -> List[Row]:
-    """The cost half of the table: what this variant spent.
+    """The cost rows for this variant.
 
-    ``cpu_hours`` rather than wall time is the denominator of the ratio the defaults are chosen on,
-    because wall time rewards a tool for being given more cores and CPU-hours do not. Wall time is
-    recorded alongside it since it is what a user waits through.
+    ``cpu_hours`` is the denominator of the ratio defaults are chosen on, because wall time
+    favours tools given more cores. Wall time is recorded too.
 
     *sample* is set for a per-sample module, where one variant means several measured runs; it is
     empty for a cohort module, whose single run covers every sample at once.
@@ -633,9 +787,8 @@ def cost_rows(
 def _units(comparison: Comparison, inputs: Inputs) -> List[Sequence[Any]]:
     """The invocations one variant needs: ``(sample_label, inputs)`` pairs.
 
-    A cohort module gets one invocation with every sample in it and an empty label; a per-sample
-    module gets one per sample, labelled, so its rows sum the same way a cohort module's single
-    measurement does.
+    A cohort module gets one invocation with every sample and an empty label; a per-sample module
+    gets one labelled invocation per sample.
     """
     if comparison.module not in PER_SAMPLE_MODULES:
         return [("", inputs)]
@@ -649,9 +802,8 @@ def _units(comparison: Comparison, inputs: Inputs) -> List[Sequence[Any]]:
 def gold_path(dataset, role: str, data_dir: str) -> Optional[str]:
     """Where *dataset*'s gold standard for *role* lives, or None if it declares none.
 
-    The path is not checked here. Callers differ in what a missing file means - a binning run cannot
-    start without the gold assembly, while scoring can still report cost without the gold binning -
-    so each decides, and neither has to know the layout rule twice.
+    The path is not checked here; callers decide what a missing file means (binning cannot start
+    without the gold assembly, while scoring can still report cost without the gold binning).
     """
     gold = dataset.gold(role)
     if gold is None:
@@ -662,15 +814,13 @@ def gold_path(dataset, role: str, data_dir: str) -> Optional[str]:
 
 
 def require_env_manager() -> None:
-    """Refuse to start a comparison whose every variant would fail for the same reason.
+    """Raise RunnerError if the conda env manager is missing, before any variant starts.
 
-    Each variant is a subprocess, so an absent ``mamba`` is not discovered until the first tool
-    inside the first variant tries to start - and the runner's policy of recording a failure and
-    carrying on then turns one environment problem into a directory of failed runs and an empty
-    results table. A comparison over ten samples and two variants can spend a long time doing that.
+    Each variant is a subprocess, so a missing ``mamba`` would otherwise be found only when the
+    first tool starts, and every variant would be recorded as failed.
 
-    Called from the ``benchmark run`` command rather than from :func:`run_comparison`, which is
-    driven in tests with the executor faked out and has no business requiring conda to be installed.
+    Called from the ``benchmark run`` command, not :func:`run_comparison`, which tests drive with
+    a fake executor and no conda.
     """
     settings = _config.load_settings()
     if not settings.use_conda_envs:
@@ -678,7 +828,7 @@ def require_env_manager() -> None:
     manager = _runner.env_manager
     if shutil.which(manager) is None:
         raise RunnerError(
-            "%s is not on PATH, so no variant of this comparison could run its tools.\n"
+            "%s is not on PATH, so the tools for this comparison cannot run.\n"
             'Add it (usually PATH="$HOME/miniforge3/bin:$PATH") or set use_conda_envs = false '
             "under [settings] in ~/.metawrap2/config.toml." % manager
         )
@@ -693,13 +843,10 @@ def prepare_coassembly(
 ) -> Inputs:
     """One pair of read files holding every selected sample, for a cohort assembly.
 
-    ``metawrap2 assembly`` takes one file per mate, so a co-assembly is fed a concatenation - which
-    is what ``metawrap2 run`` builds for a study too, so the benchmark measures the same thing a
-    user's run does rather than a form only the harness uses.
+    ``metawrap2 assembly`` takes one file per mate, so a co-assembly gets a concatenation, as
+    ``metawrap2 run`` builds for a study.
 
-    Built once and reused by every variant, for the same reason the deinterleaved reads are: doing
-    it per variant would hand the second one a colder page cache than the first, and that difference
-    turns into a performance gap nobody meant to measure.
+    Built once and reused by every variant, like the deinterleaved reads.
     """
     if len(inputs.pairs) == 1:
         return inputs
@@ -736,9 +883,8 @@ def _is_current(dest: str, sources: Sequence[str]) -> bool:
 def select_samples(inputs: Inputs, *, samples: Sequence[str] = (), max_samples: int = 0) -> Inputs:
     """*inputs* narrowed to the named samples, or to the first *max_samples* of them.
 
-    Naming a sample that is not there is an error listing what is, rather than a quiet run over
-    nine samples when ten were meant: a typo in a sample label would otherwise change what the
-    comparison measured without changing anything a reader of the results could see.
+    Naming a sample that does not exist raises RunnerError listing the available samples, so a
+    typo does not change what the comparison measures.
     """
     if not samples and max_samples <= 0:
         return inputs
@@ -777,16 +923,13 @@ def run_comparison(
 ) -> List[Row]:
     """Run every (or the named) variant and return the cost rows.
 
-    Accuracy rows come later, from :mod:`metawrap2.benchmark.scoring` reading the tool output that
-    lands under *work_dir*; keeping the two apart means a scorer can be improved and re-applied to
-    a run that already happened rather than requiring the run again.
+    Accuracy rows come later, from :mod:`metawrap2.benchmark.scoring` reading the tool output
+    under *work_dir*, so a scorer can be changed and re-applied without re-running.
 
-    *samples* and *max_samples* narrow which of the dataset's samples take part, because some
-    comparisons are not affordable over all of them - a 10-sample CAMI2 co-assembly through
-    metaSPAdes is days and hundreds of GB of RAM, and the question of which assembler is more
-    contiguous does not need every sample to answer. The subset applies to every variant equally,
-    so the comparison stays internally valid; what it is not is comparable with a *different*
-    subset, which is why the chosen samples are written into the run record and printed.
+    *samples* and *max_samples* narrow which samples take part, since some comparisons are too
+    expensive over all of them (a 10-sample CAMI2 co-assembly through metaSPAdes takes days and
+    hundreds of GB of RAM). The subset applies to every variant. Results are not comparable across
+    different subsets, so the chosen samples are printed and written into the run record.
     """
     budget = budget or _limits.resolve()
     chosen = (
@@ -804,9 +947,8 @@ def run_comparison(
         wanted=samples,
         max_samples=max_samples,
     )
-    # Still narrowed here, not only in gather_inputs: that one decides which files to write, this
-    # one is the single place that decides which samples the comparison measured, and it is what
-    # errors on a sample name the dataset does not have.
+    # gather_inputs only decides which files to write; select_samples decides which samples are
+    # measured and rejects unknown sample names.
     inputs = select_samples(inputs, samples=samples, max_samples=max_samples)
     measured_samples = [str(pair[0]) for pair in inputs.pairs]
     if comparison.module == "assembly":
@@ -818,29 +960,46 @@ def run_comparison(
     say("Variants:   %s" % ", ".join(v.name for v in chosen))
     say("Samples:    %d  (%s)" % (len(measured_samples), ", ".join(measured_samples)))
 
+    # Every external arm's version, resolved before anything runs (as require_env_manager is), so
+    # a comparison that cannot record a version stops before any compute is spent.
+    external_versions = {
+        variant.name: external_version(variant, probe=not dry_run)
+        for variant in chosen
+        if variant.is_external
+    }
+    for name, version in sorted(external_versions.items()):
+        say("External:   %s is %s" % (name, version or "an unprobed version (dry run)"))
+
     rows: List[Row] = []
     record: Dict[str, Any] = {
         "dataset": dataset.name,
         "comparison": comparison.name,
         "budget": budget.as_dict(),
-        # What the numbers cover. A cohort module's rows carry no sample label, so without this a
-        # three-sample co-assembly and a ten-sample one are indistinguishable in the results TSV.
+        # The samples measured. A cohort module's rows carry no sample label, so this is the only
+        # record of how many samples a co-assembly used.
         "samples": measured_samples,
-        # Where the dataset was read from, so `score` can find the same gold standard the run used
-        # without being told again - and so a record says which copy of the data produced it.
+        # Where the dataset was read from, so `score` finds the same gold standard the run used.
         "data_dir": os.path.abspath(data_dir),
-        # The contigs the binners were actually given. `score` needs them for AMBER's sequence
-        # lengths, and --assembly means the dataset's default is not always the right guess.
+        # The contigs the binners were given (possibly from --assembly). `score` needs them for
+        # AMBER's sequence lengths.
         "assembly": os.path.abspath(inputs.assembly) if inputs.assembly else None,
-        # The bins the variants were given, for the comparisons that take a previous run's output.
-        # A quantifier's truth is built from these, so scoring has to read the same set the run did
-        # rather than whichever bin directory happens to be lying around at scoring time.
+        # The bins the variants were given, for comparisons that take a previous run's output.
+        # A quantifier's truth is built from these, so scoring must read the same set.
         "bins_from": os.path.abspath(inputs.bins_from) if inputs.bins_from else None,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "variants": {},
     }
     for variant in chosen:
         variant_record: Dict[str, Any] = {"returncode": 0, "runs": []}
+        external = variant.external
+        if external is not None:
+            # Provenance for the arm, in the record `score` reads: the version that ran, its env
+            # and the command template, so the row can be reproduced.
+            variant_record["external"] = True
+            variant_record["external_version"] = external_versions[variant.name]
+            variant_record["external_env"] = external.env
+            variant_record["external_command_template"] = external.command
+            variant_record["external_bins"] = external.bins
         record["variants"][variant.name] = variant_record
         variant_rows: List[Row] = []
         say("")
@@ -857,13 +1016,18 @@ def run_comparison(
                 budget.threads,
                 int(budget.memory_gb),
                 global_flags=_inherited_global_flags(),
+                sample=label,
             )
             if label:
                 say("    [%s]" % label)
-            say("    %s" % " ".join(argv))
+            # Shell-quoted, so the printed command can be copied and re-run. An external arm's
+            # `bash -c '...'` is one argument.
+            say("    %s" % shlex.join(argv))
             if dry_run:
                 continue
             os.makedirs(out_dir, exist_ok=True)
+            if variant.is_external:
+                os.makedirs(external_output_dir(out_dir), exist_ok=True)
             rc, measured = _usage.run_measured(argv)
             say("    %s  (exit %d)" % (_usage.summarise(measured), rc))
             variant_record["runs"].append(
@@ -876,15 +1040,29 @@ def run_comparison(
                 }
             )
             if rc != 0:
-                # Recorded, not raised: one variant failing is a result about that variant, and
-                # the others are still worth having. A failed variant contributes no rows at all -
-                # not even the samples that did finish - because a ratio summed over nine samples
-                # is not comparable with one summed over ten, and the partial number would look
-                # like a cheap win.
+                # Recorded, not raised, so the other variants still run. A failed variant
+                # contributes no rows, not even for finished samples, because a ratio summed over
+                # fewer samples is not comparable with the others.
                 variant_record["returncode"] = rc
-                say("    FAILED - recorded, abandoning this variant and continuing with the rest")
+                say("    FAILED - recorded; skipping the rest of this variant and continuing")
                 variant_rows = []
                 break
+            if variant.is_external:
+                try:
+                    published = publish_external_bins(variant, out_dir)
+                except RunnerError as exc:
+                    # Recorded as a failed arm, like a non-zero exit, so the run record keeps the
+                    # arms that already finished. The arm contributes no rows.
+                    variant_record["returncode"] = 1
+                    variant_record["error"] = str(exc)
+                    say("    %s" % exc)
+                    say(
+                        "    FAILED - recorded, abandoning this variant and continuing with the rest"
+                    )
+                    variant_rows = []
+                    break
+                variant_record["runs"][-1]["published_bins"] = published
+                say("    bins published as %s" % os.path.basename(published))
             variant_rows.extend(cost_rows(dataset, comparison, variant, measured, sample=label))
         rows.extend(variant_rows)
 
@@ -900,6 +1078,4 @@ def run_comparison(
 
 def load_registry_error_hint(exc: RegistryError) -> str:
     """A registry problem, phrased for someone editing ``benchmarks/datasets.toml``."""
-    return (
-        "%s\n\nThe registry is benchmarks/datasets.toml; it is data, so this is an edit away." % exc
-    )
+    return "%s\n\nFix the entry in the registry, benchmarks/datasets.toml." % exc

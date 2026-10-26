@@ -1,28 +1,23 @@
-"""Biosynthetic gene clusters from GECCO, and how much of one a fragmented MAG can show.
+"""Biosynthetic gene clusters (BGCs) from GECCO, with their position on the contig.
 
-A BGC is a run of adjacent genes that together make a secondary metabolite - an antibiotic, a
-siderophore, a signalling molecule. It is the one functional unit in this pipeline whose definition
-is *positional*: a KO is a property of a gene, a CAZy family is a property of a domain, but a gene
-cluster exists only as a neighbourhood. That makes it the annotation most damaged by assembly
-fragmentation, and the reason this module reports where each cluster sits on its contig rather than
-only that it was found.
+A BGC is a run of adjacent genes that together make a secondary metabolite (an antibiotic, a
+siderophore, a signalling molecule). Unlike a KO or a CAZy family, a cluster is defined by gene
+adjacency, so assembly fragmentation affects it most. This module therefore reports where each
+cluster sits on its contig.
 
-GECCO rather than antiSMASH as the default. It is a conditional random field over Pyrodigal genes
-and PyHMMER domains - the same two libraries this package already calls in-process - needs no
-multi-gigabyte database, and takes minutes per genome rather than tens of minutes. antiSMASH remains
-the deeper tool when a cluster is the result rather than a count; GECCO is what makes "how many
-BGCs are in these 200 MAGs" a question with an answer.
+GECCO is the default instead of antiSMASH. It is a conditional random field over Pyrodigal genes
+and PyHMMER domains (libraries this package already calls in-process), needs no multi-gigabyte
+database, and takes minutes per genome instead of tens of minutes. antiSMASH is the more detailed
+tool for studying individual clusters; GECCO is practical for counting BGCs across hundreds of MAGs.
 
-Two things the output says that a cluster count does not:
+The output adds two things to a cluster count:
 
-* **Where the cluster sits.** A cluster whose edge is at the edge of its contig is a cluster that
-  continues into sequence nobody assembled, so its gene content is a lower bound and its predicted
-  product class is based on part of the evidence. On one real CAMI2 bin, two of four clusters start
-  within 400 bp of a contig end.
-* **What type it is, and how sure.** GECCO assigns a product class with a probability per class and
-  calls the rest ``Unknown``, which on MAGs is the commonest answer. The probabilities are kept, so
-  "Unknown" is visibly a weak classification of a real cluster rather than a cluster of unknown
-  reality.
+* **Position.** A cluster at the edge of its contig continues into unassembled sequence, so its gene
+  content is a lower bound and its product class is based on partial evidence. On one CAMI2 bin, two
+  of four clusters start within 400 bp of a contig end.
+* **Type and confidence.** GECCO gives a probability per product class and calls the cluster
+  ``Unknown`` when none passes its threshold, which is the commonest result on MAGs. The
+  probabilities are kept so an ``Unknown`` call can be inspected.
 """
 
 from __future__ import annotations
@@ -31,8 +26,8 @@ import csv
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-#: GECCO's product classes, in the order its table carries them. ``Unknown`` is not one of these -
-#: it is what GECCO writes in `type` when no class passes its threshold.
+#: GECCO's product classes, in table order. ``Unknown`` is not a class; GECCO writes it in `type`
+#: when no class passes its threshold.
 BGC_TYPES: Tuple[str, ...] = (
     "alkaloid",
     "nrp",
@@ -42,15 +37,12 @@ BGC_TYPES: Tuple[str, ...] = (
     "terpene",
 )
 
-#: What GECCO writes in `type` when none of its classes is confident enough. Kept as a constant
-#: because it is a legitimate and common answer on MAGs, not a parse failure.
+#: What GECCO writes in `type` when no class passes its threshold. A valid, common result on MAGs.
 UNKNOWN_TYPE = "Unknown"
 
 #: A cluster whose nearer edge is within this many base pairs of its contig's edge is reported as
-#: truncated. One gene's worth of sequence, roughly: a cluster that close to the edge is one whose
-#: neighbourhood was not observed, so its gene content is a floor rather than a measurement. The
-#: same reasoning as the mobility window in :mod:`metawrap2.amr`, and the same honesty about what
-#: missing sequence can and cannot support.
+#: truncated. Roughly one gene of sequence; past that the neighbourhood was not observed, so the
+#: gene content is a lower bound. Same reasoning as the mobility window in :mod:`metawrap2.amr`.
 EDGE_WINDOW = 1_000
 
 #: GECCO's columns in ``*.clusters.tsv``. Named so a schema change is a KeyError at parse time.
@@ -81,13 +73,13 @@ class GeneCluster:
     #: Mean and maximum per-gene cluster probability from the CRF.
     average_p: Optional[float]
     max_p: Optional[float]
-    #: Per-class probabilities, so an ``Unknown`` call can be read rather than just accepted.
+    #: Per-class probabilities, so an ``Unknown`` call can be inspected.
     probabilities: Mapping[str, float]
-    #: The genes in the cluster, by the same ids `annotate` uses - which is why GECCO is given this
-    #: module's GFF rather than calling its own genes.
+    #: The genes in the cluster, by the ids `annotate` uses. GECCO is given this module's GFF
+    #: instead of calling its own genes so the ids match.
     proteins: Tuple[str, ...]
     domains: Tuple[str, ...]
-    #: 0 when the contig length is unknown, which is reported as such rather than as "at the edge".
+    #: 0 when the contig length is unknown; such clusters are not reported as truncated.
     contig_length: int
 
     @property
@@ -102,8 +94,7 @@ class GeneCluster:
     def distance_to_contig_end(self) -> Optional[int]:
         """Base pairs between the cluster's nearer edge and its contig's nearer end.
 
-        None when the contig length is not known. A number here and a None are different claims,
-        and the second cannot support "this cluster is complete".
+        None when the contig length is not known, in which case completeness cannot be judged.
         """
         if not self.contig_length:
             return None
@@ -111,16 +102,15 @@ class GeneCluster:
 
     @property
     def is_truncated(self) -> bool:
-        """Whether the cluster runs into unobserved sequence, as far as can be told."""
+        """Whether the cluster is within EDGE_WINDOW of a contig end (False if length unknown)."""
         distance = self.distance_to_contig_end
         return distance is not None and distance < EDGE_WINDOW
 
     @property
     def best_type(self) -> Tuple[str, float]:
-        """The most probable product class and its probability, whatever GECCO called it.
+        """The most probable product class and its probability, regardless of GECCO's `type`.
 
-        Useful precisely when `type` is ``Unknown``: the class that came closest is informative,
-        and it is in the table rather than only in the probabilities a reader has to compare by eye.
+        Mainly useful when `type` is ``Unknown``, to show which class came closest.
         """
         if not self.probabilities:
             return (UNKNOWN_TYPE, 0.0)
@@ -145,8 +135,8 @@ def _as_float(value: Optional[str]) -> Optional[float]:
 def _split(value: Optional[str]) -> Tuple[str, ...]:
     """Split a ``;``-joined field, discarding the empty-string literal GECCO writes.
 
-    With no clusters to report, GECCO writes `""` in these columns rather than leaving them blank -
-    so a naive split yields a protein whose name is two quote characters.
+    With no clusters to report, GECCO writes `""` in these columns instead of leaving them blank,
+    which a plain split would turn into a protein named by two quote characters.
     """
     if not value:
         return ()
@@ -162,15 +152,13 @@ def parse_clusters(
 ) -> List[GeneCluster]:
     """Read GECCO's ``*.clusters.tsv``.
 
-    *contig_lengths* is what turns a coordinate into a statement about completeness, exactly as in
-    :func:`metawrap2.amr.parse_amrfinder`: without it, a cluster starting at 392 bp could be 392 bp
-    from the end of a short contig or 392 bp into a megabase, and only the first makes it a
-    fragment. GECCO does not report contig lengths, so they come from the assembly the caller has.
+    *contig_lengths* is needed to judge truncation, as in :func:`metawrap2.amr.parse_amrfinder`:
+    a cluster starting at 392 bp may be near the end of a short contig or deep inside a long one.
+    GECCO does not report contig lengths, so the caller supplies them from the assembly.
 
-    An empty file with only a header is a legitimate result - most genomes have few clusters or
-    none - which is why `annotate` passes GECCO ``--force-tsv``: without it a genome with no
-    clusters writes no table at all, and "no clusters" becomes indistinguishable from "the run
-    failed".
+    A header-only file is a valid result, since most genomes have few clusters or none. `annotate`
+    passes GECCO ``--force-tsv`` because otherwise a genome with no clusters writes no table, which
+    looks the same as a failed run.
     """
     lengths = contig_lengths or {}
     clusters: List[GeneCluster] = []
@@ -184,12 +172,9 @@ def parse_clusters(
         for row in reader:
             contig = (row.get(CLUSTER_COLUMNS["contig"]) or "").strip()
             cluster_id = (row.get(CLUSTER_COLUMNS["cluster"]) or "").strip()
-            # GECCO's --force-tsv writes a placeholder row for a genome with no clusters: every
-            # field empty except `type`, which says Unknown, and `proteins`/`domains`, which say
-            # "". Read literally that is one unclassified cluster of zero genes on no contig, and
-            # it would be counted as a BGC - so the row is recognised and dropped. The flag is
-            # still passed, because the alternative is no file at all and no way to tell a genome
-            # with no clusters from a run that failed.
+            # With --force-tsv, GECCO writes a placeholder row for a genome with no clusters: all
+            # fields empty except `type` (Unknown) and `proteins`/`domains` (""). Skip it so it is
+            # not counted as a BGC.
             if not cluster_id or not contig:
                 continue
             probabilities = {}
@@ -249,16 +234,15 @@ def cluster_row(cluster: GeneCluster) -> Dict[str, str]:
         "length_bp": str(cluster.length),
         "genes": str(cluster.genes),
         "type": cluster.type,
-        # Carried even when `type` is a real class, so the two can be compared: a Saccharide call
-        # at p=0.23 and one at p=0.95 are not the same finding.
+        # Written even when `type` is a real class, so the confidence of the call is visible
+        # (a Saccharide call at p=0.23 differs from one at p=0.95).
         "most_probable_type": best_type,
         "most_probable_type_p": "%.4g" % best_p,
         "average_gene_probability": (
             "" if cluster.average_p is None else "%.4g" % cluster.average_p
         ),
         "max_gene_probability": "" if cluster.max_p is None else "%.4g" % cluster.max_p,
-        # Blank rather than 0 when the contig length is unknown: "at the edge" is a claim, and an
-        # unknown contig length cannot support it.
+        # Blank instead of 0 when the contig length is unknown, so it is not read as "at the edge".
         "distance_to_contig_end": "" if distance is None else str(distance),
         "truncated": "yes" if cluster.is_truncated else ("" if distance is None else "no"),
         "domains": ";".join(cluster.domains),
@@ -266,19 +250,19 @@ def cluster_row(cluster: GeneCluster) -> Dict[str, str]:
     }
 
 
-#: Printed with every BGC count. A cluster is a neighbourhood, so it is the annotation that
-#: fragmentation damages most, and a count of clusters in MAGs is a count of what survived binning.
+#: Printed with every BGC count. Clusters are defined by adjacency, so fragmentation affects them
+#: most, and a cluster count in MAGs only covers what was assembled and binned.
 TRUNCATION_CAVEAT = (
-    "a gene cluster is defined by adjacency, so it is the annotation an assembly break damages "
-    "most: a cluster whose edge is within %d bp of its contig's edge continues into sequence that "
-    "was never assembled, and its gene content and product class are based on the part that was. "
-    "Those rows are flagged `truncated`" % EDGE_WINDOW
+    "gene clusters are defined by adjacent genes, so assembly breaks affect them most. A cluster "
+    "within %d bp of its contig's end may continue into unassembled sequence, and its gene "
+    "content and product class describe only the assembled part. These rows are flagged "
+    "`truncated`" % EDGE_WINDOW
 )
 
 
 @dataclass(frozen=True)
 class GenomeBgcSummary:
-    """One genome's cluster counts, split the two ways that change their meaning."""
+    """One genome's cluster counts, split by truncation and by classification."""
 
     genome: str
     clusters: int

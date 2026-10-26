@@ -1,9 +1,7 @@
 """Tests for metawrap2.nonpareil: the port of Nonpareil's model, and the module around it.
 
-The first test is the one that matters. `metawrap2.nonpareil` reimplements a published numerical
-method, and the only evidence that a reimplementation is right is agreement with the original on
-data neither was tuned to. The expected values in `test_matches_r_package` came out of the R
-package itself - see tests/fixtures/nonpareil/SOURCE.md for the invocation - not out of this code.
+`test_matches_r_package` checks the reimplementation against the original. Its expected values
+come from the R package (invocation in tests/fixtures/nonpareil/SOURCE.md), not from this code.
 """
 
 from __future__ import annotations
@@ -28,11 +26,10 @@ def npo(name: str) -> str:
 
 
 def test_matches_r_package():
-    """Six significant figures against R's Nonpareil 3.5.5 on its own example data.
+    """Agrees with R's Nonpareil 3.5.5 on its example data to about six significant figures.
 
-    Not "close enough": every quantity the pipeline reports is checked, including both gamma
-    parameters, because C can agree while the fit behind it differs - and it is the fit that
-    produces the diversity index and the projection.
+    Every reported quantity is checked, including both gamma parameters: C can agree while the fit
+    differs, and the fit gives the diversity index and the projection.
     """
     expected = {
         "HumanGut": {
@@ -90,12 +87,10 @@ def test_kmer_kernel_is_recognised_by_ksize(tmp_path):
     )
     curve = np_.read_npo(str(path))
     assert curve.kernel == "kmer"
-    # The kmer kernel's overlap is fixed at 50 and its length comes from AL, not L: with the
-    # alignment kernel's rules this would use L=150 and whatever overlap the header lacked.
+    # The kmer kernel's overlap is fixed at 50 and its length comes from AL, not L.
     assert curve.overlap == 50.0
-    # AL under the kmer kernel is k-mers per read (L - k + 1), not a length in bp, so the effort
-    # axis and the projection are in k-mers. Reading it as a read length overstates the sequencing
-    # already done - here by a factor of three.
+    # Under the kmer kernel AL is k-mers per read (L - k + 1), not bp, so the effort axis and the
+    # projection are in k-mers.
     assert curve.read_length == pytest.approx(150.0)
     assert curve.effort_length == pytest.approx(148.5)
     assert curve.effort_unit == "kmers"
@@ -103,7 +98,7 @@ def test_kmer_kernel_is_recognised_by_ksize(tmp_path):
     assert curve.effort_at_full_depth == pytest.approx(148_500)
 
 
-# ─── kernel selection, which has to be one choice per cohort ─────────────────────────────
+# ─── kernel selection (one per cohort) ───────────────────────────────────────────────────
 
 
 def _lengths(mean, short=0):
@@ -117,11 +112,10 @@ def _lengths(mean, short=0):
 
 
 def test_auto_picks_alignment_when_any_sample_is_short():
-    """One kernel for the cohort, chosen by its shortest-read member.
+    """`auto` picks one kernel for the cohort, based on its shortest-read sample.
 
-    The two kernels disagree by 33 points of coverage on the same reads, so a cohort where one
-    sample used each would have coverage figures that cannot be compared - which is the only thing
-    this module is for.
+    The two kernels differ by 33 points of coverage on the same reads, so mixing them would make
+    samples incomparable.
     """
     args = argparse.Namespace(kernel="auto", kmer_size=24)
     chosen = module._choose_kernel(args, {"long": _lengths(150.0), "short": _lengths(34.0, 81)})
@@ -132,17 +126,14 @@ def test_auto_picks_alignment_when_any_sample_is_short():
         assert module._choose_kernel(args, {"short": _lengths(30.0, 100)}) == forced
 
 
-# ── composing with read_qc, which was impossible ─────────────────────────────────────────────
+# ── sample names from read_qc output ─────────────────────────────────────────────────────────
 
 
 def test_colliding_basenames_fall_back_to_the_directory_name():
-    """`read_qc` writes `<out>/<sample>/final_pure_reads_1.fastq`, so a cohort's read files all
-    share one basename and the sample identity lives in the directory.
+    """Read files sharing a basename are named after their directory.
 
-    That made the composition this project documents - `nonpareil -r
-    READ_QC/*/final_pure_reads_1.fastq` - fail every time with a correct but unhelpful message
-    about two files reducing to one name. The two modules could not be chained the way the docs
-    chain them. The directory is what the user meant.
+    `read_qc` writes `<out>/<sample>/final_pure_reads_1.fastq`, so the documented
+    `nonpareil -r READ_QC/*/final_pure_reads_1.fastq` used to fail on duplicate sample names.
     """
     from metawrap2.modules import nonpareil as module
 
@@ -155,7 +146,7 @@ def test_colliding_basenames_fall_back_to_the_directory_name():
 
 
 def test_names_that_do_not_collide_are_left_alone():
-    """A cohort whose files are named per sample keeps the names it chose."""
+    """Names that do not collide are kept."""
     from metawrap2.modules import nonpareil as module
 
     paths = ["reads/gut_early_1.fastq.gz", "reads/gut_late_1.fastq.gz"]
@@ -163,7 +154,7 @@ def test_names_that_do_not_collide_are_left_alone():
 
 
 def test_only_the_colliding_names_are_rewritten():
-    """One collision in a cohort must not rename the files that were already unambiguous."""
+    """Only colliding names are replaced by the directory name."""
     from metawrap2.modules import nonpareil as module
 
     paths = [
@@ -175,7 +166,7 @@ def test_only_the_colliding_names_are_rewritten():
 
 
 def test_a_collision_the_directory_cannot_break_is_still_a_collision():
-    """Guessing a third time would be inventing a name, and two rows with one label are not data."""
+    """If the directory does not separate them either, the names stay colliding."""
     from metawrap2.modules import nonpareil as module
 
     paths = ["a/reads_1.fastq", "a/reads_1.fastq.gz"]

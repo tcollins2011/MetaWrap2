@@ -18,9 +18,8 @@ def _report(tmp_path, rows, name="GUNC.progenomes_2.1.maxCSS_level.tsv"):
 
 
 def test_parse_report_prefers_guncs_own_verdict_over_the_threshold(tmp_path):
-    # Row two is below the CSS threshold but GUNC still failed it - too few of its genes were
-    # represented in the reference for the score to mean anything. Recomputing from CSS alone
-    # would call it clean, which is the opposite of what GUNC said.
+    # Row two is below the CSS threshold but GUNC failed it because too few of its genes are in
+    # the reference. Recomputing from CSS alone would pass it.
     out = _report(
         tmp_path,
         [
@@ -38,8 +37,7 @@ def test_parse_report_prefers_guncs_own_verdict_over_the_threshold(tmp_path):
     assert verdicts["bin_001"].css == pytest.approx(0.91)
     assert verdicts["bin_001"].level == "kingdom"
 
-    # The verdicts are keyed on GUNC's genome name, which it derives with
-    # basename.split(file_suffix)[0] - so "fasta" without the dot would name every bin "bin_001."
-    # and match nothing in the stats table.
+    # GUNC derives genome names with basename.split(file_suffix)[0], so "fasta" without the dot
+    # would name bins "bin_001." and match nothing in the stats table.
     cmd = gunc.GUNC_RUN.format(bins="b", ext=".fasta", db="db.dmnd", out="o", threads=4)
     assert "--file_suffix .fasta" in cmd

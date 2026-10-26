@@ -1,18 +1,16 @@
 # eggNOG-mapper, for `annotate --eggnog`.
 #
-# Its own environment rather than a line in annotate.yaml, for a reason found by running it:
-# eggNOG-mapper 2.1.x imports `distutils`, which Python 3.12 removed, so a fresh solve that picks
-# a current interpreter installs a tool that cannot start - `ModuleNotFoundError: No module named
-# 'distutils'` from its own downloader, before any user code runs. Capping Python in the shared
-# annotate environment would impose that ceiling on bakta, dbCAN and GECCO as well, which is the
-# wrong trade for a tool that is opt-in. The same reasoning put RGI, TRACS and CheckM2 in their own
-# environments.
+# A separate env instead of a line in annotate.yaml: eggNOG-mapper 2.1.x imports `distutils`,
+# which Python 3.12 removed, so with a current interpreter it fails with `ModuleNotFoundError: No
+# module named 'distutils'` from its downloader. Capping Python in the shared annotate env would
+# also cap bakta, dbCAN and GECCO for an opt-in tool. RGI, TRACS and CheckM2 have their own envs
+# for similar reasons.
 name: metawrap2-eggnog
 channels:
   - conda-forge
   - bioconda
 dependencies:
-  # The ceiling is the point of this file. The floor is where --itype and the 21-column
+  # The Python ceiling is why this file exists. The floor is where --itype and the 21-column
   # annotations table this project parses were already stable.
   - python >=3.9,<3.12
   - eggnog-mapper >=2.1.12,<2.2

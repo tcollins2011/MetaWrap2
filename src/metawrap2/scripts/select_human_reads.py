@@ -1,7 +1,7 @@
-"""Select the bmtagger-flagged host reads FROM a FASTQ file (inverse of skip_human_reads).
+"""Select the bmtagger-flagged host reads from a FASTQ file (inverse of skip_human_reads).
 
 Ported from metaWRAP's ``select_human_reads.py``. Only the reads whose id appears in the
-bmtagger list are written out, so the removed host reads can be kept "for science".
+bmtagger list are written out, so the removed host reads can be kept.
 """
 
 from __future__ import annotations

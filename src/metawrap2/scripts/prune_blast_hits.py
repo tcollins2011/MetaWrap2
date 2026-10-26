@@ -6,7 +6,7 @@ table: for each hit's semicolon-separated staxids (column 6, 0-indexed 5) it kee
 first id that has one of the standard ranks (species..superkingdom) and drops lines with no
 ranked id. Column 6 is collapsed to that single id.
 
-Ported faithfully from metaWRAP's ``prune_blast_hits.py``.
+Ported from metaWRAP's ``prune_blast_hits.py``.
 """
 
 from __future__ import annotations
@@ -14,9 +14,8 @@ from __future__ import annotations
 import sys
 from typing import Dict, Iterator, List
 
-# "domain" is included alongside "superkingdom" because NCBI renamed that rank: a current
-# taxdump has no "superkingdom" nodes at all, so a hit whose only ranked ancestor is a domain
-# would otherwise be discarded.
+# "domain" is included with "superkingdom" because NCBI renamed that rank; current taxdumps have
+# no "superkingdom" nodes, so hits whose only ranked ancestor is a domain would be dropped.
 INCLUDE = {"species", "genus", "family", "order", "class", "phylum", "superkingdom", "domain"}
 
 

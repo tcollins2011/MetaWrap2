@@ -1,24 +1,18 @@
 """MetaWrap2 annotate: call genes once over a bin set or a whole assembly, then annotate them.
 
-This replaces ``annotate_bins``, which shelled out to one Prokka run per bin and reorganised the
-output into three folders. Two things were wrong with that, and neither is fixed by swapping the
-annotator:
+This replaces ``annotate_bins``, which ran Prokka once per bin and sorted the output into three
+folders. That design had two limits:
 
-* **It produced nothing joinable.** A GFF per bin with product names in it answers "what is this
-  gene called" and no other question. Pathway completeness needs KEGG orthologs; AMR needs a gene's
-  neighbourhood; abundance needs a stable gene identifier that survives into a read-mapping step.
-  None of those can be recovered from a folder of per-bin GFFs.
-* **It had no answer for a user who did not bin.** Most assembled sequence never reaches a MAG, and
-  ``-b bins`` was the only input the module took.
+* **No joinable output.** Per-bin GFFs with product names do not give KEGG orthologs for pathway
+  completeness, gene neighbourhoods for AMR, or stable gene ids for read mapping.
+* **Bins only.** Most assembled sequence never reaches a MAG, and ``-b bins`` was the only input.
 
-So gene calling happens once, here, in :mod:`metawrap2.genecall`, and it takes either a bin folder
-(``-b``) or an assembly (``-a``). Everything after it - orthologs, domains, pathways, resistance -
-reads the gene table this writes rather than calling genes again. The cost argument is the smaller
-half of that: the reason is that two callers disagreeing by one gene produce two answers that cannot
-be joined.
+Genes are now called once, in :mod:`metawrap2.genecall`, from either a bin folder (``-b``) or an
+assembly (``-a``). Orthologs, domains, pathways and resistance all read the gene table written here
+instead of calling genes again, so every table refers to the same gene set.
 
-This file is meant to be read and edited: the commands each external tool runs live in the COMMANDS
-block below, and the tunable numbers in the CONSTANTS block.
+The commands each external tool runs are in the COMMANDS block below, and the tunable numbers in the
+CONSTANTS block.
 """
 
 from __future__ import annotations
@@ -61,47 +55,38 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["annotate_bins"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# Bakta is given the genes this module already called (--skip-cds with a --regions file is not a
-# stable interface across Bakta versions), so for now it re-predicts them and is used for what it is
-# good at: naming products and finding the non-coding features - tRNAs via tRNAscan-SE, rRNAs via
-# Infernal/Rfam - that Prodigal does not look for. Those are what MIMAG's rRNA/tRNA criteria need.
+# Bakta re-predicts genes (--skip-cds with a --regions file is not stable across Bakta versions).
+# It is used for product names and for non-coding features Prodigal does not find: tRNAs via
+# tRNAscan-SE and rRNAs via Infernal/Rfam, which MIMAG's rRNA/tRNA criteria need.
 BAKTA = (
     "bakta --threads {threads} --output {outdir} --prefix {prefix} --force "
     "--keep-contig-headers {db} {input}"
 )
-# CAZyme families, over the proteins this module has already called. --mode protein for that reason:
-# dbCAN would otherwise call its own genes with Prodigal, and two gene sets over one genome cannot be
-# joined - a CAZyme call would then belong to a gene that is in no other table here.
+# CAZyme families over the proteins called here. --mode protein stops dbCAN calling its own genes
+# with Prodigal, which would give CAZyme calls on genes absent from the other tables.
 #
-# All three methods run (the default), because the disagreement between them is the output's most
-# useful column: dbCAN's own guidance is to trust a family found by at least two, and a third of the
-# calls on one real bin were found by one.
+# All three methods run by default. dbCAN recommends trusting a family found by at least two, and on
+# one bin a third of the calls were found by only one.
 DBCAN = (
     "run_dbcan CAZyme_annotation --mode protein --input_raw_data {proteins}"
     " --output_dir {outdir} --db_dir {db} --threads {threads}"
 )
-# Biosynthetic gene clusters, over the genes this module has already called - hence --gff. GECCO
-# calls its own genes otherwise, and while its Pyrodigal names happen to match ours, "happens to
-# match" is not a join: a BGC's member genes have to be the genes in genes.tsv.
+# Biosynthetic gene clusters over the genes called here (--gff), so a BGC's member genes are the
+# genes in genes.tsv. Without --gff GECCO calls its own genes.
 #
-# --force-tsv because a genome with no clusters otherwise writes no table at all, and "no clusters"
-# would be indistinguishable from "the run failed" - which for most genomes is the common case.
+# --force-tsv: otherwise a genome with no clusters (the common case) writes no table, which looks
+# the same as a failed run.
 GECCO = (
     "gecco run -g {genome} --gff {gff} -o {outdir} -j {threads} --force-tsv --no-color --no-markup"
 )
-# Orthology-based annotation, over the proteins this module has already called - hence
-# `--itype proteins`, which is emapper's default and is passed anyway because a default is not a
-# contract. With `--itype genome` eggNOG calls its own genes with Prodigal, and the COG/GO/EC terms
-# would then belong to genes that are in no other table here.
+# Orthology-based annotation over the proteins called here. `--itype proteins` is emapper's default
+# but is passed explicitly; with `--itype genome` eggNOG would call its own genes with Prodigal.
 #
-# `--override` is not optional: emapper refuses to start with "Output files detected in disk. Use
-# --resume or --override to continue" if any of its outputs already exist, which on a re-run into
-# the same -o is every time.
+# `--override` is required: emapper refuses to start if any of its outputs already exist, which is
+# always the case on a re-run into the same -o.
 #
-# `--data_dir`, `--output_dir` and `--temp_dir` are all `type=existing_dir` in emapper's own
-# argument parser, so a directory that does not exist is an argparse error from inside emapper
-# rather than a MetaWrap2 message - which is why the output directory is created and the database
-# checked before this is ever formatted.
+# `--data_dir`, `--output_dir` and `--temp_dir` must exist (emapper's argparse uses
+# `type=existing_dir`), so the output directory is created and the database checked beforehand.
 EGGNOG = (
     "emapper.py -i {proteins} --itype proteins -m diamond --data_dir {db}"
     " --output_dir {outdir} --temp_dir {outdir} -o {prefix} --cpu {threads} --override"
@@ -112,46 +97,43 @@ DEFAULT_THREADS = 1
 GENES_DIR = "genes"
 #: The per-gene table every downstream module reads. Long, one row per gene.
 GENES_TABLE = "genes" + TSV_SUFFIX
-#: The per-gene KO table, written by --kofam. One row per accepted assignment, carrying how it
-#: qualified - see metawrap2.kofam on why "how" is not an implementation detail.
+#: The per-gene KO table, written by --kofam. One row per accepted assignment, with the evidence
+#: it qualified on (see metawrap2.kofam).
 KOS_TABLE = "kos" + TSV_SUFFIX
-#: One row per Pfam domain found, written by --pfam. Per domain rather than per gene: a protein can
-#: carry several and the same one twice, and an architecture is only recoverable if each is a row.
+#: One row per Pfam domain found, written by --pfam. Per domain because a protein can carry several,
+#: including repeats, and the architecture is rebuilt from the rows.
 PFAM_TABLE = "pfam_domains" + TSV_SUFFIX
 #: One row per gene with its ordered domain architecture.
 PFAM_ARCHITECTURE_TABLE = "pfam_architectures" + TSV_SUFFIX
 #: The per-gene CAZyme table, written by --cazy. One row per gene with a CAZyme call, carrying which
 #: of dbCAN's three methods found it.
 CAZY_TABLE = "cazymes" + TSV_SUFFIX
-#: Per-class counts per genome: the summary a reader actually quotes.
+#: Per-class CAZyme counts per genome.
 CAZY_CLASS_TABLE = "cazyme_classes" + TSV_SUFFIX
 #: Where dbCAN's own output is kept, one directory per genome.
 CAZY_DIR = "dbcan"
 #: The per-gene eggNOG table, written by --eggnog. One row per gene emapper placed, carrying the
 #: COG category, GO terms and EC numbers that neither --kofam nor --pfam produces.
 EGGNOG_TABLE = "eggnog" + TSV_SUFFIX
-#: One row per (gene, namespace, term) - long, because a gene has any number of GO terms and
-#: exactly one row per term is what a group-by can count.
+#: One row per (gene, namespace, term). Long format, since a gene can have any number of GO terms.
 EGGNOG_TERM_TABLE = "eggnog_terms" + TSV_SUFFIX
-#: Where emapper's own output is kept, one directory per genome: the .annotations table this parses,
-#: plus the .seed_orthologs and .hits files, which are what a re-annotation at a different
-#: --tax_scope needs and are expensive to regenerate.
+#: Where emapper's own output is kept, one directory per genome: the .annotations table parsed here,
+#: plus the .seed_orthologs and .hits files, which a re-annotation at a different --tax_scope needs
+#: and which are expensive to regenerate.
 EGGNOG_DIR = "eggnog"
-#: What `download_eggnog_data.py` writes and what `-m diamond` needs: the annotation SQLite and the
-#: DIAMOND database of eggNOG proteins. Checked by name because pointing --eggnog-db at the parent
-#: of the real data directory is the easy mistake, and emapper's own error for it arrives once per
-#: genome and names --data_dir, a flag the user never typed.
+#: Files `download_eggnog_data.py` writes and `-m diamond` needs: the annotation SQLite and the
+#: DIAMOND database of eggNOG proteins. Checked by name to catch --eggnog-db pointing at the parent
+#: directory; emapper's own error for that repeats per genome and names --data_dir.
 EGGNOG_DB_FILES = ("eggnog.db", "eggnog_proteins.dmnd")
 #: One row per predicted biosynthetic gene cluster, written by --bgc.
 BGC_TABLE = "gene_clusters" + TSV_SUFFIX
 #: Per-genome cluster counts, split by whether a cluster runs into unassembled sequence.
 BGC_SUMMARY_TABLE = "gene_cluster_summary" + TSV_SUFFIX
-#: Where GECCO's own output is kept, one directory per genome - including the per-cluster GenBank
-#: files, which are what an antiSMASH sideload or a manual look needs.
+#: Where GECCO's own output is kept, one directory per genome, including the per-cluster GenBank
+#: files for an antiSMASH sideload or manual inspection.
 BGC_DIR = "gecco"
-#: Per-genome summary: how the genes were called and what they look like in aggregate. This is the
-#: file to look at when a genome's functional annotation seems wrong, because the usual cause is
-#: visible here - a coding density far off 0.85-0.90, or a bin that fell back to meta mode.
+#: Per-genome summary of gene calling. Check it when a genome's annotation looks wrong: the usual
+#: causes, a coding density far from 0.85-0.90 or a bin that fell back to meta mode, show here.
 SUMMARY_TABLE = "genome_summary" + TSV_SUFFIX
 #: Columns of SUMMARY_TABLE.
 SUMMARY_COLUMNS = (
@@ -208,24 +190,23 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=None,
         metavar="FRACTION",
         help="accept an otherwise-unannotated gene's best hit when it reaches this fraction of the "
-        "profile's curated threshold, flagged as evidence=relative (default: off, i.e. curated "
-        "thresholds only, which reproduces KofamScan)",
+        "profile's curated threshold, flagged as evidence=relative (default: off, curated "
+        "thresholds only, as in KofamScan)",
     )
     p.add_argument(
         "--kofam-thresholdless-evalue",
         type=float,
         default=None,
         metavar="E",
-        help="also accept hits to the 1866 profiles KOfam publishes no threshold for, when their "
-        "E-value is at most E, flagged as evidence=no_threshold (default: off - see the module "
-        "docstring on why that default is strict)",
+        help="also accept hits to the 1866 profiles that have no KOfam threshold, when their "
+        "E-value is at most E, flagged as evidence=no_threshold (default: off)",
     )
     p.add_argument(
         "--pfam",
         action="store_true",
-        help="also assign Pfam domains to every called protein, at each family's own gathering "
-        "threshold. This is the annotation for the genes KEGG cannot place - on real bins only 41%% "
-        "of genes take a curated KO - and it needs PFAM_DB (`metawrap2 install-db pfam`, 399 MB)",
+        help="also assign Pfam domains to every called protein, at each family's gathering "
+        "threshold. This annotates genes that get no KO (on real bins only 41%% of genes get a "
+        "curated KO). Needs PFAM_DB (`metawrap2 install-db pfam`, 399 MB)",
     )
     p.add_argument(
         "--pfam-db",
@@ -235,13 +216,11 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--eggnog",
         action="store_true",
-        # No literal per-cent sign anywhere in this help: argparse treats the string as a format
-        # template, and a bare one once made `--help` fail for every command in the package.
-        help="also annotate the called proteins by orthology with eggNOG-mapper, for the COG "
-        "category, GO terms and EC numbers neither --kofam nor --pfam produces. Coverage is not "
-        "what this buys: on one bin 1578 genes had a Pfam domain and no KO against 13 the other "
-        "way round, so Pfam nearly subsumes KEGG's gene set and the orthogonal annotation is the "
-        "gap. Needs the eggNOG data (about 50 GB) via --eggnog-db",
+        # No literal per-cent sign in this help: argparse treats it as a format template, and a
+        # bare one once made `--help` fail for every command.
+        help="also annotate the called proteins by orthology with eggNOG-mapper, which adds COG "
+        "categories, GO terms and EC numbers (--kofam and --pfam produce none of these). Needs "
+        "the eggNOG data (about 50 GB) via --eggnog-db",
     )
     p.add_argument(
         "--eggnog-db",
@@ -253,7 +232,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--cazy",
         action="store_true",
         help="also assign CAZyme families to the called proteins with dbCAN (needs DBCAN_DB). "
-        "CAZy answers which glycosidic bond an enzyme acts on, which a KO table does not",
+        "CAZy families give the glycosidic bond an enzyme acts on, which KOs do not",
     )
     p.add_argument(
         "--cazy-db",
@@ -264,15 +243,14 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=None,
         metavar="LIST",
         help="which of dbCAN's methods to run, comma-separated from diamond,hmm,dbCANsub "
-        "(default: all three). Dropping one makes every call look less supported, since the "
-        "number of agreeing methods is reported per gene",
+        "(default: all three). The number of agreeing methods is reported per gene, so running "
+        "fewer methods lowers every gene's count",
     )
     p.add_argument(
         "--bgc",
         action="store_true",
-        help="also predict biosynthetic gene clusters with GECCO over the called genes. Needs no "
-        "database. A cluster is defined by gene adjacency, so the table says how close each one "
-        "sits to a contig edge",
+        help="also predict biosynthetic gene clusters with GECCO over the called genes (no "
+        "database needed). The table gives each cluster's distance to a contig edge",
     )
     p.add_argument(
         "--meta",
@@ -287,9 +265,9 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 def _inputs(args) -> List[tuple]:
     """[(genome name, fasta path, meta mode)], in the order they will be annotated.
 
-    One entry per bin, or a single entry for an assembly. An assembly is called in metagenomic mode
-    whatever ``--meta`` says, because training one coding model on many organisms trains it on an
-    average of them - see genecall for why that is the one choice not left to the user.
+    One entry per bin, or a single entry for an assembly. An assembly is always called in
+    metagenomic mode, whatever ``--meta`` says, because one coding model trained on many organisms
+    fits none of them (see genecall).
     """
     if args.assembly:
         name = os.path.splitext(os.path.basename(args.assembly))[0]
@@ -299,20 +277,16 @@ def _inputs(args) -> List[tuple]:
 
 
 def _unit(args) -> str:
-    """What the per-genome loops are iterating over, so a message matches the input flag given."""
+    """Name of the per-genome loop unit, so messages match the input flag given."""
     return "bins" if args.bins else "genomes"
 
 
 def _require_some_output(tool: str, failed: int, total: int, unit: str) -> None:
     """Fail the step when *every* item in a per-item loop failed.
 
-    "Warn and proceed with the rest" is the right policy for one pathological genome: a bin that
-    Bakta or dbCAN cannot handle should not cost the user the other 25. It is the wrong policy when
-    every item fails, because then there is one cause rather than one bad input, nothing was
-    produced to carry on with, and the closing banner and the exit status contradict every warning
-    above them. The report this comes from launched Bakta 26 times without a database, failed 26
-    times, printed 26 warnings and exited 0 with ANNOTATE PIPELINE SUCCESSFULLY FINISHED - which
-    anything reading exit codes recorded as a finished annotation.
+    One failing genome is warned about and skipped. When every item fails there is a common cause
+    and no output, so the step errors out instead of exiting 0. Guards against a run that failed
+    Bakta on all 26 bins (no database) and still reported success.
     """
     if total and failed >= total:
         error(
@@ -332,11 +306,9 @@ def _call_and_write(name: str, path: str, meta: bool, genes_dir: str) -> genecal
 def _bakta_db(args, settings) -> Optional[str]:
     """The Bakta database to annotate against, checked before anything is launched.
 
-    "Rely on Bakta's own default" was not a fallback: Bakta has no default database, so with
-    BAKTA_DB unset this launched Bakta once per bin and watched it fail once per bin - 26 of 26 on
-    the report this comes from. BAKTA_DB is a known config key with a ``check_databases()`` entry,
-    which makes the one configurable reason all 26 would fail answerable before the first launch
-    rather than 26 warnings later.
+    Bakta has no default database, so without BAKTA_DB every per-bin launch fails. Checking here
+    reports that once, before the first launch. BAKTA_DB is a config key with a
+    ``check_databases()`` entry.
     """
     db = args.bakta_db or settings.db("BAKTA_DB")
     if not args.bakta:
@@ -354,9 +326,8 @@ def _bakta_db(args, settings) -> Optional[str]:
 def _kofam_profiles(args, settings) -> List[str]:
     """The HMM files to search, from a directory of them or a single concatenated file.
 
-    KOfam ships one ``.hmm`` per KO - 28,453 of them - which is a directory, not a file. Both
-    layouts are accepted because a user who has concatenated them into one file (which hmmsearch
-    and PyHMMER both read happily, and which is faster to open) should not have to undo that.
+    KOfam ships one ``.hmm`` per KO (28,453 files) in a directory. A single concatenated file is
+    also accepted; hmmsearch and PyHMMER both read it, and it opens faster.
     """
     db = args.kofam_db or settings.db("KOFAM_DB")
     if not db:
@@ -385,9 +356,8 @@ def _kofam_profiles(args, settings) -> List[str]:
 def _ko_genes(args) -> Dict[str, set]:
     """genome -> the genes that already have a KEGG ortholog, from this run's own KO table.
 
-    Read off disk rather than threaded through main, which also makes it work on a `--resume` where
-    the KOfam pass ran in an earlier invocation. Empty when --kofam was not used, and the Pfam
-    report then omits the increment rather than claiming every domain is new information.
+    Read from disk so it also works on a `--resume` where the KOfam pass ran earlier. Empty when
+    --kofam was not used; the Pfam report then omits the increment over KOs.
     """
     path = os.path.join(args.output, KOS_TABLE)
     if not os.path.isfile(path):
@@ -405,20 +375,20 @@ def _ko_genes(args) -> Dict[str, set]:
 def _eggnog_db(args, settings) -> str:
     """The eggNOG data directory, checked before emapper is launched once per genome.
 
-    ``EGGNOG_DB`` is not a config key yet, so ``settings.db`` returns "" for it rather than raising
-    - which means ``--eggnog-db`` is the only way to pass it today and the config default starts
-    working the moment the key is added, with no change here.
+    ``EGGNOG_DB`` is not a config key yet, so ``settings.db`` returns "" for it and ``--eggnog-db``
+    is currently the only way to pass it. Once the key is added the config default works here
+    without changes.
 
-    Checked rather than left to emapper because its own ``--data_dir`` is ``type=existing_dir``: an
-    absent directory is an argparse error from inside emapper, printed once per genome, naming a
-    flag the user did not type.
+    Checked here because emapper's ``--data_dir`` is ``type=existing_dir``: a missing directory
+    would be an argparse error from emapper, repeated per genome, naming a flag the user did not
+    type.
     """
     db = args.eggnog_db or settings.db("EGGNOG_DB")
     if not db:
         error(
             "--eggnog needs the eggNOG data (about 50 GB: eggnog.db and eggnog_proteins.dmnd): "
-            "pass --eggnog-db, or set EGGNOG_DB in metawrap2.toml. The data is downloaded by "
-            "eggNOG-mapper's own `download_eggnog_data.py --data_dir <dir>`"
+            "pass --eggnog-db, or set EGGNOG_DB in metawrap2.toml. Download it with "
+            "eggNOG-mapper's `download_eggnog_data.py --data_dir <dir>`"
         )
     if not os.path.isdir(db):
         error("the eggNOG data directory does not exist: %s (EGGNOG_DB / --eggnog-db)" % db)
@@ -434,13 +404,11 @@ def _eggnog_db(args, settings) -> str:
 def _eggnog_version(env: Optional[str], db: str) -> tuple:
     """(what emapper reports about itself, the installed eggNOG DB version).
 
-    ``emapper.py --version`` prints the tool version, the DB version it expects *and* the DB version
-    it found, on one line - so one probe answers both halves of "what produced this table". Probed
-    rather than assumed because an orthology transfer is only reproducible against the eggNOG
-    release that held the group, and eggNOG renumbers groups between releases.
+    ``emapper.py --version`` prints the tool version, the expected DB version and the installed DB
+    version on one line. Recorded because eggNOG renumbers groups between releases, so a result is
+    only reproducible against the same release.
 
-    Silent on failure, with "unknown" as the answer: a version probe that fails must not stop an
-    annotation, and the row still records what was found.
+    Returns "unknown" on failure; a failed version probe does not stop the annotation.
     """
     line = capture_in_env(env, ["emapper.py", "--data_dir", db, "--version"]).strip()
     line = line.splitlines()[0] if line else ""
@@ -454,13 +422,10 @@ def _eggnog_version(env: Optional[str], db: str) -> tuple:
 def _kofam_kos(args) -> Dict[str, Dict[str, List[str]]]:
     """genome -> gene -> the KOs ``--kofam`` assigned it, from this run's own KO table.
 
-    Read off disk for the reason :func:`_ko_genes` is, and keyed by gene rather than collapsed to a
-    set of genes because the eggNOG comparison needs the K numbers themselves: "both annotators
-    called a KO" and "both called the same KO" are different counts, and only the second one says
-    they agree.
+    Read from disk, as in :func:`_ko_genes`. Keyed by gene with the K numbers kept, because the
+    eggNOG comparison counts genes where both tools called the same KO, not just any KO.
 
-    Empty when --kofam was not used, and the eggNOG report then omits the overlap rather than
-    claiming eggNOG called every KO alone.
+    Empty when --kofam was not used; the eggNOG report then omits the overlap.
     """
     path = os.path.join(args.output, KOS_TABLE)
     if not os.path.isfile(path):
@@ -479,9 +444,8 @@ def _kofam_kos(args) -> Dict[str, Dict[str, List[str]]]:
 def _run_pfam(args, genes_dir: str, todo: List[tuple], ko_genes_by_genome=None) -> None:
     """Search every genome's proteins against Pfam-A and write the domain tables.
 
-    In-process through PyHMMER, like the KOfam search, so there is no second way of searching HMMs
-    in this package and no subprocess to wrap. Per genome for the reason the CAZyme pass is: every
-    table here is keyed on (genome, gene), and two genomes sharing a gene id would merge.
+    Runs in-process through PyHMMER, like the KOfam search. Per genome, as in the CAZyme pass,
+    because tables here are keyed on (genome, gene) and genomes can share gene ids.
     """
     settings = load_settings(args.config)
     db = args.pfam_db or settings.db("PFAM_DB")
@@ -550,10 +514,7 @@ def _run_pfam(args, genes_dir: str, todo: List[tuple], ko_genes_by_genome=None) 
         % (totals["domains"], totals["annotated"], totals["genes"], share, domain_path)
     )
     if ko_genes_by_genome:
-        comm(
-            "%d gene(s) have a Pfam domain and no KEGG ortholog - the increment the extra search "
-            "bought" % totals["rescued"]
-        )
+        comm("%d gene(s) have a Pfam domain and no KEGG ortholog" % totals["rescued"])
         comm(pfam.INCREMENT_CAVEAT)
     comm("-> %s" % arch_path)
     comm(pfam.DOMAIN_CAVEAT)
@@ -562,14 +523,13 @@ def _run_pfam(args, genes_dir: str, todo: List[tuple], ko_genes_by_genome=None) 
 def _run_cazy(args, genes_dir: str, todo: List[tuple]) -> None:
     """Run dbCAN over each genome's proteins and write the CAZyme tables.
 
-    Per genome rather than over a concatenation, because every table in this module is keyed on
-    (genome, gene) and dbCAN's output is keyed on gene alone - two genomes sharing a gene id would
-    merge silently, which is the same defect the catalogue module prefixes its ids to avoid.
+    Per genome instead of over a concatenation: tables here are keyed on (genome, gene) but dbCAN
+    keys on gene alone, so two genomes sharing a gene id would merge. The catalogue module prefixes
+    its ids for the same reason.
     """
     settings = load_settings(args.config)
-    # Its own lookup rather than main's `env`, which is None unless --bakta was given: dbCAN lives
-    # in the annotate env whether or not Bakta is being run, and passing None here would reach for
-    # run_dbcan on the user's PATH - the mistake `check` used to make.
+    # Looked up here instead of using main's `env`, which is None unless --bakta was given. dbCAN is
+    # in the annotate env either way; None would pick up run_dbcan from the user's PATH.
     env = env_for("annotate", settings)
     db = args.cazy_db or settings.db("DBCAN_DB")
     if not db:
@@ -628,16 +588,16 @@ def _run_cazy(args, genes_dir: str, todo: List[tuple]) -> None:
         % (total, confident, cazy.MIN_TOOLS, gene_path)
     )
     comm(
-        "a CBM is a binding module, not an enzyme: %s separates it from the catalytic classes "
-        "rather than summing them" % os.path.basename(class_path)
+        "CBMs are binding modules, not enzymes, so %s lists them separately from the catalytic "
+        "classes" % os.path.basename(class_path)
     )
 
 
 def _run_bgc(args, genes_dir: str, todo: List[tuple]) -> None:
     """Predict gene clusters per genome and write both BGC tables.
 
-    Per genome, like the CAZyme pass and for the same reason: every table here is keyed on (genome,
-    gene), and GECCO's output is keyed on contig and gene alone.
+    Per genome, as in the CAZyme pass: tables here are keyed on (genome, gene), and GECCO's output
+    is keyed on contig and gene alone.
     """
     settings = load_settings(args.config)
     env = env_for("annotate", settings)
@@ -678,8 +638,7 @@ def _run_bgc(args, genes_dir: str, todo: List[tuple]) -> None:
             table = os.path.join(outdir, "%s.clusters.tsv" % os.path.splitext(name)[0])
             if not os.path.isfile(table):
                 # GECCO names its outputs after the input file's stem, which is not always the
-                # genome name (a bin called `bin.1.fa` has stem `bin.1`). Fall back to whatever
-                # cluster table it wrote rather than guessing again.
+                # genome name (`bin.1.fa` has stem `bin.1`). Fall back to the table it wrote.
                 found = sorted(
                     os.path.join(outdir, entry)
                     for entry in (os.listdir(outdir) if os.path.isdir(outdir) else [])
@@ -726,8 +685,8 @@ def _run_kofam(args, genes_dir: str, todo: List[tuple]) -> None:
         )
     if kofam.ko_list_md5(ko_list) != kofam.KO_LIST_MD5:
         warning(
-            "%s differs from the KOfam threshold list this release was validated on. KO calls "
-            "will follow its cutoffs; each row records which list was used." % ko_list
+            "%s differs from the KOfam threshold list this release was tested with. KO calls "
+            "use its cutoffs; each row records which list was used." % ko_list
         )
     profiles = kofam.load_ko_list(ko_list)
     ko_list_tag = kofam.ko_list_label(ko_list)
@@ -764,20 +723,17 @@ def _run_kofam(args, genes_dir: str, todo: List[tuple]) -> None:
 def _run_eggnog(args, genes_dir: str, todo: List[tuple], kofam_by_genome=None) -> None:
     """Annotate every genome's proteins by orthology with eggNOG-mapper and write both tables.
 
-    Per genome rather than over a concatenation, for the reason the CAZyme and cluster passes are:
-    every table in this module is keyed on (genome, gene) and emapper's output is keyed on the query
-    name alone, so two genomes sharing a gene id would merge silently.
+    Per genome, as in the CAZyme and cluster passes: tables here are keyed on (genome, gene) and
+    emapper keys on the query name alone, so genomes sharing a gene id would merge.
 
-    The overlap with KOfam is computed here and not merged into either table. eggNOG transfers a KO
-    from an orthologous group; KOfam calls one from that profile's curated bit-score threshold.
-    Preferring one silently would destroy the only measurement that justifies running both.
+    The overlap with KOfam is reported but not merged into either table. eggNOG transfers a KO from
+    an orthologous group; KOfam calls one from the profile's curated bit-score threshold. Keeping
+    both preserves the comparison between them.
     """
     settings = load_settings(args.config)
-    # Its own environment, not the shared annotate one, and its own lookup rather than main's `env`
-    # (which is None unless --bakta was given, and would reach for emapper.py on the user's PATH).
-    # eggNOG-mapper 2.1.x imports distutils, which Python 3.12 removed, so it needs a Python
-    # ceiling that bakta, dbCAN and GECCO must not inherit - found by running its own downloader
-    # in a freshly solved annotate env and watching it die before any user code ran.
+    # A separate environment from annotate, looked up here because main's `env` is None unless
+    # --bakta was given. eggNOG-mapper 2.1.x imports distutils, removed in Python 3.12, so it needs
+    # a Python ceiling that bakta, dbCAN and GECCO should not share.
     env = optional_env_for("eggnog", settings, needed_by="annotate --eggnog")
     db = _eggnog_db(args, settings)
     if dry_run():
@@ -812,8 +768,7 @@ def _run_eggnog(args, genes_dir: str, todo: List[tuple], kofam_by_genome=None) -
                 warning("no proteins for %s; skipping eggNOG annotation" % name)
                 continue
             outdir = os.path.join(root, name)
-            # emapper's --output_dir and --temp_dir are both type=existing_dir, so this has to exist
-            # before the command is run rather than being created by it.
+            # emapper's --output_dir and --temp_dir are type=existing_dir, so create it first.
             ensure_dir(outdir)
             rc = run(
                 EGGNOG.format(
@@ -854,9 +809,8 @@ def _run_eggnog(args, genes_dir: str, todo: List[tuple], kofam_by_genome=None) -
         % (totals["annotated"], totals["genes"], share, gene_path)
     )
     comm(
-        "%d of them carry a GO term, EC number or COG category - the annotation neither --kofam "
-        "nor --pfam emits at all (%d term(s) -> %s)"
-        % (totals["orthogonal"], totals["terms"], term_path)
+        "%d of them carry a GO term, EC number or COG category, which --kofam and --pfam do "
+        "not produce (%d term(s) -> %s)" % (totals["orthogonal"], totals["terms"], term_path)
     )
     comm(eggnog.ORTHOGONAL_CAVEAT)
     if kofam_by_genome:
@@ -950,12 +904,11 @@ def main(argv: List[str]) -> int:
 
                 comm("called %d genes in %d genome(s)" % (n_genes, len(todo)))
                 if fell_back:
-                    # Not a warning about a failure - a warning that these genomes were annotated
-                    # by a different model than the rest, which matters when their gene counts are
-                    # compared with their neighbours'.
+                    # These genomes used a different gene model than the rest, which affects
+                    # comparisons of gene counts between genomes.
                     warning(
-                        "%d genome(s) had under %d bp and were called in metagenomic mode rather "
-                        "than with their own coding model: %s"
+                        "%d genome(s) had under %d bp and were called in metagenomic mode "
+                        "instead of with their own trained model: %s"
                         % (
                             len(fell_back),
                             genecall.MIN_TRAIN_BP,
@@ -989,11 +942,9 @@ def main(argv: List[str]) -> int:
                         failed += 1
                         warning("Bakta failed on %s. Proceeding with the rest." % name)
                 _require_some_output("Bakta", failed, len(todo), _unit(args))
-                # Bakta is the only engine here that runs tRNAscan-SE, Aragorn and Infernal, so it
-                # is the only one whose output can answer MIMAG's rRNA and tRNA criteria. Tag the
-                # stats table beside the bins while that evidence is on disk: a genome annotated
-                # without it keeps `mimag_rrna=unknown` rather than being quietly downgraded, which
-                # is the one distinction the tag exists to preserve.
+                # Only Bakta runs tRNAscan-SE, Aragorn and Infernal, so only its output can answer
+                # MIMAG's rRNA and tRNA criteria. Tag the stats table beside the bins now. A genome
+                # annotated without Bakta keeps `mimag_rrna=unknown` instead of being downgraded.
                 for _name, genome_path, _meta in todo:
                     stats = os.path.dirname(genome_path.rstrip("/")) + STATS_SUFFIX
                     if os.path.isfile(stats):
@@ -1031,11 +982,9 @@ def main(argv: List[str]) -> int:
             else:
                 comm("skipping Pfam annotation (already done; --resume)")
 
-        # After KOfam and Pfam, not before: the overlap summary reads kos.tsv off disk, so a block
-        # placed above the KOfam one would find no KO table and report that eggNOG called every KO
-        # alone. The Pfam block was once ordered before KOfam and its reported increment was
-        # therefore always zero - the same defect, and it went unnoticed because zero is a plausible
-        # answer.
+        # Must run after KOfam: the overlap summary reads kos.tsv from disk. Run earlier, it finds
+        # no KO table and reports that eggNOG called every KO alone. (The Pfam block once ran before
+        # KOfam and its reported increment was always zero for this reason.)
         if args.eggnog:
             if ckpt.todo("eggnog"):
                 _run_eggnog(args, genes_dir, todo, _kofam_kos(args))

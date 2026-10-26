@@ -6,10 +6,8 @@ via conda if needed), creates each module's small env from ``envs/<module>.yaml`
 verifies what it built with ``metawrap2 test``.
 
 Environments are built several at a time (``-t``), since each one solves and downloads
-independently. Each env's solver output goes to its own log file rather than the screen,
-because concurrent solver output interleaved into one stream is unreadable - but each
-environment does announce when it starts and how long it took, so the slowest step of an
-install is not half an hour of silence.
+independently. Each env's solver output goes to its own log file, and a line is printed when each
+env starts and finishes, with its duration.
 """
 
 from __future__ import annotations
@@ -36,14 +34,13 @@ from ..config import (
     resolve_env_name,
 )
 
-# Env creation is dominated by solving and downloading, both of which are per-env
-# independent, so building several at once is close to a linear speedup. Default is modest
-# so a laptop on a slow link is not swamped; raise it with -t.
+# Solving and downloading are independent per env, so parallel builds scale nearly linearly. The
+# default is kept low for slow connections; raise it with -t.
 DEFAULT_PARALLEL_ENVS = 4
 
 
 def format_duration(seconds: float) -> str:
-    """``45s``, ``3m12s``, ``1h04m`` - short enough to sit at the end of a progress line."""
+    """Format a duration as ``45s``, ``3m12s`` or ``1h04m``, for progress lines."""
     seconds = max(0.0, seconds)
     if seconds < 60:
         return "%.0fs" % seconds
@@ -57,9 +54,9 @@ def format_duration(seconds: float) -> str:
 def envs_dir() -> str:
     """Locate the ``envs/`` directory of yaml environment specs.
 
-    ``$METAWRAP2_ENVS_DIR`` wins, so a user can point at their own edited specs. Otherwise
-    walk up from this file: that finds ``envs/`` both in a source checkout and in an
-    editable install, and also covers ``envs/`` shipped alongside the installed package.
+    ``$METAWRAP2_ENVS_DIR`` takes precedence, for user-edited specs. Otherwise walk up from this
+    file, which finds ``envs/`` in a source checkout, an editable install, or the installed
+    package.
     """
     override = os.environ.get("METAWRAP2_ENVS_DIR")
     if override:
@@ -73,39 +70,38 @@ def envs_dir() -> str:
         if parent == here:
             break
         here = parent
-    # Last resort: the historical repo-relative guess, so the error names a sensible path.
+    # Fallback: the old repo-relative path, so an error names a plausible location.
     return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "envs"))
 
 
 def _env_yaml(env: str) -> str:
     """Locate the yaml that builds conda environment *env*.
 
-    The yaml is named after the environment, not after the module: every env is
-    ``metawrap2-<basename>`` and every spec is ``<basename>.yaml``. Resolving it this way is what
-    lets several modules share one environment - ``coverage`` maps to ``metawrap2-bins`` because it
-    runs the same aligner and samtools binning does, and there is no ``coverage.yaml`` to write.
+    Specs are named after the environment: env ``metawrap2-<basename>`` is built from
+    ``<basename>.yaml``. This lets modules share an env; ``coverage`` uses ``metawrap2-bins``
+    and has no ``coverage.yaml``.
     """
     base = env.removeprefix("metawrap2-")
     return os.path.join(envs_dir(), "%s.yaml" % base)
 
 
 def _env_for(name: str) -> Optional[str]:
-    """config.resolve_env_name, kept as a name because tests and callers here use it.
+    """Alias for config.resolve_env_name, used by tests and callers here.
 
-    Deliberately a one-line delegation rather than its own logic. This file had its own copy, and
-    `check` and `doctor` each had another; all three disagreed, in three different ways.
+    Delegates instead of reimplementing; separate copies here and in `check` and `doctor` had
+    diverged.
     """
     return resolve_env_name(name)
 
 
 def _resolve_or_explain(name: str) -> Optional[str]:
-    """_env_for, but printing what to type instead when the name is not one."""
+    """Like _env_for, but prints suggestions when the name is unknown."""
     env = _env_for(name)
     if env:
         if name in LEGACY_ENV_ALIASES:
             print(
                 "'%s' was an environment name in MetaWrap2 2.0.x. Environments are now grouped by "
-                "workflow, so it is part of '%s' - installing that." % (name, env)
+                "workflow; it is part of '%s', which will be installed." % (name, env)
             )
         return env
     for line in explain_unknown_name(name):
@@ -116,15 +112,14 @@ def _resolve_or_explain(name: str) -> Optional[str]:
 def ensure_mamba() -> bool:
     """Make sure `mamba` is on PATH; bootstrap it into the base env via conda if not.
 
-    Returns True if mamba is available afterwards. This is the only place conda itself is
-    used - everything else goes through mamba.
+    Returns True if mamba is available afterwards. This is the only place conda itself is used.
     """
     if shutil.which("mamba"):
         return True
     if not shutil.which("conda"):
         print(
             "Neither mamba nor conda was found on PATH. Install Miniforge "
-            "(https://github.com/conda-forge/miniforge) - it ships mamba - then re-run."
+            "(https://github.com/conda-forge/miniforge), which includes mamba, then re-run."
         )
         return False
     print("mamba not found; installing it into the base environment with conda (one-time)...")
@@ -156,10 +151,9 @@ def lock_path(module: str, plat: Optional[str] = None) -> str:
 def write_lockfile(module: str, env: str, plat: Optional[str] = None) -> Optional[str]:
     """Write an exact-build lockfile for an existing env. Returns the path, or None.
 
-    Uses ``conda list --explicit --md5``, which emits the URL and checksum of every package
-    actually installed. That file recreates the environment bit-for-bit with
-    ``conda create --file``, needs no extra tooling (conda-lock is not required), and is
-    readable in a diff - so a change in a pinned build shows up in review.
+    Uses ``conda list --explicit --md5``, which lists the URL and checksum of every installed
+    package. ``conda create --file`` recreates the env from it without conda-lock, and changes
+    are readable in a diff.
     """
     manager = shutil.which("conda") or shutil.which("mamba") or shutil.which("micromamba")
     if not manager:
@@ -181,8 +175,8 @@ def write_lockfile(module: str, env: str, plat: Optional[str] = None) -> Optiona
     os.makedirs(os.path.dirname(path), exist_ok=True)
     header = (
         "# MetaWrap2 lockfile for the %s module (%s).\n"
-        "# Exact builds of everything in the %s environment, so a run from today can be\n"
-        "# reproduced later. Generated with:  metawrap2 install-env %s --lock\n"
+        "# Exact builds of every package in the %s environment, for reproducing a run.\n"
+        "# Generated with:  metawrap2 install-env %s --lock\n"
         "# Recreate with:  conda create -n %s --file %s\n"
         % (module, plat or lock_platform(), env, module, env, os.path.basename(path))
     )
@@ -197,16 +191,13 @@ def _create_one(
 ) -> Tuple[str, bool, str]:
     """Create one env, capturing its output to a log file. Returns (module, ok, log path).
 
-    Output goes to a file rather than the screen because several of these run at once and
-    interleaved solver output is unreadable. The log path is reported on failure.
+    Output goes to a file because several builds run at once. The log path is reported on failure.
     """
     log = os.path.join(log_dir, "install-env-%s.log" % module)
-    # Recreating means removing first. `mamba env create --force` is gone in mamba 2.x - the command
-    # is micromamba's `create`, which rejects the flag outright ("The following argument was not
-    # expected: --force"), so --force failed every rebuild instead of doing one. Only reached when
-    # the user asked for a rebuild of an env MetaWrap2 itself built.
+    # A rebuild removes the env first: mamba 2.x's `env create` rejects --force ("The following
+    # argument was not expected: --force").
     if lock:
-        # An explicit lockfile names every package build, so this is an install, not a solve.
+        # An explicit lockfile names every package build, so no solve is needed.
         steps = [["mamba", "create", "-y", "-n", env, "--file", lock]]
     else:
         steps = [["mamba", "env", "create", "-y", "-f", yaml]]
@@ -232,8 +223,8 @@ def main(argv: List[str]) -> int:
     ap.add_argument(
         "--all",
         action="store_true",
-        help="create every environment, including the opt-in ones (checkm2, gtdbtk, the learned "
-        "binners). Several are large",
+        help="create every environment, including the opt-in ones (gtdbtk, eggnog, rgi, tracs, "
+        "the benchmark's amber). Several of these are large",
     )
     ap.add_argument("--no-test", action="store_true", help="don't verify envs after creating")
     ap.add_argument(
@@ -246,9 +237,9 @@ def main(argv: List[str]) -> int:
         "--threads",
         type=int,
         default=DEFAULT_PARALLEL_ENVS,
-        help="how many environments to build concurrently (default %d). Each "
-        "env solves and downloads independently, so this is close to a "
-        "linear speedup; use 1 for serial, readable output." % DEFAULT_PARALLEL_ENVS,
+        help="how many environments to build at once (default %d). Each "
+        "env solves and downloads independently. Use 1 for serial "
+        "output that is easier to read." % DEFAULT_PARALLEL_ENVS,
     )
     ap.add_argument(
         "--lock",
@@ -259,8 +250,8 @@ def main(argv: List[str]) -> int:
     ap.add_argument(
         "--from-lock",
         action="store_true",
-        help="create the environment(s) from their committed lockfiles rather "
-        "than solving the yaml, for a bit-for-bit reproducible install",
+        help="create the environment(s) from their committed lockfiles instead "
+        "of solving the yaml, which reproduces the exact builds",
     )
     ap.add_argument(
         "--log-dir",
@@ -268,19 +259,12 @@ def main(argv: List[str]) -> int:
         help="where to write per-env build logs (default: a temp directory)",
     )
     args = ap.parse_args(argv)
-    # `--force` is also a global flag, and the CLI strips global flags wherever they appear - so
-    # `metawrap2 install-env x --force` never reaches this parser and the flag documented above did
-    # nothing at all. Read both: whichever way it was spelled, the user asked for a rebuild.
+    # `--force` is also a global flag, which the CLI strips before this parser sees it, so check
+    # both.
     force = args.force or runner.force
 
-    # By env name, not by module name: several modules share an env now, so iterating MODULE_ENVS
-    # would ask mamba to build metawrap2-reads four times. The names are interchangeable here -
-    # _module_env falls through to the name itself for anything that is not a module.
-    # --all means every environment, including the opt-in ones. It used to mean every *module* env,
-    # so `install-env --all` left checkm2, gtdbtk and the learned binners uninstalled - and the
-    # learned env holds SemiBin2, which the shipped default binning tier needs. A flag called --all
-    # that silently skips four environments is the kind of thing a user only discovers when a run
-    # fails halfway.
+    # --all iterates env names, not modules, because several modules share an env. It includes
+    # the separate envs, both those a default run uses (checkm2, learned) and those a flag selects.
     if args.all:
         modules = [env.removeprefix("metawrap2-") for env in sorted(known_envs())]
     else:
@@ -300,8 +284,8 @@ def main(argv: List[str]) -> int:
                 print("%s does not exist yet; create it before locking it." % env)
                 rc = 1
                 continue
-            # Named after the environment, not the name typed: `--lock binning` and `--lock bins`
-            # describe one environment and must write one file, the one --from-lock reads.
+            # Named after the env, not the name typed, so `--lock binning` and `--lock bins` write
+            # the same file that --from-lock reads.
             path = write_lockfile(env.removeprefix("metawrap2-"), env)
             if path:
                 print("wrote %s" % path)
@@ -315,11 +299,8 @@ def main(argv: List[str]) -> int:
 
     rc = 0
     todo = []
-    # Every env this run has already decided about, whether it was queued for building or skipped
-    # because it exists. It used to hold only the queued ones, because the "already exists" branch
-    # below `continue`d before reaching the `add` - so a run over modules that share an env printed
-    # "metawrap2-reads already exists" five times and "metawrap2-bins already exists" four, while
-    # the build path printed each env once. Same decision, two different-looking outputs.
+    # Envs already handled in this run, whether queued or skipped as existing, so a shared env is
+    # reported once.
     seen_envs = set()
     for module in modules:
         env = _resolve_or_explain(module)
@@ -332,16 +313,13 @@ def main(argv: List[str]) -> int:
             rc = 1
             continue
         if env in seen_envs:
-            # Two modules sharing one env: `--all` reaches both, and building it twice at once would
-            # have two mamba solves writing the same prefix.
+            # Modules sharing an env; building it twice at once would write one prefix twice.
             print("%s is already covered by this run; skipping (%s shares it)." % (env, module))
             continue
         seen_envs.add(env)
         if conda_env_exists(env) and not force:
-            # Name the prefix, not just the env. `conda_env_exists` answers across every conda
-            # installation on the machine, so "already exists" on its own can mean an env that
-            # belongs to a different conda and is not the one this user is about to run against.
-            # The path is how they tell; without it the only way to find out was to go looking.
+            # Print the prefix: `conda_env_exists` searches every conda installation on the
+            # machine, so the existing env may belong to a different conda.
             where = env_prefix(env)
             print(
                 "%s already exists at %s; skipping (use --force to recreate)."
@@ -360,14 +338,13 @@ def main(argv: List[str]) -> int:
                 lock = candidate
             else:
                 print(
-                    "No %s lockfile for %s; solving %s instead, so this one is not an exact rebuild."
+                    "No %s lockfile for %s; solving %s instead, so the builds may differ."
                     % (lock_platform(), env, os.path.basename(yaml))
                 )
         todo.append((module, env, yaml, lock))
 
     if todo and runner.dry_run:
-        # The global --dry-run promises "print the commands without running them", and this command
-        # used to ignore it: a dry run solved and built every environment it named.
+        # The global --dry-run prints the commands without running them.
         for _module, env, yaml, lock in todo:
             if force:
                 print("[dry-run] mamba env remove -y -n %s" % env)
@@ -396,17 +373,12 @@ def main(argv: List[str]) -> int:
         def build(
             position: int, module: str, env: str, yaml: str, lock: Optional[str]
         ) -> Tuple[str, bool, str]:
-            """Create one env, announcing when it starts and how long it took.
+            """Create one env, printing when it starts and how long it took.
 
-            A conda solve prints nothing to the screen on purpose (its output goes to the per-env
-            log, which is only shown on failure), so this step - the slowest in the whole install,
-            measured at 29 minutes for eleven environments - used to print the banner and then
-            nothing at all until it was over. After five minutes of silence the honest question is
-            whether it has hung, and the only way to answer it was to go and find the log.
-
-            The lines interleave when several workers are running; each one carries its env name,
-            which is what makes that readable. Flushed because stdout is a pipe under `tee`, `nohup`
-            and CI, where a block-buffered progress line arrives after the thing it announces.
+            Solver output goes to the per-env log, and this step can be long (29 minutes for eleven
+            environments), so start and finish lines show progress. Each line names its env, since
+            workers interleave. Output is flushed because stdout is often a pipe (`tee`, `nohup`,
+            CI).
             """
             print("  [%d/%d] %-22s solving..." % (position, total, env), flush=True)
             started = time.time()
@@ -436,22 +408,17 @@ def main(argv: List[str]) -> int:
                 try:
                     _m, ok, _log = future.result()
                 except Exception as exc:  # noqa: BLE001 - keep building the other envs
-                    # The per-env line never printed in this case, so say so here or the env
-                    # vanishes from the output entirely.
+                    # build() did not print a result line in this case, so print one here.
                     print("  FAILED  %s   -> %s" % (env, exc))
                     ok = False
                 if not ok:
                     rc = 1
 
     if not args.no_test:
-        # Only the names that resolved. Passing an unresolved one through made `doctor` invent a
-        # module row for it - "nonsense  metawrap2-nonsense  MISSING  conda env not created" -
-        # which reads as an environment that failed to install rather than a name that does not
-        # exist, and was the confusing half of a user's bug report.
-        # The *resolved* env's own base name, not what the user typed. doctor resolves a module or
-        # an env name, and a 2.0.x alias is neither - passing "bin_refinement-checkm2" through made
-        # it report MISSING for an environment that had just been confirmed present, and the
-        # command exited 1 on a successful install.
+        # Verify only names that resolved; otherwise `doctor` reports an unknown name as a
+        # missing env. Module names are passed as typed; anything else (such as a 2.0.x alias
+        # like "bin_refinement-checkm2", which doctor does not know) is passed as the resolved
+        # env's base name.
         verifiable = []
         for name in modules:
             env = _env_for(name)

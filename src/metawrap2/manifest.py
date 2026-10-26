@@ -1,27 +1,20 @@
 """The run manifest: what each step consumed, produced, and how long it took.
 
-``--resume`` used to trust a marker file: if ``<step>.done`` existed the step was skipped.
-That is wrong in two directions. A step whose outputs were deleted (or were never really
-written, because the tool exited 0 having produced nothing) was skipped anyway, and the run
-carried on against missing data. And a step whose *inputs* had since changed - a re-run of an
-earlier step, an edited assembly - was also skipped, silently mixing results from two
-different inputs.
-
-The manifest records, per step:
+A ``<step>.done`` marker alone cannot show that a step's outputs still exist (or were written at
+all, if the tool exited 0 with no output), or that its inputs have not changed since (a re-run of
+an earlier step, an edited assembly). The manifest records, per step:
 
 * the command that ran, when it started, and how long it took;
 * every declared input with its size, mtime and content fingerprint;
 * every declared output with the same;
 * the outcome: ``completed``, ``failed``, or ``interrupted``.
 
-``--resume`` then *verifies* rather than assumes: a step is skipped only if it completed, its
-outputs are all still present and non-empty, and none of its inputs has changed since. Anything
-else re-runs.
+With ``--resume``, a step is skipped only if it completed, its outputs are all present and
+non-empty, and none of its inputs has changed. Anything else re-runs.
 
-**Fingerprints.** Hashing a 100 GB FASTQ to decide whether to skip a step would cost more than
-the step. :func:`fingerprint` hashes the first and last megabyte plus the size, which detects
-the things that actually happen - a file replaced, re-downloaded, truncated, regenerated - at
-constant cost. ``--strict-fingerprints`` opts into whole-file hashing where that matters.
+Fingerprints: :func:`fingerprint` hashes the size plus the first and last megabyte, which detects
+a file replaced, re-downloaded, truncated or regenerated at constant cost (hashing a 100 GB FASTQ
+could take longer than the step). ``--strict-fingerprints`` hashes whole files.
 """
 
 from __future__ import annotations
@@ -39,7 +32,7 @@ SAMPLE_BYTES = 1024 * 1024
 #: Manifest filename inside a study's state directory.
 MANIFEST_NAME = "manifest.json"
 
-#: Manifest schema version, so a future change can be detected rather than mis-read.
+#: Manifest schema version, so a manifest in a different format is ignored.
 SCHEMA_VERSION = 1
 
 COMPLETED = "completed"
@@ -50,10 +43,9 @@ INTERRUPTED = "interrupted"
 def fingerprint(path: str, whole_file: bool = False) -> Optional[str]:
     """A cheap, stable fingerprint of *path*'s contents, or None if it cannot be read.
 
-    Hashes the size plus the first and last :data:`SAMPLE_BYTES`. Two different files of the
-    same size that share both ends are possible in principle but do not occur among the
-    changes this is meant to catch (regenerated, re-downloaded, truncated, replaced). Pass
-    *whole_file* to hash everything.
+    Hashes the size plus the first and last :data:`SAMPLE_BYTES`. Different files of equal size
+    with identical ends would collide, but that does not happen for the changes this targets
+    (regenerated, re-downloaded, truncated, replaced). Pass *whole_file* to hash everything.
     """
     try:
         size = os.path.getsize(path)
@@ -79,14 +71,14 @@ def fingerprint(path: str, whole_file: bool = False) -> Optional[str]:
 
 
 def describe(path: str, whole_file: bool = False) -> Dict[str, Any]:
-    """Record of one file or directory: what it is now, so a change can be noticed later."""
+    """Record of one file or directory's current state, for later change detection."""
     entry: Dict[str, Any] = {"path": path}
     if os.path.isdir(path):
         names = sorted(n for n in os.listdir(path) if not n.startswith("."))
         entry["kind"] = "directory"
         entry["entries"] = len(names)
-        # A directory's "content" is which files it holds and how big they are: that is what
-        # changes when a binner is re-run, and it is cheap to capture.
+        # A directory is fingerprinted by its file names and sizes, which change when e.g. a
+        # binner is re-run.
         listing = "\n".join(
             "%s:%d" % (n, os.path.getsize(os.path.join(path, n)))
             for n in names
@@ -166,12 +158,10 @@ class Manifest:
     def __init__(self, path: str):
         self.path = path
         self.data: Dict[str, Any] = {"schema": SCHEMA_VERSION, "steps": {}}
-        # `cohort` and `run -j N` start steps from a thread pool, and every start and finish both
-        # mutates `data` and serialises it. Two threads in `save()` at once raced twice over: on
-        # the shared temp path, where the second rename found nothing
-        # (`FileNotFoundError: manifest.json.tmp`, which killed a study after 33 of 36 assemblies),
-        # and on `data` itself, where json.dump can see a dict another thread is still writing.
-        # One re-entrant lock covers both, because the mutators call save() while holding it.
+        # `cohort` and `run -j N` start and finish steps from a thread pool; each mutates `data`
+        # and saves. Without a lock, threads raced on the temp file (`FileNotFoundError:
+        # manifest.json.tmp`, which stopped a study after 33 of 36 assemblies) and json.dump could
+        # read `data` mid-update. Re-entrant because the mutators call save() while holding it.
         self._lock = threading.RLock()
         self.load()
 
@@ -184,7 +174,7 @@ class Manifest:
             with open(self.path) as fh:
                 data = json.load(fh)
         except (OSError, ValueError):
-            # A corrupt manifest must not stop a run; it only means nothing can be skipped.
+            # A corrupt manifest does not stop a run; nothing is skipped.
             return
         if data.get("schema") != SCHEMA_VERSION:
             return
@@ -194,10 +184,8 @@ class Manifest:
     def save(self) -> None:
         """Write the manifest. Atomic, and safe to call from several threads at once.
 
-        The temp name carries the writer's identity rather than being shared: `os.replace` is
-        atomic for one writer, and with a fixed `.tmp` two writers are one file - the first rename
-        takes it and the second raises FileNotFoundError. The lock then serialises the dump itself,
-        so no writer sees `data` mid-mutation.
+        The temp file name includes the pid and thread id, since with a shared `.tmp` the second
+        `os.replace` raises FileNotFoundError. The lock keeps `data` from changing during the dump.
         """
         with self._lock:
             os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
@@ -207,8 +195,7 @@ class Manifest:
                     json.dump(self.data, fh, indent=2, sort_keys=True)
                 os.replace(tmp, self.path)
             except BaseException:
-                # Leave no stray temp behind on an interrupt or a full disk; the manifest itself
-                # is untouched, which is the state a later --resume can still read.
+                # Remove the temp file on an interrupt or full disk; the manifest is untouched.
                 if os.path.exists(tmp):
                     os.remove(tmp)
                 raise
@@ -224,8 +211,8 @@ class Manifest:
     ) -> float:
         """Record that *name* is starting. Returns the start time to pass back to finish()."""
         started = time.time()
-        # Built before the lock is taken: `describe` fingerprints every input, which is file I/O,
-        # and holding the lock through it would make one thread's inputs block another's start.
+        # Built before taking the lock, since `describe` reads every input and would block other
+        # threads.
         entry: Dict[str, Any] = {
             "status": "running",
             "command": list(command),
@@ -234,11 +221,10 @@ class Manifest:
             "outputs": [],
         }
         if grant:
-            # What the step was *allowed*, next to what it went on to use. Peak memory on its own
-            # says a step needed 40 GB; only the grant says whether 40 GB was all it was offered
-            # or a fifth of it, which is the difference between a budget to raise and one to cut.
-            # Recorded at start so an interrupted step - the interesting case for an OOM - keeps
-            # it. See metawrap2.limits and `metawrap2 calibrate`.
+            # The resources the step was granted, to compare with its measured usage (e.g. whether
+            # a 40 GB peak was the whole grant or a fifth of it). Recorded at start so an
+            # interrupted step (e.g. after an OOM) keeps it. See metawrap2.limits and
+            # `metawrap2 calibrate`.
             entry["grant"] = dict(grant)
         with self._lock:
             self.data["steps"][name] = entry
@@ -254,7 +240,7 @@ class Manifest:
         log: Optional[str] = None,
         usage: Optional[Dict[str, Any]] = None,
     ) -> None:
-        # Outputs are described before the lock, for the reason given in start().
+        # Outputs are described before taking the lock, as in start().
         described = [describe(p) for p in outputs]
         with self._lock:
             entry = self.data["steps"].setdefault(name, {})
@@ -265,8 +251,7 @@ class Manifest:
             if log:
                 entry["log"] = log
             if usage:
-                # What the step really cost: peak memory, CPU time, wall time. Recorded so budgets
-                # and disk estimates can be calibrated from runs rather than asserted.
+                # Peak memory, CPU time and wall time, used to calibrate budgets and disk estimates.
                 entry["usage"] = dict(usage)
             self.save()
 
@@ -280,8 +265,7 @@ class Manifest:
         """Whether *name* may be skipped on a resume, and the reason either way.
 
         A step is skipped only if it completed, all of its outputs are still present and
-        non-empty, and none of its inputs has changed. Everything else re-runs - which is the
-        whole point: a marker file on its own proves none of those things.
+        non-empty, and none of its inputs has changed.
         """
         record = self.step(name)
         if record is None:
@@ -314,24 +298,17 @@ class Manifest:
     ) -> Dict[str, List[str]]:
         """Check the manifest against the filesystem. Returns problems by kind.
 
-        Recording an output is a claim, and a claim is only useful if something checks it. Three
-        things can be wrong at the end of a run that ``can_skip`` would only notice on the *next*
-        one - by which point the cause is a run in the past:
+        Reports at the end of a run what ``can_skip`` would only find on the next one:
 
         ``missing`` / ``empty``
-            A step reported success and its declared output is not there, or is zero bytes. That
-            is a tool exiting 0 having produced nothing, which is the failure mode the whole
-            validate/manifest layer exists to surface early.
+            A completed step's declared output is absent or zero bytes (typically a tool that
+            exited 0 without producing anything).
         ``undeclared``
-            A top-level entry under *root* that no step claims. Not an error - logs and state
-            directories live there legitimately - but a module that writes somewhere nobody
-            declared is invisible to ``--resume``, so it is worth naming. Only the top level is
-            scanned; walking a whole study tree would report thousands of ordinary files, and
-            names in *ignore* (the study's own LOGS, CLEAN_READS, ...) are left out.
+            A top-level entry under *root* that no step declares. Not an error (logs and state
+            directories are there), but ``--resume`` cannot track it. Only the top level is
+            scanned, and names in *ignore* (the study's LOGS, CLEAN_READS, ...) are skipped.
         ``no_outputs``
-            A step that completed while declaring no outputs at all. ``--resume`` can never
-            verify such a step, so it silently degrades to the marker-file behaviour this module
-            replaced.
+            A completed step that declared no outputs, which ``--resume`` cannot verify.
         """
         problems: Dict[str, List[str]] = {
             "missing": [],

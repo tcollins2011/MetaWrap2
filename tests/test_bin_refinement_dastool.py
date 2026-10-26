@@ -1,12 +1,10 @@
-"""The --consolidator dastool route through bin_refinement.
+"""Tests for the --consolidator dastool route through bin_refinement.
 
-DAS_Tool itself is not installed here (it is an opt-in env), so it is replaced by a stand-in that
-writes the bins a real run would write. That is the right thing to fake: what is under test is
-MetaWrap2's half - which tables DAS_Tool is handed, which assembly, where its bins are picked up
-from, and that everything downstream of ``binsO`` behaves as it does for the default consolidator.
-Whether DAS_Tool's own scoring is any good is a question for the benchmark, not for a unit test.
+DAS_Tool is an opt-in env and is not installed here, so a stand-in writes the bins a real run
+would. The tests cover MetaWrap2's side: which tables and assembly DAS_Tool is given, where its
+bins are read from, and that everything after ``binsO`` matches the default consolidator.
 
-CheckM is faked the same way the golden tests fake it, and for the same reason.
+CheckM is faked as in the golden tests.
 """
 
 import hashlib
@@ -28,7 +26,7 @@ BIN_SETS = {
 
 
 def _fake_run_checkm(bins_dir, **kwargs):
-    """A .stats file for *bins_dir*, with scores derived from each bin's contig set."""
+    """Write a .stats file for *bins_dir*, with scores derived from each bin's contig set."""
     rows = []
     for name in sorted(os.listdir(bins_dir)):
         if not name.endswith(BIN_EXTENSION):
@@ -56,14 +54,13 @@ def _fake_run_checkm(bins_dir, **kwargs):
 def fake_tools(monkeypatch):
     """Fake CheckM and DAS_Tool. Returns the list of commands that reached :func:`run`.
 
-    The DAS_Tool stand-in reads the tables it was given and writes one bin per table group, so a
-    test can tell apart "MetaWrap2 handed it the wrong tables" from "MetaWrap2 looked in the wrong
-    place for the output" - both of which would otherwise look like an empty consolidation.
+    The DAS_Tool stand-in reads the tables it was given and writes one bin per table group, so
+    wrong input tables and a wrong output location give different failures.
     """
     monkeypatch.setattr(bin_refinement._checkm, "run_checkm", _fake_run_checkm)
     monkeypatch.setattr(checkm_mod, "run_checkm", _fake_run_checkm)
     monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
-    # The opt-in env is not built in CI, and nothing here enters it: DAS_Tool is faked below.
+    # The opt-in env is not built in CI; DAS_Tool is faked below.
     monkeypatch.setattr(_common, "conda_env_exists", lambda env: True)
     commands = []
     real_run = bin_refinement.run
@@ -77,8 +74,7 @@ def fake_tools(monkeypatch):
         assembly = parts[parts.index("-c") + 1]
         prefix = parts[parts.index("-o") + 1]
         seqs = {contig_id(h): s for h, s in iter_fasta(assembly)}
-        # The first table wins every contig it claims, which is a plausible-shaped answer: one
-        # non-overlapping bin set drawn from the assembly's own sequences.
+        # The first table to claim a contig keeps it, giving one non-overlapping bin set.
         chosen = {}
         for table in tables:
             with open(table) as fh:
@@ -129,17 +125,15 @@ def _run(tmp_path, extra=(), letters="AB"):
 def test_the_consolidated_set_lands_in_binsO_and_runs_the_normal_downstream_half(
     tmp_path, fake_tools
 ):
-    """What makes the arms comparable: only the consolidation step differs.
+    """DAS_Tool output goes to binsO and then through the same downstream code as the default.
 
-    binsO is re-scored with CheckM, cut on -c/-x, plotted and laid out by the same code the
-    default consolidator reaches, so a comparison between the two measures consolidation and not
-    two different definitions of a final bin set.
+    binsO is re-scored with CheckM, filtered on -c/-x, plotted and laid out as for the default
+    consolidator, so the two differ only in the consolidation step.
     """
     out = _run(tmp_path)
     # Working bin sets are tidied into work_files at the end, binsO along with the rest.
     work = os.path.join(out, "work_files")
-    # Numbered the way every other MetaWrap2 bin set is, not left under DAS_Tool's own names:
-    # .stats.tsv rows are keyed on these stems, and the arms have to differ only in contents.
+    # Bins are renamed to MetaWrap2 numbering, since .stats.tsv rows are keyed on these stems.
     assert sorted(os.listdir(os.path.join(work, "binsO"))) == ["bin_001.fasta", "bin_002.fasta"]
     with open(os.path.join(work, "dastool_bin_names.tsv")) as fh:
         names = fh.read().splitlines()
@@ -152,29 +146,26 @@ def test_the_consolidated_set_lands_in_binsO_and_runs_the_normal_downstream_half
     assert not os.path.isdir(os.path.join(work, "binsM"))
 
     (cmd,) = [c for c in fake_tools if c.startswith("DAS_Tool ")]
-    # DAS_Tool's default --search_engine is usearch, which is not installed, and it fails partway
-    # into a run; without --write_bins it reports which bins it would keep and writes no FASTA.
+    # DAS_Tool defaults to usearch, which is not installed and fails partway through a run.
+    # Without --write_bins it writes no FASTA.
     assert "--search_engine diamond" in cmd and "usearch" not in cmd and "--write_bins" in cmd
-    # -i and -l are positional with respect to each other: a mismatch mislabels every bin.
+    # -i and -l are matched by position; a mismatch mislabels every bin.
     parts = cmd.split()
     tables = parts[parts.index("-i") + 1].split(",")
     assert parts[parts.index("-l") + 1].split(",") == ["binsA", "binsB"]
     assert [os.path.basename(t) for t in tables] == ["binsA.dastool.tsv", "binsB.dastool.tsv"]
-    # The contig tables carry no header and exactly two columns: a header row would be read as a
-    # contig, and the run would end having consolidated nothing.
+    # The contig tables have two columns and no header; DAS_Tool would read a header as a contig.
     with open(os.path.join(work, "binsA.dastool.tsv")) as fh:
         rows = [line.split("\t") for line in fh.read().splitlines()]
     assert rows and all(len(r) == 2 for r in rows) and rows[0][0] == "c01"
 
 
 def test_an_assembly_with_an_empty_record_is_filtered_before_a_consolidator_sees_it(tmp_path):
-    """DAS_Tool's assembly reader stops on a header with no sequence, and blames the contigs.
+    """Records with an empty sequence are dropped from the assembly given to a consolidator.
 
-    R's ``fread`` gets one field where it expects two, stops part way through the ``.seqlength`` table,
-    and DAS_Tool then reports every contig past that point as "not found in assembly" - 36,854 of them
-    in the run that found this, in a message naming none of the real problem. CAMI2's gold-standard
-    assembly ships two such records; `binning` already drops them from its own copy, so a consolidator
-    reading the original was getting what binning had deliberately not passed on.
+    DAS_Tool's reader (R ``fread``) stops at such a record in the ``.seqlength`` table and then
+    reports every later contig as "not found in assembly" (36,854 in one run). CAMI2's gold-standard
+    assembly has two such records; `binning` already drops them from its own copy.
     """
     assembly = tmp_path / "asm.fa"
     assembly.write_text(">c1\nACGT\n>_from__to_-42_total_0\n\n>c2\nTTTT\n")

@@ -1,14 +1,12 @@
-"""read_qc has to say how much of the library it threw away, and FastQC has to start.
+"""read_qc retention reporting and FastQC invocation.
 
-Three defects a first-time user hit on the MetaHIT tutorial cohort (ERR011347/8/9, 2010-era 75 bp
-reads), one test per behaviour:
+Covers three issues found on the MetaHIT tutorial cohort (ERR011347/8/9, 2010-era 75 bp reads):
 
-* fastp's defaults discarded 58.5% of the reads whole and the module said nothing, so the run's
-  nonpareil estimate asked for 20x more sequencing where the same sample trimmed with trim-galore
-  asked for 4.06x. Retention is now reported always, and warned about when it is low.
-* FastQC 0.13.0 dropped the short ``-o``, which killed the first step of the pipeline on every
-  fresh env solve.
-* FastQC was handed every thread on the host and answered with a warning about it.
+* fastp's defaults discarded 58.5% of the reads whole without a message; nonpareil then estimated
+  20x more sequencing, against 4.06x for the same sample trimmed with trim-galore. Retention is now
+  always reported, with a warning when it is low.
+* FastQC 0.13.0 dropped the short ``-o``, so the first step failed on a fresh env solve.
+* FastQC was given every available thread and warned about it.
 """
 
 import json
@@ -30,11 +28,10 @@ def _run_read_qc(tmp_path, monkeypatch, extra_argv=(), report=None, fastqc=False
 
     Returns (commands, said, warned): the commands that would have run, the ``comm`` lines and the
     ``warning`` lines. *report* is a fixture filename (or raw text) dropped at ``fastp.json`` in
-    place of the report the real fastp would have written.
+    place of the report fastp would have written.
 
     The "<dir> already exists" warning is dropped from *warned*: the disk-space check creates the
-    output directory before the module looks to see whether it was already there, so every run
-    emits it and no assertion here is about it.
+    output directory first, so every run emits it.
     """
     calls, said, warned = [], [], []
 
@@ -82,10 +79,9 @@ def _run_read_qc(tmp_path, monkeypatch, extra_argv=(), report=None, fastqc=False
 
 
 def test_retention_line_is_read_out_of_fastps_own_json(tmp_path, monkeypatch):
-    """Regresses the silent loss: the pairs-in/pairs-out line and its reason breakdown.
+    """The retention line gives pairs in and out and the reason breakdown from fastp's JSON.
 
-    The counts are fastp's, halved from reads to pairs, and the reason is the one fastp gave -
-    58.5% filtered on quality with zero reads shortened.
+    Counts are halved from reads to pairs; the reason is 58.5% quality filtering, none shortened.
     """
     _, said, _ = _run_read_qc(tmp_path, monkeypatch, report="fastp_low_retention.json")
     (line,) = [m for m in said if m.startswith("Read retention:")]
@@ -96,10 +92,9 @@ def test_retention_line_is_read_out_of_fastps_own_json(tmp_path, monkeypatch):
 
 
 def test_low_retention_warns_and_names_the_trimmer_that_trims(tmp_path, monkeypatch):
-    """Regresses a loss that is reported but not acted on: the warning must say what to do.
+    """The low-retention warning gives the fraction and suggests the alternatives.
 
-    It has to carry the measured fraction (not just "low"), name --trimmer trim-galore, and say
-    that the difference shows up on older or lower-quality data.
+    It names --trimmer trim-galore and --fastp-quality-trim and mentions lower-quality data.
     """
     _, _, warned = _run_read_qc(tmp_path, monkeypatch, report="fastp_low_retention.json")
     (message,) = warned
@@ -110,10 +105,7 @@ def test_low_retention_warns_and_names_the_trimmer_that_trims(tmp_path, monkeypa
 
 
 def test_high_retention_does_not_warn(tmp_path, monkeypatch):
-    """Regresses a warning that cries wolf: a 99.1% run is reported, never warned about.
-
-    The threshold has to leave normal libraries alone or it stops meaning anything.
-    """
+    """A 99.1% retention run is reported without a warning."""
     _, said, warned = _run_read_qc(tmp_path, monkeypatch, report="fastp_high_retention.json")
     assert warned == []
     (line,) = [m for m in said if m.startswith("Read retention:")]
@@ -121,7 +113,7 @@ def test_high_retention_does_not_warn(tmp_path, monkeypatch):
 
 
 def test_a_missing_fastp_json_is_a_quiet_skip(tmp_path, monkeypatch):
-    """Regresses a QC step failed by its own report: no fastp.json means no line, not an error."""
+    """Without fastp.json there is no retention line and no error."""
     _, said, warned = _run_read_qc(tmp_path, monkeypatch, report=None)
     assert [m for m in said if m.startswith("Read retention:")] == []
     assert warned == []
@@ -129,10 +121,7 @@ def test_a_missing_fastp_json_is_a_quiet_skip(tmp_path, monkeypatch):
 
 
 def test_a_truncated_fastp_json_is_a_quiet_skip(tmp_path, monkeypatch):
-    """Regresses the same failure from the other direction: a half-written report is not fatal.
-
-    fastp killed mid-run leaves exactly this behind, and the reads it already wrote are fine.
-    """
+    """A truncated fastp.json (as left by an interrupted fastp) is skipped without an error."""
     _, said, warned = _run_read_qc(
         tmp_path, monkeypatch, report='{"summary": {"before_filtering": {"total_'
     )
@@ -142,10 +131,9 @@ def test_a_truncated_fastp_json_is_a_quiet_skip(tmp_path, monkeypatch):
 
 
 def test_trim_galore_retention_comes_from_its_trimming_report(tmp_path, monkeypatch):
-    """Regresses a retention line that only works on the default path.
+    """With trim-galore, retention is read from its text trimming report.
 
-    Trim Galore has no JSON, so the pair-level totals are read out of the text report - which means
-    --no_report_file must stay off the command.
+    So --no_report_file must not be on the command.
     """
     calls, said, warned = _run_read_qc(
         tmp_path,
@@ -164,18 +152,14 @@ def test_trim_galore_retention_comes_from_its_trimming_report(tmp_path, monkeypa
 
 
 def test_fastp_quality_trim_puts_the_cut_flags_on_the_command(tmp_path, monkeypatch):
-    """Regresses the opt-in that lets fastp trim instead of discard."""
+    """--fastp-quality-trim appends the cut flags to the fastp command."""
     calls, _, _ = _run_read_qc(tmp_path, monkeypatch, extra_argv=["--fastp-quality-trim"])
     (cmd,) = calls
     assert cmd.endswith(" --cut_front --cut_tail --cut_mean_quality 20")
 
 
 def test_without_the_flag_the_fastp_command_is_unchanged(tmp_path, monkeypatch):
-    """Regresses a default moved by accident: the shipped command must stay byte-identical.
-
-    Changing which reads fastp keeps takes a measured benchmark arm, so the flags only ever arrive
-    with the opt-in - nothing may leak into the default invocation.
-    """
+    """Without --fastp-quality-trim the default fastp command is unchanged."""
     calls, _, _ = _run_read_qc(tmp_path, monkeypatch)
     out = tmp_path / "qc"
     assert calls == [
@@ -193,10 +177,7 @@ def test_without_the_flag_the_fastp_command_is_unchanged(tmp_path, monkeypatch):
 
 
 def test_fastqc_is_told_outdir_not_dash_o(tmp_path, monkeypatch):
-    """Regresses the dead first step: FastQC 0.13.0 dropped -o and read_qc died on it.
-
-    --outdir is accepted by 0.12.x as well, so one spelling has to serve both.
-    """
+    """FastQC is called with --outdir, not -o, which 0.13.0 dropped (0.12.x accepts both)."""
     calls, _, _ = _run_read_qc(tmp_path, monkeypatch, fastqc=True)
     fastqc_calls = [c for c in calls if c.startswith("fastqc ")]
     assert len(fastqc_calls) == 2  # pre-QC and post-QC
@@ -207,17 +188,14 @@ def test_fastqc_is_told_outdir_not_dash_o(tmp_path, monkeypatch):
 
 
 def test_fastqc_threads_are_capped(tmp_path, monkeypatch):
-    """Regresses `[WARNING] You can't use more than 4 threads per file` on every read_qc run.
-
-    -t 32 is what the user asked for; 4 is all FastQC will use.
-    """
+    """FastQC's -t is capped at FASTQC_MAX_THREADS when read_qc gets -t 32."""
     calls, _, _ = _run_read_qc(tmp_path, monkeypatch, fastqc=True)
     for cmd in [c for c in calls if c.startswith("fastqc ")]:
         assert "-t %d" % read_qc.FASTQC_MAX_THREADS in cmd
 
 
 def test_single_end_retention_counts_reads_not_pairs(tmp_path, monkeypatch):
-    """Regresses a halved count on single-end data, where fastp's reads *are* the units."""
+    """Single-end retention counts reads without halving."""
     with open(os.path.join(FIXTURES, "fastp_low_retention.json")) as fh:
         doc = json.load(fh)
     path = tmp_path / "fastp.json"

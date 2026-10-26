@@ -1,14 +1,7 @@
 # Planned features
 
 Features not yet built. Items are removed when they ship; what each release added is in
-[docs/releases/](docs/releases/). Two detailed plans cover parts of this list, with versions,
-licences and citations checked:
-[functional annotation, pathways, AMR and abundance](docs/plan_functional_annotation.md) and
-[the other modules](docs/plan_other_modules.md). Where they disagree with this page, follow the
-plans.
-
-[docs/plan_2.1.3.md](docs/plan_2.1.3.md) proposes the next release, with costs, the measurements
-behind each item and the decisions needed.
+[releases/](releases/).
 
 Each item has a size tag:
 
@@ -37,13 +30,12 @@ Each item has a size tag:
 
 Started or decided, each with a named blocker.
 
-- `[done in 2.1.3]` **MIMAG quality tags** in `.stats.tsv` (`mimag_tag`, `mimag_rrna`,
-  `mimag_trnas`), from completeness, contamination and rRNA/tRNA presence, with
-  `high_quality_unverified_rrna` kept distinct from a measured absence.
-- `[low]` **GTDB-Tk as the `classify_bins` default**, retiring taxator-tk. taxator-tk is deprecated
-  with a warning. Switching the default needs a measurement first.
+- `[low]` **GTDB-Tk as the `classify_bins` default**, replacing taxator-tk, which already prints a
+  deprecation warning. Needs a measurement before the switch.
 - `[moderate]` **PlasMAAG**, plasmid-aware binning on the assembly graph (*Nat Biotechnol* 2026).
-  Blocked: `assembly` deletes the graph, and PlasMAAG is not on bioconda.
+  Blocked: PlasMAAG is not on bioconda. `assembly --keep-graph` (2.1.3) keeps the graph at a named
+  path. On MEGAHIT the kept graph joins to no contig and 96.9% of its nodes are isolated, so a
+  graph-aware tool gets no adjacency from it; see [Kept assembly graphs](#kept-assembly-graphs).
 - `[moderate]` **VFDB virulence calls** in `amr`. Needs a measured comparison arm before it ships.
 - `[moderate]` **InterProScan member databases** beyond Pfam-A, for genes KEGG cannot place.
 
@@ -70,14 +62,32 @@ Started or decided, each with a named blocker.
 
 - `[moderate]` **More binners**: GraphMB (Lamurias et al., *Bioinformatics* 2022, uses the assembly
   graph), MetaDecoder (Liu et al., *Microbiome* 2022), binny (Hickl et al., *NAR Genom Bioinform*
-  2022).
+  2022). For GraphMB, see [Kept assembly graphs](#kept-assembly-graphs).
 - `[moderate]` **Hi-C binning**: bin3C (DeMaere & Darling, *PeerJ* 2019) or MetaTOR (Baudry et al.,
   *Front Genet* 2019), which uses contact frequency to separate strains and place plasmids.
 
+### Kept assembly graphs
+
+Measured for a graph-aware refinement prototype that was later dropped. A graph that does not match
+the assembly still parses but gives no result, so check both limits below.
+
+- **MEGAHIT (the default assembler).** `megahit_toolkit contig2fastg` renames nodes to
+  `NODE_<n>_length_..._ID_<n>`, which shares nothing with the `k141_<id>` contigs in
+  `final_assembly.fasta`: the name join covered 0 of 7363 contigs. The kept graph is built from the
+  largest k, whose contigs are already maximal paths, so only 3.1% of nodes have a neighbour (15.4%
+  at k=59, 7.4% at k=99). Joining by sequence with minimap2 would fix the names and still leave
+  almost no adjacency.
+- **metaSPAdes.** `P` lines carry the FASTA's own scaffold names, so the join covers 5183 of 5183
+  contigs, 100% of bp. Only 11.3% of contigs have a neighbour, and those linked and short enough
+  to have gone unbinned hold 3.81% of assembled bp.
+
+Both are from one single-sample assembly of 3M CAMI2 oral read pairs. Both assemblers resolve the
+graph while building contigs, so the kept graph holds what the assembler could not resolve. It
+does not hold the short contigs that binning missed. A graph method first needs a denser graph:
+prefer metaSPAdes to MEGAHIT, and Hi-C or long reads to either.
+
 ## Taxonomic profiling
 
-- `[done in 2.1.3]` **Bracken** re-estimates Kraken2 abundances at a chosen rank
-  (`kraken2 --bracken`; Lu et al., *PeerJ CS* 2017).
 - `[moderate]` **Read-level profilers**: MetaPhlAn 4 (Blanco-Míguez et al., *Nat Biotechnol* 2023),
   mOTUs (Ruscheweyh et al., *Microbiome* 2022), ganon (Piro et al., *Bioinformatics* 2020).
 
@@ -137,7 +147,11 @@ Started or decided, each with a named blocker.
 
 ## Reporting and standards
 
-- `[low]` **One per-MAG summary table**: quality, taxonomy, size, N50, coverage, tRNA and rRNA.
+- `[low]` **Reference recovery report**: how many genomes from a supplied reference set (for
+  example published MAGs from the same samples) a run recovered, by skani ANI and aligned fraction.
+  It does not depend on CheckM, so it can check CheckM results on real samples.
+- `[low]` **Run CPU-hours in `provenance.txt`**: each step's CPU time is in the run manifest; the
+  run total is not in the provenance summary.
 - `[moderate]` **An interactive HTML report** for browsing MAGs and their functions.
 - `[moderate]` **Submission support**: MIxS/MIMAG metadata, NCBI/ENA submission helpers, and
   provenance as RO-Crate.

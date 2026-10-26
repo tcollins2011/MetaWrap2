@@ -1,13 +1,10 @@
-"""What a first install reads: step numbering, environment counts, and messages that say nothing.
+"""Tests for the output of `quickstart` and `install-env`.
 
-These are the output contracts of `quickstart` and `install-env` - the two commands a new user
-runs before anything else works. Each one here was a real report from a first install: a step
-number that skipped from 1 to 3, an environment count that counted modules, a skip message that
-did not say which conda installation it had found, and half an hour of silence in the slowest
-step.
+Covers step numbering when steps are skipped, environment counts, skip messages that name the conda
+installation, progress lines during environment creation, the version string and the starter
+config.
 
-Nothing here touches conda, the network, or a database. Every test fakes the step it is not
-about, so a failure names one behaviour.
+No test touches conda, the network or a database; each fakes the steps it does not test.
 """
 
 from __future__ import annotations
@@ -26,8 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover
 def flat(text: str) -> str:
     """Captured output with the banner borders and the line wrapping taken back out.
 
-    Messages are wrapped to the banner's text column, so asserting on a sentence means either
-    knowing where it wraps or removing the wrapping. The second is the stable one.
+    Messages are wrapped to the banner width, so the wrapping is removed before matching.
     """
     kept = []
     for raw in text.split("\n"):
@@ -74,7 +70,7 @@ def quickstart_calls(monkeypatch):
 
 
 def test_a_skipped_step_is_numbered_and_says_why(quickstart_calls, capsys):
-    """`--databases none` printed STEP 1/3 then STEP 3/3, so step 2 looked like a silent failure."""
+    """A skipped step 2 is printed as STEP 2/3 with the reason."""
     assert quickstart.main(["--binning-only", "--databases", "none"]) == 0
     out = flat(capsys.readouterr().out)
     assert "STEP 1/3" in out
@@ -83,7 +79,7 @@ def test_a_skipped_step_is_numbered_and_says_why(quickstart_calls, capsys):
 
 
 def test_skipping_environments_still_starts_at_step_one(quickstart_calls, capsys):
-    """`--skip-envs` used to print STEP 3/3 as the first thing the command said."""
+    """With `--skip-envs` the output still starts at STEP 1/3, marked skipped."""
     assert quickstart.main(["--binning-only", "--skip-envs", "--databases", "none"]) == 0
     out = flat(capsys.readouterr().out)
     assert "STEP 1/3: conda environments (skipped: --skip-envs)" in out
@@ -94,10 +90,9 @@ def test_skipping_environments_still_starts_at_step_one(quickstart_calls, capsys
 
 
 def test_the_step_banner_counts_environments_not_modules(quickstart_calls, capsys):
-    """ "creating 23 conda environment(s)" counted module names; 11 environments were built.
+    """The banner counts distinct environments, not module names.
 
-    The genome-recovery path names seven things that resolve to four environments, so the count
-    in the banner and the number of names handed to install-env have to differ.
+    The genome-recovery path has seven names that resolve to four environments.
     """
     assert quickstart.main(["--binning-only", "--databases", "none"]) == 0
     out = flat(capsys.readouterr().out)
@@ -107,7 +102,7 @@ def test_the_step_banner_counts_environments_not_modules(quickstart_calls, capsy
 
 
 def test_the_slow_step_states_how_long_it_took_when_measured(quickstart_calls, capsys):
-    """Silence with no expected duration is an unbounded wait; the measurement bounds it."""
+    """The slow environment step prints its measured duration (29 minutes)."""
     assert quickstart.main(["--binning-only", "--databases", "none"]) == 0
     out = flat(capsys.readouterr().out)
     assert "29 minutes" in out
@@ -129,12 +124,10 @@ def existing_envs(monkeypatch):
 
 
 def test_an_existing_environment_is_reported_once_with_its_location(existing_envs, capsys):
-    """Three modules share metawrap2-reads: the skip path printed the same line three times.
+    """An environment shared by three modules is reported once as existing, with its prefix.
 
-    The build path already deduplicated; the "already exists" branch returned before reaching the
-    bookkeeping that does it. The location is part of the message because `conda_env_exists`
-    answers across every conda installation on the machine, so the name alone cannot tell a user
-    whether the environment found is the one they will run against.
+    The prefix is included because `conda_env_exists` checks every conda installation on the
+    machine.
     """
     assert install_env.main(["read_qc", "assembly", "reassemble_bins", "--no-test"]) == 0
     out = capsys.readouterr().out
@@ -148,7 +141,7 @@ def test_an_existing_environment_is_reported_once_with_its_location(existing_env
 
 
 def test_an_environment_from_another_conda_installation_says_so(existing_envs, capsys, monkeypatch):
-    """A prefix outside the active root is usable but is not the user's; the name hides that."""
+    """An environment outside the active conda root is reported as built by a different conda."""
     monkeypatch.setattr(install_env, "prefix_in_active_root", lambda prefix: False)
     assert install_env.main(["read_qc", "--no-test"]) == 0
     out = capsys.readouterr().out
@@ -157,11 +150,10 @@ def test_an_environment_from_another_conda_installation_says_so(existing_envs, c
 
 
 def test_each_environment_announces_its_start_and_its_elapsed_time(monkeypatch, capsys, tmp_path):
-    """The slowest step in the install printed nothing at all between its banner and its result.
+    """Each environment prints a start line and an elapsed-time line.
 
-    A conda solve's output goes to a per-env log that is only shown on failure, so success was 29
-    minutes of silence. The counter is over the real number of environments, and the env name is
-    on both lines because parallel workers interleave them.
+    The solver's output goes to a per-env log shown only on failure. The counter is over distinct
+    environments, and both lines name the env because parallel workers interleave.
     """
     monkeypatch.setattr(install_env, "ensure_mamba", lambda: True)
     monkeypatch.setattr(install_env, "conda_env_exists", lambda env: False)
@@ -180,7 +172,7 @@ def test_each_environment_announces_its_start_and_its_elapsed_time(monkeypatch, 
 
 
 def test_the_elapsed_time_reads_as_minutes_and_seconds():
-    """ "done in 192.0 seconds" is arithmetic; "done in 3m12s" is an answer."""
+    """Durations are formatted as seconds, minutes and seconds, or hours and minutes."""
     assert install_env.format_duration(45) == "45s"
     assert install_env.format_duration(192) == "3m12s"
     assert install_env.format_duration(3840) == "1h04m"
@@ -190,11 +182,7 @@ def test_the_elapsed_time_reads_as_minutes_and_seconds():
 
 
 def test_log_dir_is_forwarded_to_install_env(quickstart_calls, tmp_path):
-    """`install-env --log-dir` existed and quickstart could not ask for it.
-
-    Without it, an install that succeeded with warnings left its only record in a temp directory
-    whose path was printed once and never again.
-    """
+    """quickstart passes --log-dir to install-env, so the solver logs can be kept."""
     argv = ["--binning-only", "--databases", "none", "--log-dir", str(tmp_path)]
     assert quickstart.main(argv) == 0
     assert quickstart_calls["env"]["log_dir"] == str(tmp_path)
@@ -204,10 +192,10 @@ def test_log_dir_is_forwarded_to_install_env(quickstart_calls, tmp_path):
 
 
 def test_a_non_interactive_run_says_it_is_downloading_nothing(quickstart_calls, capsys):
-    """It downloaded nothing, correctly, and never said so - which reads as a silent failure.
+    """Without a terminal or --databases, nothing is downloaded and the output says so.
 
-    The behaviour must not change: under sbatch or in CI there is nobody to answer a prompt, and
-    a 300 GB download must never start unattended. Only the sentence is new.
+    Under sbatch or CI there is no one to answer a prompt, and a 300 GB download must not start
+    unattended.
     """
     assert quickstart.main(["--binning-only"]) == 0
     out = flat(capsys.readouterr().out)
@@ -219,11 +207,7 @@ def test_a_non_interactive_run_says_it_is_downloading_nothing(quickstart_calls, 
 def test_skip_envs_reports_database_status_not_environment_status(
     quickstart_calls, capsys, tmp_path
 ):
-    """`--skip-envs` is documented as "databases only" and reported on environments.
-
-    It printed the module table - every row missing, because creating the environments had just
-    been skipped on purpose - and exited 1 for a run that did exactly what was asked.
-    """
+    """`--skip-envs` reports database status, not the module table, and exits 0."""
     config = tmp_path / "metawrap2.toml"
     config.write_text("[databases]\n")
     argv = ["--binning-only", "--skip-envs", "--databases", "none", "--config", str(config)]
@@ -237,13 +221,10 @@ def test_skip_envs_reports_database_status_not_environment_status(
 
 
 def test_a_full_quickstart_asks_about_every_module(quickstart_calls, capsys):
-    """The readiness table has to cover what `metawrap2 -h` lists, or the two cannot be compared.
+    """A full quickstart passes no module list to `doctor`, so every module is reported.
 
-    It used to pass the conda environment names, which held the table at 22 rows of 24 - and the
-    two it dropped were the modules with no environment, one of which is gated on a Python extra
-    that can actually be missing. So the module missing from the table was precisely the one with
-    an unmet dependency. A full quickstart now names no modules at all and lets `doctor` report
-    everything it knows about.
+    Passing environment names left out the modules with no environment, one of which depends on an
+    optional Python extra.
     """
     assert quickstart.main(["--databases", "none"]) == 0
     assert (
@@ -259,14 +240,14 @@ def test_a_full_quickstart_asks_about_every_module(quickstart_calls, capsys):
 
 
 def test_the_version_names_the_commit_in_a_checkout(monkeypatch, capsys):
-    """`MetaWrap2 v=2.1.2` from a clone one commit past the tag made every bug report ambiguous."""
+    """In a git checkout, `-v` includes the commit."""
     monkeypatch.setattr(cli, "git_revision", lambda: "16f3d14")
     assert cli.main(["-v"]) == 0
     assert capsys.readouterr().out.strip() == "MetaWrap2 %s (git 16f3d14)" % cli.__version__
 
 
 def test_the_version_falls_back_to_the_plain_number_without_git(monkeypatch, capsys):
-    """A wheel install has no repository and no git binary, and `-v` must still answer."""
+    """Without git, `-v` prints the plain version."""
     monkeypatch.setattr(cli, "git_revision", lambda: None)
     assert cli.main(["-v"]) == 0
     printed = capsys.readouterr().out
@@ -283,7 +264,7 @@ def test_the_version_falls_back_to_the_plain_number_without_git(monkeypatch, cap
     ],
 )
 def test_a_version_string_never_fails_however_git_behaves(monkeypatch, outcome, capsys):
-    """`-v` has to answer on any machine: no repository, no git binary, no surprises quoted back."""
+    """`-v` works with no git binary, outside a repository, or with unexpected git output."""
     import subprocess
 
     def fake_run(_cmd, **_kwargs):
@@ -298,7 +279,7 @@ def test_a_version_string_never_fails_however_git_behaves(monkeypatch, outcome, 
 
 
 def test_every_global_flag_in_the_limit_table_is_in_the_help_text():
-    """`--disk-check-interval` was accepted, documented in the config, and absent from -h."""
+    """Every flag in the limits table appears in -h."""
     help_text = cli.help_message()
     for flag in cli._LIMIT_FLAGS:
         assert flag in help_text, flag
@@ -308,11 +289,9 @@ def test_every_global_flag_in_the_limit_table_is_in_the_help_text():
 
 
 def test_a_fresh_config_has_no_active_database_key(tmp_path):
-    """Four placeholders were uncommented, so a brand-new config had four "missing" databases.
+    """A new config has no active database keys, only commented placeholders.
 
-    "Configured but missing" and "not configured" need different actions from the user, and an
-    active `/path/to/my/kraken2_database` collapses them. It also left `install-db` to decide
-    whether to replace the key it finds or write a second one.
+    An active placeholder path would be reported as a missing database instead of an unset one.
     """
     path = tmp_path / "config.toml"
     assert config_cmd.main(["init", "--path", str(path)]) == 0
@@ -321,7 +300,7 @@ def test_a_fresh_config_has_no_active_database_key(tmp_path):
 
 
 def test_config_show_reports_a_fresh_config_as_not_set_rather_than_missing(tmp_path, capsys):
-    """The symptom: `config show` on an untouched config listed four databases as [missing]."""
+    """`config show` on a new config lists no database as [missing]."""
     path = tmp_path / "config.toml"
     assert config_cmd.main(["init", "--path", str(path)]) == 0
     capsys.readouterr()
@@ -329,3 +308,33 @@ def test_config_show_reports_a_fresh_config_as_not_set_rather_than_missing(tmp_p
     out = capsys.readouterr().out
     assert "[missing]" not in out
     assert "<none set>" in out
+
+
+# --- the default install covers the default bin scorer, CheckM2 ------------------------------
+
+
+def test_the_binning_install_builds_checkm2_and_fetches_its_database(quickstart_calls):
+    """bin_refinement scores with CheckM2 by default, so its env and database are in the set."""
+    assert quickstart.main(["--binning-only", "--databases", "small"]) == 0
+    assert "checkm2" in quickstart_calls["env"]["modules"]
+    assert "checkm2" in quickstart_calls["db"]
+    # CheckM1's data is only for --checkm1.
+    assert "checkm" not in quickstart_calls["db"]
+    assert (
+        "checkm2" in quickstart.BINNING_DATABASES and "checkm" not in quickstart.BINNING_DATABASES
+    )
+
+
+def test_a_full_install_builds_every_module_env_and_checkm2(quickstart_calls):
+    """A full quickstart names every module env, plus CheckM2 and the learned binners."""
+    from metawrap2.config import ALL_MODULE_ENVS
+
+    assert quickstart.main(["--databases", "none"]) == 0
+    built = quickstart._unique_envs(quickstart_calls["env"]["modules"])
+    assert set(ALL_MODULE_ENVS) <= set(built)
+    assert {"metawrap2-checkm2", "metawrap2-learned"} <= set(built)
+
+
+def test_installing_only_reassemble_bins_also_builds_checkm2(quickstart_calls):
+    assert quickstart.main(["--modules", "reassemble_bins", "--databases", "none"]) == 0
+    assert "checkm2" in quickstart_calls["env"]["modules"]

@@ -4,10 +4,9 @@
     python flowcharts/build.py            # all diagrams
     python flowcharts/build.py overview   # just one
 
-Each diagram is a Python file in diagrams/. Its .drawio file is written to drawio/ and opens and
-edits in draw.io; the PNG is exported to png/ by the draw.io desktop app, so it is exactly what
-draw.io renders. The overview is also copied to docs/figures/, where the README and the docs site
-read it.
+Each diagram is a Python file in diagrams/. Its .drawio file is written to drawio/ and can be
+edited in draw.io. The PNG is exported to png/ by the draw.io desktop app. The overview is also
+copied to docs/figures/ for the README and the docs site.
 """
 
 from __future__ import annotations

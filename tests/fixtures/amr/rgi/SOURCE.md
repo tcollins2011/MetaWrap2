@@ -1,9 +1,12 @@
-# RGI output, as it really looks
+# RGI output
 
-`bin_007.txt` is a real RGI 6.0.8 run against CARD 4.0.2 over one CAMI2 bin, with three columns
-removed (`Predicted_DNA`, `Predicted_Protein`, `CARD_Protein_Sequence`) because they are whole
-sequences and nothing here parses them. Every other column and value is unedited.
+`bin_007.txt` is RGI 6.0.8 output against CARD 4.0.2 for one CAMI2 bin. Three columns are removed
+(`Predicted_DNA`, `Predicted_Protein`, `CARD_Protein_Sequence`) because they hold full sequences and
+are not parsed. All other columns and values are unedited.
 
-It is the fixture for what matters about RGI: `Cut_Off` tiers (one `Perfect`, four `Strict`), an
-`ORF_ID` that is a Prodigal header rather than a gene id, `Best_Identities` as low as 27.84% on a
-Strict hit, and bare ARO numbers where every other tool writes `ARO:`-prefixed accessions.
+The file covers:
+
+- `Cut_Off` tiers: one `Perfect` hit and four `Strict` hits;
+- `ORF_ID` values that are Prodigal headers, not gene ids;
+- `Best_Identities` down to 27.84% on a Strict hit;
+- bare ARO numbers in place of the `ARO:`-prefixed accessions other tools write.

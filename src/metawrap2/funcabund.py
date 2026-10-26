@@ -1,21 +1,19 @@
-"""Gene and pathway abundance: per genome, and extended to the whole sample.
+"""Gene and pathway abundance per genome, extended to whole samples.
 
-The arithmetic is one line. For gene family *g* in sample *s*, summing over genomes *k*:
+For gene family *g* in sample *s*, summing over genomes *k*:
 
     A(g,s) = sum_k  n(g,k) * abundance(k,s)
 
 where ``n(g,k)`` is the copy number of *g* in genome *k* and ``abundance(k,s)`` is that genome's
-abundance in that sample. Everything difficult about this file is in the units and the caveats.
+abundance in that sample.
 
-**Do not divide a coverage-based abundance by genome size.** CoverM's ``relative_abundance`` and
-``trimmed_mean`` are already coverage-proportional, which is to say already proportional to cell
-abundance, so dividing again double-corrects. The division is needed only for read-count numbers
-(raw counts, salmon's ``NumReads``). For MAGs specifically, coverage estimates cells correctly
-because incompleteness cancels in ``aligned_bases / MAG_length`` - what incompleteness biases is the
-**gene content** term ``n(g,k)``, not the abundance term. That asymmetry is the single easiest thing
-here to get backwards, which is why it is written down rather than implied.
+Coverage-based abundances (CoverM ``relative_abundance``, ``trimmed_mean``) are already proportional
+to cell abundance and must not be divided by genome size. Only read counts (raw counts, salmon
+``NumReads``) need that division. For MAGs, incompleteness cancels in
+``aligned_bases / MAG_length``, so it biases the gene content term ``n(g,k)``, not the abundance
+term.
 
-**Three units, because there are three honest denominators** and picking one silently misleads:
+Three units are reported:
 
 =================================  ==========================================================
 unit                               what it is comparable across
@@ -27,11 +25,9 @@ unit                               what it is comparable across
 ``length_normalised``              genes, since a short gene otherwise collects fewer reads
 =================================  ==========================================================
 
-**And one metric that is not an abundance.** The fraction of a sample's functional signal that can
-be attributed to a MAG at all. Across 92,187 metagenomes only about 10% of assembled base pairs
-reach a medium- or high-quality MAG, and the unbinned remainder is biased rather than random, so a
-MAG-only functional profile describes a narrow slice of the sample. Reporting the slice's size
-beside it is the difference between a profile and a claim about the community.
+The module also reports the fraction of a sample's functional signal attributable to MAGs. Across
+92,187 metagenomes about 10% of assembled base pairs reach a medium- or high-quality MAG, and the
+unbinned remainder is not a random sample, so a MAG-only profile covers part of the community.
 """
 
 from __future__ import annotations
@@ -44,15 +40,14 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 class Unit(Enum):
-    """Which denominator a number is over. On every row, because it changes what it means."""
+    """The denominator a value is expressed over. Written on every row."""
 
     RELATIVE = "relative"
     PER_GENOME_EQUIVALENT = "per_genome_equivalent"
     LENGTH_NORMALISED = "length_normalised"
 
 
-#: What each unit may be compared across, carried into the output so the constraint travels with
-#: the data rather than living in documentation.
+#: What each unit may be compared across. Written into the output beside each value.
 UNIT_COMPARABLE: Mapping[str, str] = {
     Unit.RELATIVE.value: "within one sample only; compositional, needs CoDA methods",
     Unit.PER_GENOME_EQUIVALENT.value: "across samples",
@@ -63,9 +58,8 @@ UNIT_COMPARABLE: Mapping[str, str] = {
 class AbundanceKind(Enum):
     """Whether an abundance number is coverage-proportional already, or a read count.
 
-    The distinction decides whether genome size has to be divided out, and getting it wrong is a
-    systematic error in one direction: treating coverage as counts divides by length twice and makes
-    large genomes look rare.
+    Determines whether genome size is divided out. Treating coverage as counts would divide by
+    length twice and under-estimate large genomes.
     """
 
     #: CoverM relative_abundance / trimmed_mean, sylph, any depth-derived figure.
@@ -89,8 +83,7 @@ class GenomeAbundance:
     def cell_proportional(self) -> float:
         """The abundance as a per-cell quantity, whichever kind it started as.
 
-        Coverage is already there. A read count is divided by genome length once - and only once,
-        which is the whole reason this is a method rather than a line at each call site.
+        Coverage is returned as is. A read count is divided by genome length (0.0 if unknown).
         """
         if self.kind is AbundanceKind.COVERAGE:
             return self.value
@@ -107,8 +100,7 @@ def feature_abundance(
 
     *per_genome* is genome -> feature -> copy number (a KO count, a module completeness, whatever
     the caller is propagating). A genome with no abundance entry for a sample contributes nothing to
-    it rather than defaulting to one: a MAG absent from a sample's abundance table was not observed
-    there, and treating it as present at unit abundance imports another sample's organism.
+    that sample.
     """
     out: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for entry in abundances:
@@ -137,12 +129,8 @@ def to_genome_equivalents(
     """Copies per genome equivalent: the cross-sample comparable unit.
 
     *prokaryotic_fraction* is the share of the sample's sequence that is bacterial or archaeal, from
-    SingleM. It is the denominator because the alternative - dividing by total reads - makes a
-    sample's functional profile depend on how much host or eukaryotic DNA was in it, so two gut
-    samples with different host content stop being comparable for a reason that has nothing to do
-    with their microbiomes.
-
-    MicrobeCensus did this job and is abandoned (last release 2016), which is why SingleM.
+    SingleM. Dividing by total reads instead would make profiles depend on host or eukaryotic DNA
+    content. SingleM replaces MicrobeCensus, which has had no release since 2016.
     """
     if prokaryotic_fraction <= 0:
         raise ValueError(
@@ -157,10 +145,8 @@ def to_length_normalised(
 ) -> Dict[str, float]:
     """Per kilobase of the feature, so two gene families can be compared with each other.
 
-    Mandatory for any between-gene comparison: a 300 bp gene and a 3 kb gene at the same cellular
-    abundance collect reads in a 1:10 ratio, and without this the longer one looks ten times more
-    abundant. A feature with no known length is passed through unchanged rather than dropped, and
-    the row says so, because silently omitting it would make the table's total wrong.
+    Needed for between-gene comparisons: at equal cellular abundance a 3 kb gene collects ten times
+    the reads of a 300 bp gene. A feature with no known length is passed through unchanged.
     """
     out: Dict[str, float] = {}
     for feature, value in features.items():
@@ -171,7 +157,7 @@ def to_length_normalised(
 
 @dataclass(frozen=True)
 class Assignable:
-    """How much of a sample's functional signal a MAG-based profile actually accounts for."""
+    """How much of a sample's functional signal a MAG-based profile accounts for."""
 
     sample: str
     #: Total abundance of all genomes observed in the sample, binned or not.
@@ -193,12 +179,11 @@ def assignable(
     annotated_genomes: Iterable[str],
     binned_fraction: Optional[Mapping[str, float]] = None,
 ) -> List[Assignable]:
-    """The honesty metric, per sample.
+    """Per-sample fraction of abundance covered by annotated genomes.
 
-    Two different denominators and both are worth having. ``assignable_fraction`` is of the genomes
-    in the abundance table, which answers "did every MAG I quantified get annotated". The SingleM
-    figure is of the *community*, which answers the harder question - what fraction of the cells
-    present are represented by a MAG at all - and is the one that is usually small.
+    ``assignable_fraction`` is relative to the genomes in the abundance table (were all quantified
+    MAGs annotated). ``binned_fraction_of_community``, from SingleM, is relative to the whole
+    community (what fraction of cells a MAG represents), and is usually much smaller.
     """
     annotated = set(annotated_genomes)
     totals: Dict[str, float] = defaultdict(float)
@@ -241,11 +226,11 @@ ASSIGNABLE_COLUMNS: Tuple[str, ...] = (
     "caveat",
 )
 
-#: Printed in every assignable row, because the number is meaningless without it.
+#: Printed in every assignable row.
 ASSIGNABLE_CAVEAT = (
     "a MAG-based functional profile describes only the binned fraction of the sample; "
     "across 92,187 metagenomes ~10% of assembled bp reach a medium- or high-quality MAG, "
-    "and the remainder is biased rather than random"
+    "and the unbinned remainder is a biased subset"
 )
 
 
@@ -294,8 +279,7 @@ def contributors_per_feature(
 ) -> Dict[str, int]:
     """How many genomes contribute to each feature in one sample.
 
-    A feature carried by one rare genome and one carried by forty are different findings at the same
-    abundance, and nothing else in the row distinguishes them.
+    Distinguishes a feature carried by one genome from one carried by many at the same abundance.
     """
     counts: Dict[str, int] = defaultdict(int)
     present = {
@@ -307,8 +291,8 @@ def contributors_per_feature(
     return dict(counts)
 
 
-#: The column `singlem microbial_fraction` writes the figure in, and the ones it has used before.
-#: Checked against singlem 0.21.4's read_fraction.py rather than assumed.
+#: Column names `singlem microbial_fraction` uses for the figure, current and older. Checked
+#: against singlem 0.21.4's read_fraction.py.
 SINGLEM_FRACTION_COLUMNS: Tuple[str, ...] = (
     "read_fraction",
     "prokaryotic_fraction",
@@ -319,15 +303,9 @@ SINGLEM_FRACTION_COLUMNS: Tuple[str, ...] = (
 def parse_singlem_fraction(path: str) -> Dict[str, float]:
     """sample -> prokaryotic fraction (0-1), from ``singlem microbial_fraction``.
 
-    **SingleM writes a percentage**, not a fraction: ``read_fraction.py`` computes
-    ``account / metagenome_size * 100`` and caps it at 100. So this divides by 100 unconditionally.
-
-    The first version guessed instead - "a value above 1 must be a percentage, since a fraction
-    above 1 is not meaningful" - which is right for a typical sample at 85.3 and catastrophically
-    wrong for a host-dominated one at 0.8, where it would read 0.8% as 80% and scale every gene
-    abundance in that sample down by 100x. A unit that can be looked up should never be inferred,
-    and this is the same class of error as the skani alignment-fraction confusion that merged two
-    *Enterococcus* species in dRep.
+    SingleM writes a percentage (``read_fraction.py`` computes ``account / metagenome_size * 100``,
+    capped at 100), so the value is always divided by 100. Inferring the unit from the magnitude
+    would misread a host-dominated sample at 0.8% as 0.8 (80%).
     """
     out: Dict[str, float] = {}
     with open(path) as fh:
@@ -348,8 +326,8 @@ def parse_singlem_fraction(path: str) -> Dict[str, float]:
                 continue
             if value > 100.0:
                 raise ValueError(
-                    "%s reports %s=%g for sample %r, which is above 100%%. That is not a "
-                    "percentage, so this file is not what it claims to be."
+                    "%s reports %s=%g for sample %r, above 100%%. The column is not a "
+                    "percentage; check that this is the right file."
                     % (path, column, value, row[sample_column])
                 )
             out[row[sample_column]] = value / 100.0

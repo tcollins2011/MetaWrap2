@@ -1,14 +1,11 @@
 """Drop short contigs from a length-sorted SPAdes FASTA.
 
-Ported from metaWRAP's ``rm_short_contigs.py``, with one correctness fix: the length now
-comes from the actual sequence rather than from parsing field 3 of a ``_``-split
-SPAdes-style header (``NODE_x_length_<len>_cov_...``).
+Ported from metaWRAP's ``rm_short_contigs.py``. The length is taken from the sequence instead
+of field 3 of a ``_``-split SPAdes-style header (``NODE_x_length_<len>_cov_...``).
 
-The old parse raised ValueError on any assembler that does not use SPAdes naming, and it
-also stopped at the *first* short contig - correct only because metaSPAdes output happens to
-be sorted longest-first. Measuring the sequence and filtering every record gives identical
-results on sorted input and correct results on unsorted input. Reading is gz-transparent via
-:mod:`metawrap2.io.seqio`.
+The old parse raised ValueError on non-SPAdes headers and stopped at the first short contig,
+which relied on the input being sorted longest-first. Every record is now filtered, so unsorted
+input also works. Reading is gz-transparent via :mod:`metawrap2.io.seqio`.
 """
 
 from __future__ import annotations

@@ -21,10 +21,9 @@ _NAME_RE = re.compile(r"^(\d+)\s*\|\s*(.+?)\s*\|.+scientific name")
 _CIGAR_RE = re.compile(r"(\d+)[MIDNP]")
 
 
-# NCBI renamed the top-level rank "superkingdom" to "domain": a current taxdump contains no
-# "superkingdom" nodes at all, so asking for that rank silently yielded "Not annotated" for
-# every contig - losing exactly the Bacteria/Archaea/Eukaryota split a blobplot is for.
-# Treat the two as the same rank, in both directions, so old and new taxdumps both work.
+# NCBI renamed the top-level rank "superkingdom" to "domain", and current taxdumps have no
+# "superkingdom" nodes, so that rank came out "Not annotated" for every contig. The two names are
+# treated as synonyms in both directions so old and new taxdumps work.
 RANK_SYNONYMS = {
     "superkingdom": ("superkingdom", "domain"),
     "domain": ("domain", "superkingdom"),
@@ -86,9 +85,9 @@ def main():
     ap.add_argument("--bam", nargs="*", default=[])
     ap.add_argument("--cov", nargs="*", default=[])
     ap.add_argument("--taxlist", nargs="*", default=["species", "order", "phylum", "superkingdom"])
-    # This helper runs in the host interpreter (it needs metawrap2), but samtools lives in
-    # the blobology conda env, so the caller passes its absolute path. Falling back to
-    # "samtools" keeps the script usable standalone when samtools is on PATH.
+    # This helper runs in the host interpreter (it needs metawrap2), but samtools is in the
+    # blobology conda env, so the caller passes its absolute path. The "samtools" default works
+    # when the script is run standalone with samtools on PATH.
     ap.add_argument(
         "--samtools",
         default="samtools",
@@ -97,8 +96,8 @@ def main():
     args = ap.parse_args()
 
     out_file = args.out or (args.assembly + ".txt")
-    # Column names stay exactly as the user asked for them (so the output contract and the
-    # plot filenames do not change); only the *matching* accepts the synonym.
+    # Column names stay as requested (so the output columns and plot filenames do not change);
+    # only the matching accepts the synonym.
     requested_ranks = list(args.taxlist)
     wanted_ranks = normalize_ranks(requested_ranks)
 

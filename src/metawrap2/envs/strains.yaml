@@ -1,14 +1,11 @@
 # Within-population variation: inStrain, plus the aligners that feed it.
 #
-# Its own environment rather than a place in metawrap2-bins, and the reason is the pin: inStrain
-# resolves to Python 3.8, which nothing else here can be built against. That is also why it is a
-# module environment rather than an opt-in flag on another module - a module whose env cannot
-# coexist with its neighbour's is a module.
+# A separate env because inStrain resolves to Python 3.8, which nothing else here can use. For the
+# same reason strains is its own module instead of a flag on another one.
 #
-# The aligners are here because the alignment is part of the measurement rather than a prerequisite
-# the user supplies: popANI between two samples mapped to different references is not a quantity,
-# so the module maps every sample itself against one genome set. The same three aligners the rest of
-# the pipeline offers, so `--aligner` means the same thing here as in `binning`.
+# The aligners are included because the module maps every sample itself against one genome set:
+# popANI between samples mapped to different references is not comparable. The same three
+# aligners as the rest of the pipeline, so `--aligner` means the same as in `binning`.
 name: metawrap2-strains
 channels:
   - conda-forge

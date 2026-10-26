@@ -1,12 +1,11 @@
-"""inStrain's and TRACS' tables: the column names, the units, and where the genome name comes from.
+"""Tests for parsing inStrain and TRACS tables: column names, units, and genome names.
 
-Complements ``tests/test_strains.py``, which pins the two numbers the first real run got wrong.
-These pin the *schema* those numbers depend on, because a renamed column here is not an error: it
-parses to None, None reads as "not in both samples", and a whole comparison table comes back as a
-biological absence. All 42 comparisons of the first real run did exactly that.
+Complements ``tests/test_strains.py``. A renamed column parses to None, which reads as "not in both
+samples", so a schema mistake turns a comparison table into an apparent absence (all 42
+comparisons of the first run).
 
-The fixtures are the vendored real ones - inStrain 1.10.0 and TRACS output over three human gut
-metagenomes and this repo's 26 refined bins; see ``tests/fixtures/strains/SOURCE.md``.
+The fixtures are vendored inStrain 1.10.0 and TRACS output over three human gut metagenomes and
+this repo's 26 refined bins; see ``tests/fixtures/strains/SOURCE.md``.
 """
 
 from __future__ import annotations
@@ -36,9 +35,8 @@ def _header(path, delimiter="\t"):
 def test_instrain_profile_columns_are_spelled_the_way_instrain_spells_them():
     """``breadth_minCov`` and ``breadth_expected``: camelCase in one, suffix order reversed in the other.
 
-    Every one of these is read off the real `genome_info.tsv` header rather than from inStrain's
-    documentation, because the documentation names some of them differently. A miss is silent - the
-    field becomes None and the genome looks undetected.
+    Names are taken from the real `genome_info.tsv` header, since inStrain's documentation names
+    some differently. A wrong name gives None and the genome looks undetected.
     """
     header = set(_header(PROFILE))
     for key, column in strains.PROFILE_COLUMNS.items():
@@ -50,16 +48,15 @@ def test_instrain_profile_columns_are_spelled_the_way_instrain_spells_them():
 
 
 def test_a_missing_identity_column_is_an_error_rather_than_an_empty_table(tmp_path):
-    """The one column that is checked explicitly, because losing it loses the whole result.
+    """A missing `popANI` column raises KeyError instead of parsing to None.
 
-    Without the guard, `popANI` going missing yields 42 rows of None, which the verdict logic reads
-    as "different strain over too little of the genome" - a complete, plausible, wrong answer.
+    Without the check, 42 rows of None read as "different strain over too little of the genome".
     """
     header = set(_header(COMPARE))
     for key, column in strains.COMPARE_COLUMNS.items():
         assert column in header, "%s -> %r is not a column inStrain writes" % (key, column)
-    # `population_SNPs` here against `SNV_count` in the profile table: inStrain is inconsistent with
-    # itself across its two outputs, so neither table's names can be inferred from the other's.
+    # `population_SNPs` here, `SNV_count` in the profile table: inStrain's two outputs name the
+    # same quantity differently.
     assert strains.COMPARE_COLUMNS["population_snvs"] == "population_SNPs"
     assert strains.COMPARE_COLUMNS["a"] == "name1"
 
@@ -80,11 +77,10 @@ def test_a_missing_identity_column_is_an_error_rather_than_an_empty_table(tmp_pa
 
 
 def test_the_three_fraction_columns_are_scaled_whatever_their_magnitude():
-    """popANI ~0.99999 and percent_compared from 0.001 to 1.0 - so a magnitude rule cannot work.
+    """Fractions are scaled to percentages per column, not by magnitude.
 
-    "Above 1 must already be a percentage" is right for popANI and catastrophic for
-    percent_compared, where it would leave 0.001 as 0.001% for one genome and scale another's 1.0
-    to 100%. The scaling is a property of the column, so it is listed by column.
+    popANI is ~0.99999 and percent_compared ranges from 0.001 to 1.0. A rule such as "above 1 is
+    already a percentage" would leave 0.001 as 0.001% and scale 1.0 to 100%.
     """
     assert strains.FRACTION_COLUMNS == ("pop_ani", "con_ani", "percent_compared")
     assert strains._as_percent("1.0") == pytest.approx(100.0)
@@ -101,9 +97,8 @@ def test_the_three_fraction_columns_are_scaled_whatever_their_magnitude():
 def test_a_blank_cell_is_none_and_not_a_zero(tmp_path):
     """inStrain leaves cells empty, and writes ``nan``, for quantities it did not compute.
 
-    A zero here is a measurement: zero coverage, zero diversity, zero SNVs. None is "not measured".
-    The verdict logic distinguishes them, and a zero breadth would put a genome below the floor
-    rather than outside the comparison.
+    These parse to None ("not measured"), not zero; a zero breadth would put a genome below the
+    floor instead of outside the comparison.
     """
     assert strains._as_float("") is None
     assert strains._as_float("nan") is None
@@ -126,15 +121,14 @@ def test_a_blank_cell_is_none_and_not_a_zero(tmp_path):
 def test_a_metawrap_bin_name_keeps_its_numeric_suffix():
     """`bin.13` is a bin name, not `bin` with a `.13` extension.
 
-    ``os.path.splitext("bin.13")`` returns ``("bin", ".13")``, which collapses every bin in a set
-    onto the single key `bin` - so a 26-bin set joins as one genome and 25 profiles are lost into
-    whichever row happened to be last.
+    ``os.path.splitext("bin.13")`` returns ``("bin", ".13")``, which would collapse a 26-bin set
+    onto the single key `bin`.
     """
     assert os.path.splitext("bin.13") == ("bin", ".13")
     assert strains._strip_extension("bin.13") == "bin.13"
     assert strains._strip_extension("bin.13.fa") == "bin.13"
     assert strains._strip_extension("bin.13.fasta") == "bin.13"
-    # And the real tables come back with the dotted names intact.
+    # The real tables keep the dotted names.
     assert "bin.11" in {p.genome for p in strains.parse_profile(PROFILE, "S1")}
     assert "bin.1" in {c.genome for c in strains.parse_comparison(COMPARE)}
 
@@ -142,8 +136,8 @@ def test_a_metawrap_bin_name_keeps_its_numeric_suffix():
 def test_tracs_column_names_carry_their_spaces_and_the_file_is_comma_separated():
     """``SNP distance``, ``sites considered``, ``expected K`` - spaces, and a `.csv` not a `.tsv`.
 
-    Read as a TSV the whole header is one field and every row parses to None, which the verdict
-    logic reports as ABSENT: "these samples do not share this genome", for every pair.
+    Read as a TSV, the header is one field and every row parses to None, reported as ABSENT for
+    every pair.
     """
     header = _header(TRACS, delimiter=",")
     assert header[0] == "sampleA"
@@ -156,23 +150,23 @@ def test_tracs_column_names_carry_their_spaces_and_the_file_is_comma_separated()
 def test_the_genome_is_split_off_by_a_known_sample_name_not_at_an_underscore():
     """TRACS labels a row ``<sample>_<genome>``, and genomes are called things like `bin_001`.
 
-    Splitting at the last underscore gives the sample `ERR011347_bin` and the genome `001`;
-    splitting at the first gives the sample `ERR011347` only by luck. The known sample names are
-    tried longest-first so one that prefixes another cannot claim its rows.
+    Splitting at an underscore cannot work (the last gives sample `ERR011347_bin` and genome
+    `001`). Known sample names are tried longest first so one that prefixes another cannot claim
+    its rows.
     """
     assert strains._split_label("ERR011347_bin.1", SAMPLES) == ("ERR011347", "bin.1")
     assert strains._split_label("ERR011347_bin_001", SAMPLES) == ("ERR011347", "bin_001")
     assert strains._split_label("S1_g", ("S1", "S1b")) == ("S1", "g")
     assert strains._split_label("S1b_g", ("S1", "S1b")) == ("S1b", "g")
-    # With no known sample matching, the genome is reported unknown rather than guessed at.
+    # With no known sample matching, the genome is reported as unknown.
     assert strains._split_label("unexpected_label", SAMPLES) == ("unexpected_label", "")
 
 
 def test_an_empty_tracs_table_is_no_rows_rather_than_a_zero_distance(tmp_path):
-    """TRACS skips any reference under 25% covered, so "no row" is its commonest honest answer.
+    """A missing or header-only TRACS table gives no rows; a blank row is ABSENT, not distance 0.
 
-    A row invented with distance 0 would be a transmission call; a row with distance None and no
-    sites is ABSENT. Both are "no evidence", and only one of them is reported as a shared strain.
+    TRACS skips any reference under 25% covered, so missing rows are common. A distance of 0 would
+    be a transmission call.
     """
     assert strains.parse_tracs(str(tmp_path / "never-ran.csv")) == []
 

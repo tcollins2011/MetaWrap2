@@ -1,22 +1,16 @@
-"""MetaWrap2 viruses: recover viral contigs, say how complete they are, and group them into vOTUs.
+"""MetaWrap2 viruses: recover viral contigs, estimate their completeness, and group them into vOTUs.
 
-The gap this fills is simple to state: MetaWrap2 bins prokaryotes and throws the phage away, in
-samples where phage is usually the most abundant thing present. geNomad finds the viral contigs,
-CheckV says how much of a genome each one is and trims host sequence off proviruses, and the two
-together are the viral counterpart of ``binning`` plus ``bin_refinement``.
+Binning keeps prokaryotes and discards phage, which is often the most abundant thing in a sample.
+geNomad finds the viral contigs, and CheckV estimates how complete each one is and trims host
+sequence off proviruses: the viral counterpart of ``binning`` plus ``bin_refinement``.
 
-Two choices worth knowing about before reading the output:
-
-* **geNomad runs on contigs, not on bins.** A phage contig is usually not in any prokaryotic bin -
-  that is why it was discarded - so screening the bins would look in the one place the viruses are
-  not. Bins are accepted (``-b``) for the case where a prophage is integrated in a binned genome,
-  but the assembly (``-a``) is the input that finds free phage.
-* **geNomad's plasmid calls come from the same run** and are written out too. The ``amr`` module's
-  mobility work needs exactly that, so one pass over the contigs serves both rather than two passes
-  over the same data with two databases.
+* geNomad runs on the assembly (``-a``), because phage contigs are usually in no prokaryotic bin.
+  Bins (``-b``) are accepted for finding prophages integrated in binned genomes.
+* geNomad's plasmid calls from the same run are written out too, for the ``amr`` module's mobility
+  analysis.
 
 See :mod:`metawrap2.viruses` for the quality tiers, why an unreliable completeness estimate is
-reported as ``undetermined`` rather than as a number, and the CRISPR host-linking idea.
+reported as ``undetermined``, and CRISPR host linking.
 """
 
 from __future__ import annotations
@@ -59,30 +53,28 @@ CONDA_ENV = MODULE_ENVS["viruses"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 # end-to-end runs the whole geNomad chain: gene calling, marker annotation, the classifier, and the
-# summary. --cleanup removes its intermediates, which are large and which nothing here reads.
+# summary. --cleanup removes its large intermediates, which nothing here reads.
 #
-# --min-score is deliberately not set: geNomad calibrates its own score against a target FDR, and
-# replacing that with a round number throws away the calibration. --min-virus-score exists on the
-# module for anyone who wants it anyway.
+# --min-score is not set by default, so geNomad's FDR-calibrated cutoff applies. --min-virus-score
+# sets it.
 GENOMAD = "genomad end-to-end --cleanup --threads {threads} {score} {input} {outdir} {db}"
-# skani over the viral contigs, for vOTU clustering. The same tool `dereplicate` uses on genomes and
-# the same table format, with viral thresholds: 95% ANI over 85% of the shorter sequence rather than
-# 95% over 10%. -E writes one row per pair rather than a full matrix.
+# skani over the viral contigs, for vOTU clustering. Same tool and table format as `dereplicate`,
+# with viral thresholds: 95% ANI over 85% of the shorter sequence instead of 95% over 10%. -E writes
+# one row per pair instead of a full matrix.
 SKANI_VIRAL = (
     "skani triangle -E -l {genome_list} -o {output} -t {threads} -s {screen} --min-af {min_af}"
 )
-# cctyper over the prokaryotic bins, to read CRISPR arrays off them. --prodigal meta because the
-# input is a MAG of many contigs rather than one closed chromosome, which is the case cctyper's
-# single-genome gene calling assumes.
+# cctyper over the prokaryotic bins, to find CRISPR arrays. --prodigal meta because a MAG has many
+# contigs, while cctyper's single-genome gene calling assumes one closed chromosome.
 #
-# --db is passed explicitly, and has to be. bioconda's cctyper 1.9 ships an activation script that
-# exports CCTYPER_DB=$CONDA_PREFIX/cct_data, a 1.8-era data directory that does not contain the
-# profile database 1.9 looks for - so a freshly installed cctyper exits with "Could not find HMM
-# profile database" until something points it at the data inside the Python package instead.
+# --db is required: bioconda's cctyper 1.9 activation script exports
+# CCTYPER_DB=$CONDA_PREFIX/cct_data, a 1.8-era directory without the profile database 1.9 needs,
+# so cctyper exits with "Could not find HMM profile database" unless pointed at the data inside
+# the Python package.
 CCTYPER = "cctyper {input} {outdir} --prodigal meta -t {threads} --db {db} --no_plot"
 # CheckV's end_to_end runs contamination, completeness, repeats and the quality summary in order.
-# -d names the database directory; without it CheckV looks for CHECKVDB in the environment, which is
-# a second place for the same setting to live and disagree with metawrap2.toml.
+# -d names the database directory, so metawrap2.toml decides it instead of a CHECKVDB variable in
+# the environment.
 CHECKV = "checkv end_to_end {input} {outdir} -t {threads} -d {db}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
@@ -92,15 +84,15 @@ VIRAL_TABLE = "viral_contigs" + TSV_SUFFIX
 PLASMID_TABLE = "plasmid_contigs" + TSV_SUFFIX
 #: The viral sequences themselves, after CheckV's provirus trimming.
 VIRAL_FASTA = "viruses.fasta"
-#: One row per viral population. A vOTU is the unit a count should be of: two contigs of the same
-#: population are one finding, and reporting contigs inflates every viral number in the output.
+#: One row per viral population (vOTU). Counting contigs instead would count one population once
+#: per contig.
 VOTU_TABLE = "votus" + TSV_SUFFIX
 #: One row per piece of evidence that a host was infected: a CRISPR spacer from a host genome found
 #: in a viral contig.
 HOST_LINK_TABLE = "host_links" + TSV_SUFFIX
 #: Where cctyper's own output is kept, one directory per host genome.
 CRISPR_DIR = "crispr"
-#: Where each tool's own output is kept, because a derived table should never be the only copy.
+#: Where each tool's own output is kept, alongside the derived tables.
 GENOMAD_DIR = "genomad"
 CHECKV_DIR = "checkv"
 # ───────────────────────────────────────────────────────────────────────────────────────────
@@ -117,14 +109,14 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     source.add_argument(
         "-a",
         "--assembly",
-        help="an assembly. This is the input that finds free phage, which is most of it: a phage "
-        "contig is usually in no prokaryotic bin, which is why binning discarded it",
+        help="an assembly. Use this to find free phage, which is most of the viral signal: "
+        "phage contigs are usually left out of prokaryotic bins",
     )
     source.add_argument(
         "-b",
         "--bins",
-        help="a bin folder, for finding proviruses integrated in binned genomes. Screening bins "
-        "alone will miss free phage",
+        help="a bin folder, for finding proviruses integrated in binned genomes. Bins alone "
+        "miss free phage",
     )
     threads_arg(p)
     p.add_argument(
@@ -140,41 +132,41 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         type=int,
         default=_viruses.MIN_VIRAL_LENGTH,
         metavar="BP",
-        help="ignore contigs shorter than this (default: %(default)s). Below it a virus call is a "
-        "fragment CheckV cannot place",
+        help="ignore contigs shorter than this (default: %(default)s). Shorter virus calls are "
+        "fragments CheckV cannot place",
     )
     p.add_argument(
         "--min-virus-score",
         type=float,
         default=None,
         metavar="SCORE",
-        help="geNomad minimum virus score, 0-1. Default: geNomad's own FDR-calibrated cutoff, "
-        "which is the better choice - a round number replaces a calibration with a preference",
+        help="geNomad minimum virus score, 0-1 (default: geNomad's own FDR-calibrated "
+        "cutoff, which is recommended)",
     )
     p.add_argument(
         "--skip-votus",
         action="store_true",
-        help="do not cluster the viral contigs into populations. Counts are then of contigs, which "
-        "overstates how many distinct viruses were found",
+        help="do not cluster the viral contigs into populations. Counts are then of contigs, "
+        "which overestimates the number of distinct viruses",
     )
     p.add_argument(
         "--crispr-hosts",
         metavar="BIN_FOLDER",
         help="predict hosts by matching CRISPR spacers from these prokaryotic genomes against the "
-        "viral contigs. A spacer is a record of a past infection, so a match is direct evidence "
-        "rather than a compositional prediction - and the bins are usually already in hand",
+        "viral contigs. A spacer records a past infection, so a match is direct evidence of the "
+        "host, unlike a prediction from sequence composition",
     )
     p.add_argument(
         "--untrusted-arrays",
         action="store_true",
         help="also use spacers from CRISPR arrays cctyper does not trust. A spurious array "
-        "contributes host sequence as 'spacers', which then match wherever they came from",
+        "contributes host sequence as 'spacers', which can give false host matches",
     )
     p.add_argument(
         "--skip-checkv",
         action="store_true",
-        help="run geNomad only. The viral set then has no completeness at all, so every contig is "
-        "tier `undetermined`",
+        help="run geNomad only. The viral set then has no completeness estimates, so every "
+        "contig is tier `undetermined`",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -235,10 +227,8 @@ def _write_plasmids(path: str, rows: Dict[str, Dict[str, str]], genome: str, app
 def _cluster_votus(args, env, viral_fasta: str, contigs: List[_viruses.ViralContig]) -> None:
     """Cluster the viral sequences into populations and write the vOTU table.
 
-    skani compares files, so each sequence is written to its own fasta first. That is 161 small
-    files on a real assembly, which costs nothing and keeps the comparison the same operation
-    `dereplicate` performs on genomes - including its parser, so a change to skani's output format
-    has one place to be fixed rather than two.
+    skani compares files, so each sequence is written to its own fasta first (161 files on one
+    assembly). This reuses `dereplicate`'s skani parser.
     """
     from ..modules.dereplicate import parse_skani
 
@@ -249,8 +239,8 @@ def _cluster_votus(args, env, viral_fasta: str, contigs: List[_viruses.ViralCont
     for header, sequence in iter_fasta(viral_fasta):
         name = contig_id(header)
         lengths[name] = len(sequence)
-        # Named by index, not by contig: a contig id contains characters that are legal in a fasta
-        # header and awkward in a filename, and the mapping back is the list file's job anyway.
+        # Named by index, since contig ids can contain characters awkward in a filename. Names
+        # are mapped back from the files after skani runs.
         path = os.path.join(work, "seq_%05d.fna" % len(paths))
         with open(path, "w") as out:
             out.write(">%s\n%s\n" % (name, sequence))
@@ -279,7 +269,7 @@ def _cluster_votus(args, env, viral_fasta: str, contigs: List[_viruses.ViralCont
     if rc != 0 or not os.path.isfile(matrix):
         warning(
             "skani failed, so the viral contigs are not clustered. Counts in %s are of contigs, "
-            "which overstates the number of distinct viruses" % VIRAL_TABLE
+            "which overestimates the number of distinct viruses" % VIRAL_TABLE
         )
         return
 
@@ -314,9 +304,9 @@ def _cluster_votus(args, env, viral_fasta: str, contigs: List[_viruses.ViralCont
 def _cctyper_db(env: Optional[str]) -> Optional[str]:
     """Where cctyper's packaged data lives inside *env*, asked of the env's own Python.
 
-    Necessary because bioconda's activation script points CCTYPER_DB at a stale data directory (see
-    the CCTYPER command above). Resolved by importing cctyper in the environment rather than by
-    guessing a path, because the python version is in it and that changes between builds.
+    Needed because bioconda's activation script points CCTYPER_DB at a stale data directory (see
+    the CCTYPER command above). Found by importing cctyper in the environment, since the path
+    includes the Python version.
     """
     prefix = env_prefix(env) if env else None
     python = os.path.join(prefix, "bin", "python") if prefix else sys.executable
@@ -343,10 +333,9 @@ def _cctyper_db(env: Optional[str]) -> Optional[str]:
 def _crispr_host_links(args, env, viral_fasta: str) -> None:
     """Run cctyper over the host genomes and write every spacer match against the viral set.
 
-    Host prediction for the cost of one extra tool over genomes that are already in hand. It covers
-    only a fraction of the viruses found - a host has to have a CRISPR system, and that system has
-    to have recorded this virus - so an absent link is not evidence of a missing host, which is why
-    the table is per match rather than per virus.
+    Covers only some of the viruses: a link needs a host with a CRISPR system that has recorded
+    this virus. A missing link is not evidence of a missing host, so the table has one row per
+    match, not per virus.
     """
     bins = list_bins(args.crispr_hosts)
     if not bins:
@@ -361,8 +350,8 @@ def _crispr_host_links(args, env, viral_fasta: str) -> None:
     if db is None:
         warning(
             "could not locate cctyper's packaged database inside the environment, so host linking "
-            "is skipped. cctyper itself would fail here: bioconda's build points CCTYPER_DB at a "
-            "data directory that does not hold the profiles 1.9 needs"
+            "is skipped. (bioconda's cctyper build sets CCTYPER_DB to a data directory without "
+            "the profiles version 1.9 needs, so cctyper would fail here anyway)"
         )
         return
 
@@ -425,8 +414,8 @@ def _crispr_host_links(args, env, viral_fasta: str) -> None:
     )
     if not links:
         comm(
-            "no matches, which is the usual result on a single sample: a link needs the host to "
-            "carry a CRISPR system and that system to have recorded this virus"
+            "no matches. This is common for a single sample: a link needs the host to carry a "
+            "CRISPR system with a spacer from this virus"
         )
 
 
@@ -598,8 +587,7 @@ def main(argv: List[str]) -> int:
         comm(
             "%d provirus(es) trimmed of host sequence; %d contig(s) have a completeness estimate "
             "CheckV does not trust, which usually means a virus with no close relative in the "
-            "database rather than a fragment"
-            % (counts["proviruses"], counts["unreliable_completeness"])
+            "database" % (counts["proviruses"], counts["unreliable_completeness"])
         )
         announcement("VIRUSES PIPELINE SUCCESSFULLY FINISHED!!!")
     finally:

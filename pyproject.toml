@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metawrap2"
-version = "2.1.3"
+version = "2.1.4"
 description = "MetaWrap2: a benchmarked pipeline for genome-resolved metagenomics, from reads to MAGs and their functions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,54 +30,50 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
-# Every runtime dependency carries an upper bound as well as a floor. A floor says "nothing older
-# than this works"; it says nothing at all about what is tested, and "resolves" is not "works". With
-# floors alone, a `pip install metawrap2` today pulled pandas 3 and numpy 2.5 - two majors with
-# breaking changes that nothing here has ever been run against - and the failure surfaces as a
-# TypeError in a plotting helper after a 40-minute assembly, which is an expensive way to find out.
-# Each bound admits the major this tree is tested against and stops before the next one. For the 0.x
-# packages the minor is the breaking unit, so the bound is the next minor.
+# Every runtime dependency has an upper bound as well as a floor. With floors alone, `pip install
+# metawrap2` pulled pandas 3 and numpy 2.5, two untested majors with breaking changes, and the
+# failure was a TypeError in a plotting helper after a 40-minute assembly. Each bound admits the
+# major this tree is tested against and stops before the next. For 0.x packages the minor is the
+# breaking unit, so the bound is the next minor.
 #
 # Versions tested (the .venv this suite runs in): numpy 2.5.4, pandas 3.0.6, matplotlib 3.11.2,
 # seaborn 0.13.2, scipy 1.18.1, biopython 1.88, tqdm 4.70.1, pyrodigal 3.7.1, pyhmmer 0.12.3.
-# Raising a bound is a deliberate act: run the suite against the new major first, then move it here
-# and update this list.
+# To raise a bound, run the suite against the new major first, then change it here and update
+# this list.
 dependencies = [
     "biopython>=1.79,<2",
     "tomli>=2.0,<3; python_version < '3.11'",
     # The bundled helper scripts (plot_binning_results, plot_reassembly, make_heatmap,
     # blobology/makeblobplot) run in the host interpreter, so their plotting/table stack
-    # is a hard requirement, not an extra.
+    # is a required dependency.
     "numpy>=1.20,<3",
     "pandas>=1.3,<4",
     "matplotlib>=3.5,<4",
     "seaborn>=0.11,<0.14",
     # seaborn.clustermap (quant_bins heatmap) needs scipy for the hierarchical clustering
     "scipy>=1.7,<2",
-    # progress bars for MetaWrap2's own long loops (metawrap2.progress degrades
-    # gracefully if it is absent, but it is small and always wanted)
+    # Progress bars for MetaWrap2's own long loops (metawrap2.progress works without it,
+    # but it is small).
     "tqdm>=4.60,<5",
     # Gene calling and HMM search run in the host interpreter, not a conda env: `annotate` calls
-    # genes with pyrodigal and scores KOfam/Pfam profiles with pyhmmer. Both were imported and
-    # never declared, so a plain `pip install` gave an `annotate` that could not start - it only
-    # worked where someone had installed them by hand.
+    # genes with pyrodigal and scores KOfam/Pfam profiles with pyhmmer. Without them declared, a
+    # plain `pip install` gave an `annotate` that could not start.
     "pyrodigal>=3.0,<4",
     "pyhmmer>=0.10,<0.13",
 ]
 
 [project.optional-dependencies]
-# Writing feature tables as BIOM 2.1, so they can be read by QIIME 2, phyloseq, scikit-bio and
-# MicrobiomeAnalyst without a user writing a converter first. Optional because it pulls h5py, and
-# every table is also written as a TSV.
+# Writing feature tables as BIOM 2.1, readable by QIIME 2, phyloseq, scikit-bio and
+# MicrobiomeAnalyst. Optional because it pulls h5py, and every table is also written as a TSV.
 biom = ["biom-format>=2.1.16", "h5py>=3.0"]
-# ANCOM-BC for differential abundance. scikit-bio ships it natively as of 0.7.1, which is the only
-# reason this pipeline has a statistics step at all - every other implementation is an R package.
+# ANCOM-BC for differential abundance. scikit-bio has it natively as of 0.7.1; other
+# implementations are R packages.
 stats = ["scikit-bio>=0.7.1"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    # Lint/type tools are pinned exactly so CI, the pre-push hooks, and local runs all use the
-    # same versions (unpinned ranges drift, and a newer tool with new rules breaks CI).
+    # Lint/type tools are pinned so CI, the pre-push hooks and local runs use the same versions
+    # (a newer tool with new rules can break CI).
     "ruff==0.16.8",
     "black==26.5.1",
     "isort==5.13.2",
@@ -97,53 +93,47 @@ Issues = "https://github.com/ursky/MetaWrap2/issues"
 
 [project.scripts]
 metawrap2 = "metawrap2.cli:main"
-# Same entry point under a shorter name. Every command in this tool is typed as
-# `metawrap2 <module> <flags>`, and the prefix is the part nobody needs to read.
+# Same entry point under a shorter name.
 mw2 = "metawrap2.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-# The environment specs and their lockfiles are shipped with the package, not just present in
-# a source checkout: `metawrap2 install-env` needs them, and it has to work from a plain
-# `pip install metawrap2` as well as from a clone.
+# The environment specs and their lockfiles are shipped with the package, because
+# `metawrap2 install-env` needs them after a plain `pip install metawrap2` as well as in a clone.
 #
-# data/ is globbed whole, not listed by extension, because the extension list is exactly what
-# went wrong: this line shipped only the env files, the KEGG module table landed under
-# src/metawrap2/data/kegg/ later, and nobody extended it - so `pathways` and
-# `quantify_function` raised FileNotFoundError on modules_table.tsv for everyone who installed
-# the wheel the README's first line tells them to install. A developer never saw it, because
-# `pip install -e .` reads the file straight out of the checkout. Everything under data/ is a
-# reference table some module loads at runtime, so the next one ships without an edit here;
-# tests/test_packaging_data.py fails if any of them stops being covered.
+# data/ is globbed whole instead of by extension. An extension list once shipped only the env
+# files, so `pathways` and `quantify_function` raised FileNotFoundError on
+# src/metawrap2/data/kegg/modules_table.tsv for wheel installs (`pip install -e .` reads the
+# checkout and did not show it). Everything under data/ is a reference table some module loads
+# at runtime; tests/test_packaging_data.py fails if any of them is not covered.
 "metawrap2" = ["envs/*.yaml", "envs/locks/*.lock", "envs/README.md", "data/**/*"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-# Vendored third-party code is kept as close to upstream as possible so it can be re-synced;
-# linting it only produces noise we would have to re-suppress after every update.
+# Vendored third-party code is kept close to upstream so it can be re-synced, so it is not
+# linted.
 extend-exclude = ["src/metawrap2/vendor"]
 
 [tool.ruff.lint]
 # MetaWrap2 uses printf-style formatting and typing.List/Optional throughout. Ruff's
-# "modernise" rules fight that on almost every line (they were ~560 of the ~570 findings),
-# which buried the handful of real ones. Silence the style-only rules rather than
-# half-converting the codebase; converting to `list`/`X | None` is a deliberate one-pass
-# change for later, now that the minimum Python is 3.10.
+# "modernise" rules flag that on almost every line (~560 of ~570 findings), so these style-only
+# rules are ignored. Converting to `list`/`X | None` is a possible one-pass change later, now that
+# the minimum Python is 3.10.
 ignore = [
     "UP031",   # printf-style string formatting (house style)
     "UP006",   # use `list` instead of `List` for annotations
     "UP045",   # use `X | None` instead of `Optional[X]`
     "UP008", "UP035",
-    "FA100",   # `from __future__ import annotations` - not needed at py3.10, and adding it
-               # to the plotting scripts would change nothing but the diff
+    "FA100",   # `from __future__ import annotations`: not needed at py3.10, and adding it
+               # to the plotting scripts would only add diff noise
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# The bundled helper scripts are executable entry points run as `python -m ...`; their
-# module-level argv handling and sys.path setup is deliberate.
+# The bundled helper scripts are executable entry points run as `python -m ...`, with
+# module-level argv handling and sys.path setup.
 "src/metawrap2/scripts/**" = ["E402", "EXE001", "EXE002"]
 "tests/**" = ["E402"]
 
@@ -151,7 +141,7 @@ ignore = [
 line-length = 100
 target-version = ["py310"]
 # Vendored code is kept close to upstream so it can be re-synced; reformatting it would make
-# every future diff against upstream unreadable.
+# diffs against upstream unreadable.
 extend-exclude = "src/metawrap2/vendor"
 
 [tool.isort]
@@ -166,9 +156,9 @@ extend_skip_glob = ["src/metawrap2/vendor/*"]
 # with a matching grammar. Pinning to 3.10 made mypy reject newer numpy stubs on 3.12/3.13.
 files = ["src/metawrap2"]
 exclude = "src/metawrap2/vendor"
-# Pragmatic settings for a codebase with untyped scientific dependencies: annotations are
-# checked where they exist and required on new code, but third-party libraries without stubs
-# (biopython, matplotlib, seaborn) do not have to be silenced one import at a time.
+# Settings for a codebase with untyped scientific dependencies: annotations are checked where
+# they exist and required on new code, and third-party libraries without stubs (biopython,
+# matplotlib, seaborn) need not be silenced one import at a time.
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_redundant_casts = true
@@ -177,16 +167,15 @@ no_implicit_optional = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-# The ported helper scripts are procedural module-level scripts, not typed libraries: they run
-# top to bottom and reuse names like `data` and `max_x` for each successive plot. Annotating
-# those would mean restructuring working, verified plotting code to satisfy the checker, so
-# their functions are checked but their module-level bodies are not.
+# The ported helper scripts are procedural module-level scripts: they run top to bottom and reuse
+# names like `data` and `max_x` for each plot. Their functions are type-checked but their
+# module-level bodies are not.
 module = "metawrap2.scripts.*"
 check_untyped_defs = false
 
 [[tool.mypy.overrides]]
-# The three plotting scripts are the extreme case of the above - straight-line matplotlib code
-# ported from metaWRAP, verified by running it rather than by typing it.
+# The three plotting scripts: straight-line matplotlib code ported from metaWRAP, verified by
+# running it.
 module = [
     "metawrap2.scripts.plot_binning_results",
     "metawrap2.scripts.plot_reassembly",

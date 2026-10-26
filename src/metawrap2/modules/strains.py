@@ -1,25 +1,21 @@
-"""MetaWrap2 strains: is this the same strain in two samples, and how varied is the population?
+"""MetaWrap2 strains: strain sharing between samples and within-sample population diversity.
 
-A MAG is a consensus of a population. Two samples whose MAGs are 99.9% identical can be carrying
-different strains, and until this module the pipeline could not say which - so every persistence,
-transmission or engraftment statement a cohort analysis wanted to make had to be made from
-consensus ANI, which is the wrong instrument.
+A MAG is a population consensus, and two samples whose MAGs are 99.9% identical can carry
+different strains, so consensus ANI cannot support persistence, transmission or engraftment
+claims. inStrain works from the alignments and per-position allele frequencies, so e.g. two
+variants at 30/70 are visible. The module maps each sample's reads against one genome set,
+profiles each alignment, and compares every pair of samples for every genome present in both.
 
-inStrain reads the alignments rather than the consensus: it has every position's allele
-frequencies, so a population carrying two variants at 30/70 is visibly that. The module maps each
-sample's reads against one genome set, profiles each alignment, and compares every pair of samples
-for every genome present in both.
+Rules, both in :mod:`metawrap2.strains`:
 
-Two things it refuses to do quietly, both in :mod:`metawrap2.strains`:
-
-* **A popANI without its breadth.** popANI is computed only over positions both samples covered
+* popANI is reported with its breadth. It is computed only over positions both samples covered
   deeply enough, so two samples sharing 2% of a genome at 100% identity give popANI 100%. Below
-  50% of the genome compared, the verdict is `undetermined` rather than `same_strain`.
-* **A diversity from a genome that is barely there.** Nucleotide diversity over 10% of a genome is
-  a number about 10% of a genome, so it is left blank with the breadth beside it.
+  50% of the genome compared, the verdict is `undetermined` instead of `same_strain`.
+* Nucleotide diversity is left blank (with the breadth beside it) for a genome with low breadth,
+  e.g. 10%.
 
-Every sample is mapped to the *same* genome set, which is what makes the comparisons valid: popANI
-between two samples mapped to different references is not a quantity.
+Every sample is mapped to the same genome set; popANI between samples mapped to different
+references is not meaningful.
 """
 
 from __future__ import annotations
@@ -63,19 +59,16 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["strains"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# Mapping is the same registry `binning` and `coverage` use, piped straight into sort - the SAM is
-# never written, which for a 12 M-read sample against a 26-genome set is tens of GB not spent.
-# The pipe itself is _common.ALIGN_SORT, which every other mapping step in the pipeline uses: it
-# sets pipefail (without which a failed aligner is hidden by a successful sort) and names a sort
-# temp directory. A second copy here would be a second place for that to be got wrong.
+# Mapping uses the same aligner registry as `binning` and `coverage`, piped into sort through
+# _common.ALIGN_SORT (pipefail, sort temp directory), so the SAM is never written (tens of GB for
+# a 12 M-read sample against a 26-genome set).
 INDEX_BAM = "samtools index -@ {threads} {bam}"
-# --database_mode because the reference is a *collection* of genomes rather than one: it skips the
-# mm-level profiling nothing here reads, raises the read-ANI floor to 0.92 and only profiles
-# scaffolds with coverage, which is the difference between hours and days on a bin set.
+# --database_mode because the reference is a collection of genomes: it skips the unused mm-level
+# profiling, sets the read-ANI floor to 0.92 and only profiles scaffolds with coverage (hours
+# instead of days on a bin set).
 #
-# -s is the scaffold-to-bin file, and without it inStrain reports per scaffold and there is no
-# genome-level answer at all. It is written by this module from the bin folder, so it cannot
-# disagree with the fasta that was mapped against.
+# -s is the scaffold-to-bin file; without it inStrain reports per scaffold only. This module writes
+# it from the bin folder, so it matches the mapped fasta.
 INSTRAIN_PROFILE = (
     "inStrain profile {bam} {fasta} -o {outdir} -p {threads} -s {stb}"
     " --min_read_ani {min_read_ani} --skip_plot_generation"
@@ -83,31 +76,29 @@ INSTRAIN_PROFILE = (
 INSTRAIN_COMPARE = (
     "inStrain compare -i {profiles} -o {outdir} -p {threads} -s {stb} --skip_plot_generation"
 )
-# TRACS, the second backend. It needs a sourmash signature database of the reference genomes before
-# it will align anything - the screen that decides which genomes a sample carries at all - so
-# build-db runs first and its output is per run rather than cached in the environment.
+# TRACS, the second backend. It screens samples against a sourmash signature database of the
+# reference genomes before aligning, so build-db runs first, once per run.
 TRACS_BUILD_DB = "tracs build-db -i {genomes} -o {db} -t {threads}"
-# `pipe` is align + distance + cluster in one call. -i is a *file of paths*, not the reads
-# themselves, which is why the module writes one.
+# `pipe` is align + distance + cluster in one call. -i is a file listing the read paths, which
+# the module writes.
 TRACS_PIPE = "tracs pipe -i {inputs} --database {db} --refseqs {refs} -o {outdir} -t {threads}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 #: One row per genome per sample: coverage, breadth, diversity.
 PROFILE_TABLE = "populations" + TSV_SUFFIX
 #: One row per genome per pair of samples: popANI, breadth, verdict.
 COMPARE_TABLE = "strain_comparisons" + TSV_SUFFIX
-#: TRACS' distances, in their own table rather than merged into inStrain's: the two measure
-#: different quantities on different scales, and one table with both would invite adding them up.
+#: TRACS' distances, kept separate from inStrain's table because they measure different
+#: quantities on different scales.
 TRACS_TABLE = "strain_distances_tracs" + TSV_SUFFIX
-#: Where TRACS' own output tree lives.
+#: TRACS' output directory.
 TRACS_DIR = "tracs"
-#: Where the genome set is concatenated and mapped against, and where inStrain's own output lives.
+#: Directory for the concatenated genome set used for mapping, and for inStrain's output.
 WORK_DIR = "work_files"
 PROFILE_DIR = "instrain"
-#: Scaffold-to-bin mapping, written here rather than taken from a user: it has to agree with the
-#: fasta that was mapped, and a stale one silently attributes contigs to the wrong genome.
+#: Scaffold-to-bin mapping, written by this module so it matches the mapped fasta.
 STB_FILE = "scaffold_to_bin" + TSV_SUFFIX
-#: inStrain's own default read-ANI floor for a single genome. `--database_mode` lowers it to 0.92;
-#: this module states it explicitly so the value is in provenance rather than implied by a flag.
+#: inStrain's default read-ANI floor for a single genome. `--database_mode` sets 0.92; the value
+#: is passed explicitly so it is recorded in provenance.
 DEFAULT_MIN_READ_ANI = 0.95
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -123,9 +114,9 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "-b",
         "--bins",
         required=True,
-        help="the genome set every sample is compared against - a bin folder or a dereplicated "
-        "catalogue. One set for every sample on purpose: popANI between samples mapped to "
-        "different references is not a quantity",
+        help="the genome set every sample is compared against: a bin folder or a dereplicated "
+        "catalogue. All samples use the same set, because popANI is only defined between "
+        "samples mapped to the same references",
     )
     p.add_argument(
         "-r",
@@ -140,7 +131,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         nargs="+",
         metavar="SAMPLE=FILE",
         help="already-sorted BAMs of each sample against this genome set, instead of --reads. "
-        "They must have been mapped to the same genomes, which the run cannot check for you",
+        "They must be mapped to the same genomes; the run cannot check this",
     )
     p.add_argument(
         "--aligner",
@@ -154,30 +145,30 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=DEFAULT_MIN_READ_ANI,
         metavar="FRACTION",
         help="minimum identity of a read to its reference for inStrain to use it (default: "
-        "%(default)s). Lower it for genomes more divergent than the strain level; raising it "
-        "narrows what counts as the same population",
+        "%(default)s). Lower it for genomes more divergent than the strain level; raise it to "
+        "narrow what counts as the same population",
     )
     p.add_argument(
         "--database-mode",
         action="store_true",
-        help="inStrain's --database_mode: for a reference that is a collection of genomes rather "
-        "than one, it skips profiling nothing here reads and is much faster. It also lowers the "
-        "read-ANI floor to 0.92, which is why it is opt-in rather than on",
+        help="inStrain's --database_mode, for a reference made of many genomes: skips profiling "
+        "steps whose output this module does not use, and is much faster. It also lowers the "
+        "read-ANI floor to 0.92, so it is off by default",
     )
     p.add_argument(
         "--backend",
         choices=("instrain", "tracs", "both"),
         default="instrain",
-        help="which strain caller to use (default: %(default)s). TRACS is the one tool in Shaw & "
-        "Yu's evaluation that does not overestimate SNP distances, and it answers a different "
-        "question - a transmission distance rather than a population identity - so `both` runs "
-        "each and reports where they agree rather than averaging them",
+        help="which strain caller to use (default: %(default)s). TRACS was the only tool in Shaw & "
+        "Yu's evaluation that did not overestimate SNP distances. It reports a transmission "
+        "distance, while inStrain reports a population identity; `both` runs each and reports "
+        "where they agree, without averaging them",
     )
     p.add_argument(
         "--skip-compare",
         action="store_true",
         help="profile each sample but do not compare them. The per-sample diversity is still "
-        "written; the strain-sharing question is the one that needs the comparison",
+        "written; strain sharing between samples is not",
     )
     threads_arg(p)
     p.add_argument("--config", help="path to metawrap2.toml")
@@ -196,8 +187,8 @@ def _parse_pairs(specs: Sequence[str], what: str) -> List[Tuple[str, List[str]]]
             error("%s takes sample=path, e.g. gut1=gut1_1.fq,gut1_2.fq (got %r)" % (what, spec))
         if sample in seen:
             error(
-                "sample %r is given twice to %s; each sample is one row of the output and two "
-                "rows cannot share a name" % (sample, what)
+                "sample %r is given twice to %s; sample names must be unique, since each is a "
+                "row of the output" % (sample, what)
             )
         seen.add(sample)
         files = [os.path.abspath(path) for path in files]
@@ -210,14 +201,12 @@ def _parse_pairs(specs: Sequence[str], what: str) -> List[Tuple[str, List[str]]]
 def _concatenate_genomes(bins_dir: str, fasta: str, stb: str) -> Tuple[int, int]:
     """Write the genome set as one fasta and its scaffold-to-bin table. Returns (genomes, contigs).
 
-    Both from the same pass over the same files, so the table cannot disagree with the fasta -
-    which matters more than it sounds: inStrain attributes every scaffold to a genome through this
-    table, and a stale one assigns contigs to the wrong genome without failing.
+    Both are written in one pass over the same files, so the table matches the fasta (inStrain
+    assigns every scaffold to a genome through it).
 
-    Contig names are kept as they are rather than prefixed. A bin set from this pipeline has unique
-    contig names across bins already (they come from one assembly), and a duplicate is refused
-    rather than silently resolved, because two genomes sharing a contig name would make inStrain's
-    genome assignment arbitrary.
+    Contig names are kept unchanged. Bins from this pipeline already have unique contig names (one
+    assembly), and a duplicate is an error, since it would make inStrain's genome assignment
+    arbitrary.
     """
     names = list_bins(bins_dir)
     if not names:
@@ -233,8 +222,8 @@ def _concatenate_genomes(bins_dir: str, fasta: str, stb: str) -> Tuple[int, int]
                 if contig in seen:
                     error(
                         "contig %r is in both %s and %s. inStrain assigns every scaffold to one "
-                        "genome through the scaffold-to-bin table, so a shared contig name makes "
-                        "that assignment arbitrary" % (contig, seen[contig], genome)
+                        "genome through the scaffold-to-bin table, so contig names must be "
+                        "unique across genomes" % (contig, seen[contig], genome)
                     )
                 seen[contig] = genome
                 out.write(">%s\n%s\n" % (contig, sequence))
@@ -285,11 +274,9 @@ def _map_sample(args, env, fasta: str, sample: str, reads: List[str], work: str)
 def _run_tracs(args, settings, samples, work: str) -> List[_strains.TracsDistance]:
     """Screen, align and compare with TRACS, returning its distances.
 
-    TRACS wants three things this module has to produce rather than pass through: a sourmash
-    signature database of the reference genomes (its screen for which genomes a sample carries at
-    all), a file listing the read paths, and one output directory. All three are written per run,
-    because the database is of *this* genome set and a stale one would screen against the wrong
-    references without failing.
+    Writes what TRACS needs: a sourmash signature database of the reference genomes (used to
+    screen which genomes a sample carries), a file listing the read paths, and an output
+    directory. All are per run, since the database must match this genome set.
     """
     env = optional_env_for("tracs", settings, needed_by="strains --backend tracs")
     root = os.path.join(args.output, TRACS_DIR)
@@ -310,10 +297,8 @@ def _run_tracs(args, settings, samples, work: str) -> List[_strains.TracsDistanc
     listing = os.path.join(work, "tracs_inputs" + TSV_SUFFIX)
     with open(listing, "w", newline="") as fh:
         inputs_writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
-        # A header row, because `tracs pipe` skips the first line of this file with a bare
-        # `next(infile)` and documents no header. Without one the first sample is consumed as the
-        # header and silently dropped - which is how the first real run produced an empty distance
-        # table from two perfectly good samples, with nothing in the log to say a sample was gone.
+        # Header row: `tracs pipe` skips the first line with `next(infile)` (undocumented), so
+        # without it the first sample is dropped (an empty distance table from two samples).
         inputs_writer.writerow(["sample", "read_1", "read_2"])
         for sample, reads in samples:
             inputs_writer.writerow([sample, *reads])
@@ -337,7 +322,7 @@ def _run_tracs(args, settings, samples, work: str) -> List[_strains.TracsDistanc
     if not distances:
         comm(
             "TRACS compared nothing: it skips any reference with less than %.0f%% of its genome "
-            "covered, so this is a statement about depth rather than about the strains"
+            "covered, so the samples lack the depth for a comparison"
             % (_strains.TRACS_MIN_BREADTH * 100)
         )
         return []
@@ -379,21 +364,20 @@ def main(argv: List[str]) -> int:
     args = _parse_args(argv)
     settings = load_settings(args.config)
     resolve_threads(args, settings)
-    # The sample specs are parsed *before* absolutize_paths, which rewrites every string that looks
-    # like a path - and `ERR011347=reads_1.fq` looks like one, so the sample name came back as
-    # `/abs/path/ERR011347` and every row of the output was labelled with a directory.
+    # Parse sample specs before absolutize_paths, which treats `ERR011347=reads_1.fq` as a path
+    # and would make the sample name `/abs/path/ERR011347`.
     specs = list(args.reads or args.bam or ())
     absolutize_paths(args)
     if not args.reads and not args.bam:
         error("nothing to profile: pass --reads sample=... or --bam sample=...")
     if args.reads and args.bam:
-        error("pass --reads or --bam, not both: the point of --bam is to skip the mapping")
+        error("pass --reads or --bam, not both (--bam skips the read mapping)")
     validate_inputs("strains", [(require_nonempty_dir, args.bins, "genome set (-b)")])
     samples = _parse_pairs(specs, "--reads" if args.reads else "--bam")
     if len(samples) < 2 and not args.skip_compare:
         comm(
-            "only one sample, so there is nothing to compare: its populations are profiled and the "
-            "comparison is skipped"
+            "only one sample: its populations are profiled and the comparison between samples "
+            "is skipped"
         )
         args.skip_compare = True
 
@@ -431,9 +415,8 @@ def main(argv: List[str]) -> int:
             bams = [(sample, files[0]) for sample, files in samples]
         else:
             if ckpt.todo("index"):
-                # minimap2's template names the index it writes; bwa's names only the assembly,
-                # because its index files sit beside it. Both placeholders are supplied rather
-                # than branching on the aligner here.
+                # minimap2's template uses {index}; bwa's only {assembly}, since its index files
+                # sit beside it. Both are supplied so no branch is needed.
                 rc = run(
                     _aligners.ALIGNERS[args.aligner]["index_cmd"].format(
                         assembly=fasta, index=_aligners.index_path(fasta, args.aligner)
@@ -526,9 +509,8 @@ def main(argv: List[str]) -> int:
             announcement("STRAINS PIPELINE SUCCESSFULLY FINISHED!!!")
             return 0
 
-        # inStrain labels a row with the profile directory's name; relabel to the pipeline's sample
-        # names, for the same reason the appraisal path does - a table whose sample names do not
-        # match the rest of the output joins to nothing.
+        # inStrain labels rows with the profile directory name; relabel with the pipeline's sample
+        # names so the table joins with the rest of the output.
         labels = {os.path.basename(outdir): sample for sample, outdir in profile_dirs}
         comparisons = _strains.relabel(_strains.parse_comparison(table), labels)
         path = os.path.join(args.output, COMPARE_TABLE)
@@ -572,9 +554,9 @@ def main(argv: List[str]) -> int:
             for line in agreement["disagree"][:10]:  # type: ignore[index]
                 comm("  %s" % line)
             comm(
-                "  a disagreement is information about the genome rather than a fault in either "
-                "tool: one measures a population identity and the other a consensus SNP distance, "
-                "so they are reported side by side and never averaged"
+                "  the tools can disagree without either being wrong: inStrain measures a "
+                "population identity and TRACS a consensus SNP distance, so both are reported "
+                "side by side and never averaged"
             )
         announcement("STRAINS PIPELINE SUCCESSFULLY FINISHED!!!")
     finally:

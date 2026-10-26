@@ -1,26 +1,17 @@
-"""Pangenomes over a cohort's MAGs: which genes are in every strain of a species and which are not.
+"""Per-species pangenomes over a cohort's MAGs.
 
-The unit of a pangenome is **one species**, and that is the thing most easily got wrong here. A
-dereplicated catalogue holds one genome per species, so a pangenome computed over a catalogue is a
-pangenome of a community - a quantity with no definition. The input that makes sense is a
-*dereplication cluster*: the same organism recovered from several samples, which is exactly what
-`dereplicate` groups and then discards everything but a representative of.
+A pangenome is defined for one species. A dereplicated catalogue holds one genome per species, so
+the input here is a dereplication cluster: the same organism recovered from several samples.
+This module reads `dereplicate`'s cluster table and builds one pangenome per cluster with enough
+members (:func:`groups_from_clusters`); it never treats the whole catalogue as one group.
 
-So this module reads `dereplicate`'s cluster table and builds one pangenome per cluster that has
-enough members, and refuses to treat the catalogue as one group. :func:`groups_from_clusters` is
-that decision, and it is where the honest part lives.
+PPanGGOLiN partitions gene families into persistent (in nearly every genome), shell (in some) and
+cloud (in one or a few). The shell holds the strain-level differences between samples, which a
+single representative does not show.
 
-What a pangenome gives you that a catalogue does not: PPanGGOLiN partitions genes into **persistent**
-(in essentially every genome of the species), **shell** (in some) and **cloud** (in one or a few).
-The shell is where the strain-level differences live - the gene content that distinguishes the
-strain in one sample from the strain in another - and it is invisible to anything computed on a
-single representative.
-
-The floor is the part to state plainly. PPanGGOLiN's partitioning is a statistical model over
-presence/absence across genomes, and with a handful of genomes there is not enough signal to fit it:
-its own documentation recommends at least 15, and below that the partitions are better read as "core
-versus accessory in these few genomes" than as a species pangenome. :data:`RELIABLE_GENOMES` is that
-number, and groups below it are built if asked but reported as provisional.
+The partitioning is a statistical model over presence/absence. PPanGGOLiN's documentation
+recommends at least 15 genomes (:data:`RELIABLE_GENOMES`); smaller groups are built but reported
+as provisional, and read as core versus accessory among those genomes.
 """
 
 from __future__ import annotations
@@ -30,13 +21,11 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-#: Genomes below which PPanGGOLiN's persistent/shell/cloud partitioning is not worth reading as a
-#: species pangenome. Its own guidance. Not a refusal: a 5-genome group still answers "which genes
-#: are in all five", which is a smaller but real question.
+#: Minimum genomes for a reliable persistent/shell/cloud partitioning, from PPanGGOLiN's guidance.
+#: Smaller groups are still built and flagged.
 RELIABLE_GENOMES = 15
 
-#: Genomes below which there is no pangenome at all - one genome has no gene-content variation and
-#: two have a comparison rather than a partitioning.
+#: Minimum genomes for a pangenome to be built at all.
 MIN_GENOMES = 3
 
 #: PPanGGOLiN's partition names, as it writes them.
@@ -53,7 +42,7 @@ class GenomeGroup:
     name: str
     #: genome label -> path to its FASTA.
     genomes: Mapping[str, str]
-    #: The cluster's representative, which is the genome the catalogue kept.
+    #: The cluster's representative, the genome kept in the catalogue.
     representative: Optional[str] = None
 
     @property
@@ -62,7 +51,7 @@ class GenomeGroup:
 
     @property
     def is_reliable(self) -> bool:
-        """Whether a persistent/shell/cloud partitioning over this group is worth reading."""
+        """Whether the group has enough genomes for a reliable partitioning."""
         return self.size >= RELIABLE_GENOMES
 
     @property
@@ -71,7 +60,7 @@ class GenomeGroup:
 
 
 def read_clusters(path: str) -> Dict[str, List[Tuple[str, bool]]]:
-    """cluster -> [(genome, is_representative)], from `dereplicate`'s clusters.tsv."""
+    """Return cluster -> [(genome, is_representative)] from `dereplicate`'s clusters.tsv."""
     out: Dict[str, List[Tuple[str, bool]]] = {}
     with open(path) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -98,14 +87,11 @@ def groups_from_clusters(
     genome_paths: Mapping[str, str],
     min_genomes: int = MIN_GENOMES,
 ) -> Tuple[List[GenomeGroup], Dict[str, int]]:
-    """Turn dereplication clusters into pangenome groups, with a census of what was skipped.
+    """Turn dereplication clusters into pangenome groups, with counts of what was skipped.
 
-    The census is the output that matters as much as the groups: on a three-sample cohort almost
-    every cluster is a singleton, so "0 pangenomes" needs to come with "23 clusters had one genome"
-    rather than looking like a failure.
-
-    Genomes whose FASTA is not in *genome_paths* are dropped from their cluster and counted, because
-    a cluster table can name genomes from a bin set that is no longer on disk.
+    In a small cohort most clusters are singletons, so the counts explain an empty result.
+    Genomes whose FASTA is not in *genome_paths* (for example, a bin set no longer on disk) are
+    dropped from their cluster and counted.
     """
     groups: List[GenomeGroup] = []
     census = {
@@ -142,7 +128,7 @@ def groups_from_clusters(
 
 
 def write_genome_list(group: GenomeGroup, path: str) -> str:
-    """PPanGGOLiN's ``--fasta`` input: genome name then path, tab separated, one line each."""
+    """Write PPanGGOLiN's ``--fasta`` input: genome name and path, tab separated, one per line."""
     with open(path, "w", newline="") as out:
         writer = csv.writer(out, delimiter="\t", lineterminator="\n")
         for genome in sorted(group.genomes):
@@ -150,16 +136,13 @@ def write_genome_list(group: GenomeGroup, path: str) -> str:
     return path
 
 
-#: Where PPanGGOLiN writes one file of gene-family names per partition. This is the group-level
-#: answer and the per-genome statistics table is not: that table's `Persistent_families` column is
-#: how many persistent families *this genome* carries, so summing it over a group multiplies every
-#: shared family by the number of genomes that have it.
+#: Directory where PPanGGOLiN writes one file of gene-family names per partition; family counts
+#: come from here. The per-genome statistics table counts families per genome, so summing it over
+#: a group counts each shared family once per genome.
 PARTITION_DIR = "partitions"
 PARTITION_FILES = {PERSISTENT: "persistent.txt", SHELL: "shell.txt", CLOUD: "cloud.txt"}
 
-#: PPanGGOLiN's per-genome statistics, used only for genes per genome. Its first two lines are
-#: `#`-prefixed settings rather than a header, so a plain DictReader takes `#soft_core=0.95` as the
-#: column names and every lookup returns None.
+#: Columns of PPanGGOLiN's per-genome statistics, used only for genes per genome.
 STATS_GENOME = "Genome_name"
 STATS_GENES = "Genes"
 
@@ -172,7 +155,7 @@ class PangenomeSummary:
     genomes: int
     #: Gene families per partition, over the group.
     families: Mapping[str, int]
-    #: Mean genes per genome, which is not the same as families: a family can be present twice.
+    #: Mean genes per genome. Differs from families, since a family can occur twice in a genome.
     mean_genes: Optional[float]
     reliable: bool
 
@@ -182,7 +165,7 @@ class PangenomeSummary:
 
     @property
     def shares(self) -> Dict[str, float]:
-        """Each partition as a percentage of the families, or an empty dict when there are none."""
+        """Return each partition as a percentage of the families; empty when there are none."""
         total = self.total_families
         if not total:
             return {}
@@ -192,9 +175,8 @@ class PangenomeSummary:
     def openness(self) -> Optional[float]:
         """Share of families outside the persistent partition, as a percentage.
 
-        The one-number summary of how varied the species' gene content is across these genomes.
-        Deliberately not called a "pangenome openness index": that term means a fitted Heaps-law
-        exponent, which needs a rarefaction curve this does not compute.
+        A summary of how much gene content varies across the genomes. This is not the pangenome
+        openness index, which is a fitted Heaps-law exponent.
         """
         shares = self.shares
         if not shares:
@@ -203,11 +185,10 @@ class PangenomeSummary:
 
 
 def read_genome_statistics(path: str) -> Dict[str, float]:
-    """genome -> gene count, from PPanGGOLiN's per-genome statistics table.
+    """Return genome -> gene count from PPanGGOLiN's per-genome statistics table.
 
-    Comment lines are skipped explicitly. The file opens with two `#`-prefixed settings lines, so
-    csv.DictReader handed the file directly keys every row by `#soft_core=0.95` and returns None for
-    every column - which reads as a pangenome with no genes rather than as a parse failure.
+    The file starts with two `#`-prefixed settings lines, which are skipped so that csv.DictReader
+    finds the real header.
     """
     out: Dict[str, float] = {}
     if not os.path.isfile(path):
@@ -228,9 +209,8 @@ def read_genome_statistics(path: str) -> Dict[str, float]:
 def parse_partitions(outdir: str, group: str, reliable: bool) -> Optional[PangenomeSummary]:
     """Read one group's partitioning from PPanGGOLiN's output directory.
 
-    Families are counted from `partitions/*.txt`, one name per line, which is the group-level
-    quantity. Genes per genome come from the statistics table, which is the only thing it is used
-    for here.
+    Families are counted from `partitions/*.txt` (one name per line). Genes per genome come from
+    the statistics table.
     """
     counts: Dict[str, int] = {}
     for partition, filename in PARTITION_FILES.items():
@@ -285,30 +265,27 @@ def summary_row(summary: PangenomeSummary) -> Dict[str, str]:
         "percent_shell": num(shares.get(SHELL)),
         "percent_cloud": num(shares.get(CLOUD)),
         "percent_outside_persistent": num(summary.openness),
-        # Stated per row rather than once in a log line: a provisional partitioning read out of a
-        # table months later is indistinguishable from a sound one otherwise.
+        # Stored per row so the table alone shows which partitionings are provisional.
         "partitioning_reliable": "yes" if summary.reliable else "no",
         "minimum_genomes_for_reliable_partitioning": str(RELIABLE_GENOMES),
     }
 
 
-#: A persistent share below this is evidence about the *cluster* rather than about the species.
-#: Genomes of one species share most of their gene content; three genomes sharing a fifth of their
-#: families are not three strains of one organism, they are a dereplication cluster that should be
-#: looked at. Measured: of seven real clusters from a three-sample cohort, six sat at 68-96%
-#: persistent and one at 20.7% with 7,361 families over a mean of 3,214 genes per genome.
+#: Persistent share (percent) below which a cluster is flagged as probably not one species. In one
+#: three-sample cohort, six of seven clusters were 68-96% persistent and one was 20.7% (7,361
+#: families over a mean of 3,214 genes per genome).
 SUSPECT_PERSISTENT = 50.0
 
 #: Printed beside a group whose persistent share is below SUSPECT_PERSISTENT.
 SUSPECT_CLUSTER_CAVEAT = (
-    "a persistent share this low says the genomes in the group are not strains of one organism. "
-    "The pangenome is not wrong - the grouping is the thing to check, starting with the cluster's "
+    "a persistent share this low suggests the genomes in the group are not strains of one "
+    "organism. Check the grouping, starting with the cluster's "
     "ANI and the contamination of its members"
 )
 
 
 def suspect_groups(summaries: Sequence[PangenomeSummary]) -> List[PangenomeSummary]:
-    """Groups whose gene content says they are not one species."""
+    """Return groups whose persistent share suggests they are not one species."""
     return [
         summary
         for summary in summaries
@@ -318,23 +295,22 @@ def suspect_groups(summaries: Sequence[PangenomeSummary]) -> List[PangenomeSumma
 
 #: Printed with every pangenome built from fewer than RELIABLE_GENOMES genomes.
 SMALL_GROUP_CAVEAT = (
-    "a persistent/shell/cloud partitioning is a statistical model over presence and absence across "
-    "genomes, and below %d genomes there is not enough signal to fit it - PPanGGOLiN's own "
-    "guidance. These rows are better read as 'core versus accessory among these few genomes' than "
-    "as a species pangenome, and they are flagged `partitioning_reliable=no`" % RELIABLE_GENOMES
+    "the persistent/shell/cloud partitioning is a statistical model of presence and absence "
+    "across genomes; PPanGGOLiN's guidance is that below %d genomes there is too little signal "
+    "to fit it. Read these rows as 'core versus accessory among these genomes', not "
+    "as a species pangenome; they are flagged `partitioning_reliable=no`" % RELIABLE_GENOMES
 )
 
-#: Printed when a cohort yields no group at all, which is the normal result for a few samples.
+#: Printed when a cohort yields no group, which is usual for a few samples.
 NO_GROUPS_CAVEAT = (
-    "no cluster had enough genomes for a pangenome. That is the expected result for a handful of "
+    "no cluster had enough genomes for a pangenome. This is expected with few "
     "samples: a pangenome needs the same species recovered from several of them, and a "
-    "dereplicated catalogue keeps one genome per species precisely because the rest were "
-    "redundant. It is a statement about the cohort's size, not about the species"
+    "dereplicated catalogue keeps one genome per species. More samples are needed"
 )
 
 
 def census_lines(census: Mapping[str, int]) -> List[str]:
-    """The skipped-cluster census as lines to print, so "0 pangenomes" is never bare."""
+    """Return the cluster counts as lines to print."""
     lines = [
         "%d cluster(s): %d pangenome(s) built, %d singleton(s), %d below the group floor"
         % (
@@ -351,24 +327,21 @@ def census_lines(census: Mapping[str, int]) -> List[str]:
         )
     if census.get("genomes_without_a_file"):
         lines.append(
-            "%d genome(s) named in the cluster table have no FASTA under the bin folder given, and "
+            "%d genome(s) named in the cluster table have no FASTA in the given bin folder and "
             "were left out of their cluster" % census["genomes_without_a_file"]
         )
     return lines
 
 
 def genome_paths(folders: Iterable[str]) -> Dict[str, str]:
-    """genome label -> path, labelled exactly as `dereplicate` labels its cluster rows.
+    """Return genome label -> path, with labels as `dereplicate` writes them in its cluster table.
 
-    Through dereplicate's own `collect_genomes` rather than by stripping extensions here, because
-    the label is not just the filename: it is ``<source-directory>__<bin>``, with a numeric suffix
-    when two bin directories share a basename - which is the normal cohort layout, where every
-    sample has its own ``metawrap_70_10_bins``. Reimplementing that would produce labels that look
-    right and join to nothing, and the cluster table would appear to name genomes that are not
-    there.
+    Uses dereplicate's `collect_genomes`, since labels are ``<source-directory>__<bin>`` with a
+    numeric suffix when bin directories share a basename (every sample has its own
+    ``metawrap_70_10_bins``).
     """
-    # Imported here rather than at module scope: this is a library and dereplicate is a module, so
-    # a top-level import would have the layering backwards.
+    # Imported here: this is a library and dereplicate is a module, which should not be imported
+    # at the top level.
     from .modules.dereplicate import collect_genomes
 
     return {genome.name: genome.path for genome in collect_genomes(list(folders))}

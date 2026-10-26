@@ -1,11 +1,9 @@
 """binning --semibin2: the command it builds, and the bins it hands over.
 
-Two of these are guarding against failures that look like success, which is why they are asserted on
-the command string rather than on an end-to-end run. SemiBin2 has a ``multi_easy_bin`` subcommand
-that accepts exactly the same inputs as the one this module wants and interprets them differently -
-it expects every contig name to carry a sample prefix, which MetaWrap2's assemblies do not - and it
-gzips its bins by default, which leaves ``renumber_bins`` with nothing it recognises as a FASTA and
-the bin set silently empty.
+Checked on the command string, since both failures complete without error. ``multi_easy_bin``
+takes the same inputs as ``single_easy_bin`` but expects a sample prefix on every contig name,
+which MetaWrap2's assemblies lack. SemiBin2 also gzips its bins by default, so ``renumber_bins``
+finds no FASTA and the bin set is empty.
 """
 
 import os
@@ -51,17 +49,16 @@ def test_the_command_is_single_easy_bin_and_does_not_gzip_its_bins(tmp_path, mon
 
     cmd = calls[0][0]
     assert "single_easy_bin" in cmd and "multi_easy_bin" not in cmd
-    # Without this the bins arrive as .fa.gz and the move below finds no FASTA at all.
+    # Without this the bins are .fa.gz and the move below finds no FASTA.
     assert "--compression none" in cmd
-    # Fixed seed: SemiBin2 trains a net, so two runs over one input otherwise disagree about which
-    # contigs form a bin, and a benchmark measures that noise as part of the difference.
+    # Fixed seed: SemiBin2 trains a network, so otherwise two runs on one input give different bins
+    # and benchmarks include that noise.
     assert "--random-seed %d" % binning.SEMIBIN2_SEED in cmd
-    # And the same reproducibility argument, plus the cost model the defaults are chosen on:
-    # SemiBin2 would otherwise train on whatever GPU torch finds, which is neither a CPU-hour nor a
-    # device the next machine necessarily has.
+    # CPU by default, for reproducibility and because defaults are costed in CPU-hours; otherwise
+    # SemiBin2 trains on any GPU torch finds.
     assert "--engine cpu" in cmd and binning.DEFAULT_LEARNED_DEVICE == "cpu"
 
-    # The bins are moved out and renamed like every other binner's: bin.10 after bin.2, and
-    # nothing left behind in SemiBin2's own tree to be scored twice.
+    # Bins are moved and renamed as for other binners (bin.10 after bin.2), leaving nothing in
+    # SemiBin2's tree to be scored twice.
     assert sorted(os.listdir(out / "semibin2_bins")) == [bin_filename(i) for i in (1, 2, 3)]
     assert os.listdir(work / "semibin2_out" / binning.SEMIBIN2_BIN_DIR) == []

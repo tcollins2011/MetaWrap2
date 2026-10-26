@@ -1,23 +1,19 @@
-"""Long reads: which flag each platform needs, and what the reads say about the flag you gave.
+"""Long reads: the flag each platform needs per tool, and a check of the declared platform.
 
-Every long-read tool in this pipeline takes a different name for the same four things. Flye wants
-``--nano-hq``, minimap2 wants ``-x map-ont``, SemiBin2 wants ``--sequencing-type=long_read``, and
-the error model behind all three differs between an ONT R9 read at 92% accuracy and a PacBio HiFi
-read at 99.9%. Getting one of them wrong does not fail: it produces an assembly, a depth table or a
-bin set that is quietly worse. :data:`READ_TYPES` is the one place that mapping lives.
+Each long-read tool names the platform differently: Flye ``--nano-hq``, minimap2 ``-x map-ont``,
+SemiBin2 ``--sequencing-type=long_read``. The error model differs between an ONT R9 read at 92%
+accuracy and a PacBio HiFi read at 99.9%. A wrong flag does not fail; it gives a worse assembly,
+depth table or bin set. :data:`READ_TYPES` holds the mapping.
 
-**The declared type is checked against the reads.** A read set's length distribution and its
-accuracy are observable, and the two things most likely to be wrong are declaring HiFi for ONT reads
-(which tells Flye to expect 99.9% accuracy from 92% data) and pointing a long-read pipeline at short
-reads by mistake. :func:`scan_reads` measures N50, median and the fraction of reads over 10 kb, and
-:func:`check_type` says when the numbers do not fit the declaration. It warns rather than refusing -
-a user with 5 kb HiFi reads knows something the distribution does not.
+The declared type is checked against the reads. The likeliest mistakes are declaring HiFi for ONT
+reads (Flye then expects 99.9% accuracy from 92% data) and passing short reads by mistake.
+:func:`scan_reads` measures N50, median and the fraction of reads over 10 kb, and
+:func:`check_type` reports when these do not fit the declaration. It only warns, since some real
+data (e.g. 5 kb HiFi reads) will not fit the typical distribution.
 
-**What this module does not do: polishing.** Flye already polishes with the long reads themselves
-(``--iterations``). Short-read polishing of a *metagenome* assembly is a separate decision with a
-real failure mode - a polisher given reads from a close relative will happily rewrite one strain's
-consensus into another's - and it belongs in its own module with its own measurement rather than
-folded in here as a default.
+No polishing is done here. Flye polishes with the long reads (``--iterations``). Short-read
+polishing of a metagenome assembly can rewrite one strain's consensus into a close relative's, so
+it would need its own module and benchmark.
 """
 
 from __future__ import annotations
@@ -26,12 +22,12 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
-#: Reads below this are not long reads. Checked because the commonest long-read mistake is a path
-#: that points at the short-read FASTQ, which every tool here will accept and assemble badly.
+#: Reads below this are not long reads. A common mistake is passing the short-read FASTQ, which
+#: every tool here accepts and assembles badly.
 SHORT_READ_CEILING = 1_000
 
-#: An N50 below this, with a long-read platform declared, is worth a word: it is either a very old
-#: run or a mis-declared file. Not a refusal - amplicon and targeted long-read data really is short.
+#: An N50 below this with a long-read platform declared triggers a warning (a very old run or a
+#: mis-declared file). Amplicon and targeted long-read data can be this short.
 LOW_N50 = 3_000
 
 
@@ -44,16 +40,14 @@ class ReadType:
     flye_flag: str
     #: minimap2's preset, for mapping reads back to get coverage.
     minimap2_preset: str
-    #: What SemiBin2 calls this; it distinguishes short from long and nothing finer.
+    #: SemiBin2's sequencing type; it only distinguishes short from long.
     semibin2_type: str
-    #: Roughly what per-base accuracy the platform delivers, for the sanity check and for the
-    #: provenance record. Not used to filter reads.
+    #: Approximate per-base accuracy, for the sanity check and provenance. Not used to filter.
     typical_accuracy: float
     description: str
 
 
-#: The four long-read inputs worth distinguishing. Named as the platforms are, not as the tools'
-#: flags are, so a user picks by what they sequenced.
+#: The four long-read input types, named by platform so a user picks by what they sequenced.
 READ_TYPES: Dict[str, ReadType] = {
     "ont": ReadType(
         name="ont",
@@ -89,10 +83,9 @@ READ_TYPES: Dict[str, ReadType] = {
     ),
 }
 
-#: The default, and the reason: R10.4 nanopore is what most new long-read metagenomes are, and
-#: `--nano-hq` on genuinely raw reads is the less damaging of the two possible mistakes - Flye
-#: handles a lower-accuracy read set under the high-accuracy model better than the reverse, where it
-#: trusts errors it should have corrected.
+#: Most new long-read metagenomes are R10.4 nanopore. Flye handles lower-accuracy reads under
+#: `--nano-hq` better than high-accuracy reads under the raw model, where it keeps errors it should
+#: correct.
 DEFAULT_READ_TYPE = "ont-hq"
 
 
@@ -105,10 +98,10 @@ class ReadStats:
     n50: int
     median: int
     longest: int
-    #: Fraction of reads at or above 10 kb, which is what distinguishes a long-read run from a
-    #: short-read one far more sharply than the mean does.
+    #: Fraction of reads at or above 10 kb; separates long-read from short-read runs better than
+    #: the mean.
     fraction_over_10kb: float
-    #: Reads below SHORT_READ_CEILING, which are not long reads whatever the file is called.
+    #: Reads below SHORT_READ_CEILING.
     short_reads: int
 
     @property
@@ -164,11 +157,10 @@ def _iter_lengths(path: str, limit: int = 0):
 
 
 def scan_reads(path: str, limit: int = 100_000) -> ReadStats:
-    """Measure a long-read file: N50, median, how much of it is genuinely long.
+    """Measure a long-read file: N50, median, fraction of reads over 10 kb.
 
-    A scan of the first *limit* reads rather than all of them. The decisions it feeds - is this the
-    platform you said, is this a long-read file at all - do not change on read 100,001, and a full
-    pass over a 40 GB nanopore run to answer them would cost more than the check is worth.
+    Only the first *limit* reads are scanned, which is enough for the platform check and avoids a
+    full pass over e.g. a 40 GB nanopore run.
     """
     lengths = sorted(_iter_lengths(path, limit), reverse=True)
     if not lengths:
@@ -194,39 +186,37 @@ def scan_reads(path: str, limit: int = 100_000) -> ReadStats:
 
 
 def check_type(stats: ReadStats, read_type: str) -> List[str]:
-    """What the measured reads say about the declared platform. Lines to print, or none.
+    """Warnings about mismatches between the measured reads and the declared platform.
 
-    Warnings rather than refusals throughout: every one of these distributions is something a real
-    dataset can legitimately look like, and the point is that the user sees the mismatch before
-    spending a day of assembly on it.
+    Only warnings, since real datasets can have any of these distributions. They are shown before
+    assembly starts.
     """
     lines: List[str] = []
     if not stats.reads:
         return ["the read file appears to be empty"]
     if stats.looks_like_short_reads:
         lines.append(
-            "N50 is %d bp, below %d: this looks like a short-read file. Every tool here will "
-            "accept it and assemble it badly - metaFlye on short reads produces a fragmented "
-            "assembly rather than an error" % (stats.n50, SHORT_READ_CEILING)
+            "N50 is %d bp, below %d: this looks like a short-read file. metaFlye accepts short "
+            "reads without an error and produces a fragmented assembly"
+            % (stats.n50, SHORT_READ_CEILING)
         )
         return lines
     if stats.n50 < LOW_N50:
         lines.append(
-            "N50 is %d bp, which is short for a long-read run. Worth confirming this is the right "
+            "N50 is %d bp, which is short for a long-read run. Check that this is the right "
             "file before assembling" % stats.n50
         )
     if stats.short_reads:
         lines.append(
-            "%.1f%% of the reads are under %d bp. Flye discards short reads itself, so they cost "
-            "nothing but they do mean the usable depth is lower than the file size suggests"
+            "%.1f%% of the reads are under %d bp. Flye discards short reads, so the usable "
+            "depth is lower than the file size suggests"
             % (100.0 * stats.short_reads / stats.reads, SHORT_READ_CEILING)
         )
     if read_type == "pacbio-hifi" and stats.fraction_over_10kb < 0.2:
         lines.append(
             "only %.0f%% of reads reach 10 kb, which is unusual for HiFi. If these are nanopore "
-            "reads, --read-type pacbio-hifi tells Flye to expect 99.9%% accuracy from data that "
-            "does not have it, and it will not correct errors it should"
-            % (100.0 * stats.fraction_over_10kb)
+            "reads, --read-type pacbio-hifi makes Flye expect 99.9%% accuracy, and it will leave "
+            "errors uncorrected" % (100.0 * stats.fraction_over_10kb)
         )
     return lines
 
@@ -280,8 +270,7 @@ def read_report_row(
         "percent_under_1kb": (
             "%.1f" % (100.0 * stats.short_reads / stats.reads) if stats.reads else ""
         ),
-        # The flags are in the row because they are what the run actually did, and two assemblies
-        # made under different Flye models are not comparable.
+        # Record the flags used: assemblies made under different Flye models are not comparable.
         "flye_flag": spec.flye_flag if spec else "",
         "minimap2_preset": spec.minimap2_preset if spec else "",
         "notes": "; ".join(notes),
@@ -290,26 +279,25 @@ def read_report_row(
 
 #: Printed with every long-read assembly.
 LONG_READ_CAVEAT = (
-    "a long-read metagenome assembly is more contiguous and less accurate per base than a "
-    "short-read one: Flye polishes with the long reads themselves, which cannot fix a systematic "
-    "basecalling error. Gene calling and anything downstream of it inherits that - a frameshift "
-    "from an indel truncates a protein, and no completeness estimate will notice"
+    "a long-read metagenome assembly is more contiguous but less accurate per base than a "
+    "short-read one. Flye polishes with the long reads, which does not fix systematic "
+    "basecalling errors. These errors carry into gene calls: a frameshift from an indel "
+    "truncates a protein, and completeness estimates do not detect it"
 )
 
 #: Printed when both read kinds are given.
 HYBRID_CAVEAT = (
     "with both read kinds, the long reads build the assembly and the short reads are used only "
-    "where they are asked for. MetaWrap2 does not short-read-polish a metagenome assembly by "
-    "default: a polisher given reads from a close relative rewrites one strain's consensus into "
-    "another's, and that is a decision with a measurement behind it rather than a default"
+    "where an option asks for them. MetaWrap2 does not polish a metagenome assembly with short "
+    "reads by default: given reads from a close relative, a polisher can rewrite one strain's "
+    "consensus into another's"
 )
 
 
 def coassembly_inputs(paths: Sequence[str]) -> List[str]:
-    """Long-read files to hand Flye as one co-assembly, after dropping what is not there.
+    """Existing long-read files to pass to Flye as one co-assembly.
 
-    Flye takes several read files and treats them as one dataset, which is what makes a co-assembly
-    a flag rather than a concatenation step - so unlike the short-read path, nothing has to be
-    written to disk first.
+    Flye treats several read files as one dataset, so unlike the short-read path nothing is
+    concatenated on disk.
     """
     return [path for path in paths if path and os.path.isfile(path)]

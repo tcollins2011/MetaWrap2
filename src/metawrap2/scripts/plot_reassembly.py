@@ -11,26 +11,22 @@ import matplotlib.pyplot as plt
 plt.switch_backend("agg")
 
 
-#: Printed once per panel for a bin set that has nothing in it, instead of raising. This script is
-#: the last thing ``reassemble_bins`` does - the chosen bins and every .stats.tsv table are already
-#: written when it starts - so a figure it cannot draw must not fail the step.
+#: Printed per panel for an empty bin set, instead of raising. This script runs last in
+#: ``reassemble_bins``, after the bins and .stats.tsv tables are written, so it must not fail the
+#: step.
 _EMPTY_SERIES_NOTE = "No bin in %s passes -c/-x, so it is left out of the %s panel."
 
 
 def _label_y(values: Sequence[float], index: int) -> Optional[float]:
     """The y a bin set's label sits at on its own curve, or ``None`` if the series has no points.
 
-    Each panel below picks the x it wants to write the label at (a quarter, a third or half of the
-    way along the curve) and reads the y off the series there. Two things that x cannot be trusted
-    to be, both of which happened:
+    Each panel picks an x for the label (a quarter, a third or half way along the curve) and
+    reads y from the series there. Handles two cases:
 
-    * out of range, because the series is empty. ``original_bins.stats.tsv`` is header-only whenever
-      no ``.orig`` candidate was scored, and ``[]`` raised IndexError for both index conventions used
-      here - ``values[x_pos]`` and the N50 panel's ``values[x_pos - 1]``, which is ``values[-1]``.
-      That ended a reassembly 62m53s in, with every bin already on disk.
-    * negative, for the N50 panel, whenever fewer than 4 bins pass the thresholds: ``len // 4 - 1``
-      is ``-1`` there, which wrapped to the *last* point of a descending series, so the label was
-      drawn at x=0 carrying the smallest N50 in the set. Clamping puts it on the point at that x.
+    * an empty series (``original_bins.stats.tsv`` is header-only when no ``.orig`` candidate was
+      scored), which raised IndexError at the end of a long reassembly;
+    * a negative index in the N50 panel when fewer than 4 bins pass (``len // 4 - 1`` is ``-1``),
+      which would read the last point. The index is clamped to the series.
     """
     if not values:
         return None
@@ -47,9 +43,8 @@ min_completion = int(sys.argv[2])
 def _bin_set_label(path):
     """Bin-set name from a .stats.tsv path: basename with the suffix removed.
 
-    Both this and the colour assignment below must agree on the label, or a bin set gets no
-    colour. Handles the ".stats.tsv" suffix as one unit rather than stripping a single
-    extension (which would leave "binsA.stats").
+    Used for both the data and the colour assignment, so the labels match. Strips ".stats.tsv"
+    as one suffix (a single-extension strip would leave "binsA.stats").
     """
     base = os.path.basename(path)
     for suffix in (".stats.tsv", ".stats"):
@@ -80,14 +75,14 @@ for file_name in sys.argv[4:]:
         if float(line.split("\t")[1]) < 1:
             continue
 
-        # save the completion value of each bin into a list
+        # save the N50 of each bin into a list
         data[bin_set].append(int(line.split("\t")[5]))
         max_n50 = max(max_n50, int(line.split("\t")[5]))
 for values in data.values():
     values.sort(reverse=True)
 
 print("Plotting completion data...")
-# MAKING THE PLOT PRETTY!!!!
+# plot styling
 # set some color schemes
 tableau20 = [
     (214, 39, 40),
@@ -108,16 +103,12 @@ tableau20 = [
     (158, 218, 229),
 ]
 
-# matplotlib wants 0-1 floats, but the table above is written in 0-255 ints because that is
-# how the palette is published; build a new list rather than rewriting it in place so the
-# element type stays consistent.
+# matplotlib takes 0-1 floats; the palette above is in 0-255 as published.
 palette: List[Tuple[float, float, float]] = [
     (r / 255.0, g / 255.0, b / 255.0) for r, g, b in tableau20
 ]
 plot_colors = {}
-# sys.argv[1] and [2] are the completeness/contamination thresholds, not stats files:
-# enumerating argv[1:] shifted every colour by two and, with more than ~15 bin sets, ran off
-# the end of the palette with an IndexError. Cycling keeps any number of sets plottable.
+# Stats files start at sys.argv[4]. Colours cycle so any number of bin sets can be plotted.
 for i, label in enumerate(sys.argv[4:]):
     plot_colors[_bin_set_label(label)] = palette[i % len(palette)]
 
@@ -357,7 +348,7 @@ for bin_set in data:
     data[bin_set].sort(reverse=False)
 
 print("Plotting the contamination data...")
-# MAKING THE PLOT PRETTY!!!!
+# plot styling
 # Remove the plot frame lines. They are unnecessary chartjunk.
 ax = plt.subplot(133)
 ax.spines["top"].set_visible(False)
@@ -431,7 +422,7 @@ for rank, bin_set in enumerate(labels):
 
 # add plot and axis titles and adjust the edges
 plt.title("Bin contamination ranking", fontsize=26)
-plt.xlabel("Acending contamination rank", fontsize=20)
+plt.xlabel("Ascending contamination rank", fontsize=20)
 plt.ylabel("Estimated bin contamination", fontsize=20)
 plt.gcf().subplots_adjust(right=0.9)
 

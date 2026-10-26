@@ -1,8 +1,7 @@
-"""The registry and the fetcher: what the benchmark says it will download, and what it does.
+"""Tests for the benchmark registry and fetcher.
 
-The registry's whole value is that it is trusted - a fetch reads it and commits an afternoon and a
-hundred gigabytes to what it says. So these tests are about the shipped declarations being
-verifiable and the extractor writing only what it was asked to, only where it was asked to.
+A fetch can take hours and a hundred gigabytes, so the shipped declarations must be verifiable, and
+the extractor must write only the requested members, only inside the destination.
 """
 
 import io
@@ -16,12 +15,11 @@ BENCHMARKS = os.path.join(HERE, "..", "benchmarks")
 
 
 def test_every_remote_file_in_the_shipped_registry_is_verifiable():
-    """A remote file with no checksum is a file nobody can tell is intact.
+    """Every shipped remote file has an md5 and size, and every comparison is well formed.
 
-    This is the guard on the registry itself rather than on the loader: the loader would reject a
-    missing md5, but only for a dataset someone tried to load. This asserts it for all of them, and
-    that every shipped comparison has exactly one incumbent - a comparison with none cannot show a
-    challenger what it has to beat - and names a module that exists.
+    The loader rejects a missing md5 only for the dataset being loaded; this checks all of them.
+    Each comparison must have exactly one default variant, declare metrics, and name an existing
+    module.
     """
     from metawrap2.cli import MODULES
 
@@ -47,11 +45,10 @@ def test_every_remote_file_in_the_shipped_registry_is_verifiable():
 
 
 def test_extraction_keeps_only_the_members_the_registry_asks_for(tmp_path):
-    """~95% of a CAMI2 archive is BAMs no binning benchmark reads.
+    """Extraction keeps only matching members and refuses members that escape the destination.
 
-    And these are archives from the internet, where extractall writes wherever a member says to, so a
-    member that escapes the destination is refused. The escaping archive is built by hand rather than
-    with tarfile.add, which normalises an escaping name away before it ever reaches the archive.
+    About 95% of a CAMI2 archive is BAMs that no binning benchmark reads. The escaping archive is
+    built with addfile, because tarfile.add normalises an escaping name away.
     """
     staging = tmp_path / "staging"
     archive = tmp_path / "a.tar.gz"

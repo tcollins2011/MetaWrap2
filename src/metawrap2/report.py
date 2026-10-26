@@ -1,29 +1,19 @@
 """One PDF per run, assembled from the files the run already wrote.
 
-A finished study is twenty-odd correct TSVs, a handful of PNGs and a Krona HTML per genome. There
-is no single place to look at it and nothing a collaborator can open: the person who ran it knows
-which file answers which question, and nobody else does. This builds the thing that can be attached
-to a message - a one-page summary of what was run, read QC, assembly, the per-MAG table,
-abundance, the functional wheels, and the resistance/virus/strain summaries - in that order, in one
-PDF, with the full per-run provenance as an appendix at the back.
+Pages, in order: a one-page summary of what was run, read QC, assembly, the per-MAG table,
+abundance, the functional wheels, and the resistance/virus/strain summaries, followed by the full
+per-run provenance as an appendix.
 
-**Every page is a picture of a file.** Nothing here measures, estimates, normalises or re-scores
-anything. Counts are row counts of tables that already exist, the quality tiers come from
-:mod:`metawrap2.magtable`, and the functional wheels are drawn by :mod:`metawrap2.sunburst` from the
-same Krona input file Krona is given, so the wheel in the PDF and the wheel in the browser cannot
-disagree. If a page here ever needs a number that is not already on disk, the module that owns that
-number should write it and this should read it.
+Each page shows existing files; nothing is measured, normalised or re-scored here. Counts are row
+counts of existing tables, quality tiers come from :mod:`metawrap2.magtable`, and the functional
+wheels are drawn by :mod:`metawrap2.sunburst` from the same input file Krona is given. A number not
+already on disk should be written by the module that owns it.
 
-**Absence is stated, never implied.** A page whose inputs are missing is skipped, and every skipped
-page is named on a "what was not run" page that is not optional - the last page before the
-appendix. A report that simply had no resistance page
-would be read as a run with no resistance genes, which is the one mistake a document of this shape
-can make that matters: "not run" and "ran and found nothing" are different results, and a reader
-cannot tell them apart from a gap.
+A page whose inputs are missing is skipped and listed on the "what was not run" page, which is
+always drawn, so "not run" is distinguishable from "ran and found nothing".
 
-``matplotlib``'s PDF backend is the whole toolchain on purpose. It is already a hard dependency and
-needs no network, no browser and no system libraries beyond the ones the bundled plotting scripts
-already require - so this renders the same on a cluster node with no outbound route as on a laptop.
+Rendering uses only ``matplotlib``'s PDF backend, an existing dependency that needs no network,
+browser or extra system libraries.
 """
 
 from __future__ import annotations
@@ -45,14 +35,12 @@ if TYPE_CHECKING:  # import-time cost of matplotlib is paid by the command, not 
     from matplotlib.backends.backend_pdf import PdfPages
     from matplotlib.figure import Figure
 
-#: A4 landscape, in inches. Landscape because the per-MAG table is the reason this document exists
-#: and it is twelve columns wide before a single sample is quantified; in portrait it either wraps
-#: or shrinks to an unreadable font.
+#: A4 landscape, in inches. The per-MAG table has twelve columns before any sample columns.
 PAGE_SIZE = (11.69, 8.27)
 
-#: Monospaced body text at this size, and the width in characters that fits a page at it. Tables
-#: are laid out as text rather than with ``Axes.table``, which cannot paginate and sizes its cells
-#: from the figure rather than from the content.
+#: Monospaced body font size, and the line width in characters that fits a page at that size.
+#: Tables are laid out as text because ``Axes.table`` cannot paginate and sizes cells from the
+#: figure, not the content.
 BODY_FONT = 7.5
 MIN_FONT = 4.0
 PAGE_CHARS = 158
@@ -60,41 +48,32 @@ PAGE_CHARS = 158
 PAGE_LINES = 44
 PAGE_LINES_WITH_CHART = 26
 
-#: zorder for an axes that shares a page with the page heading, so the heading is drawn - and
-#: therefore written into the PDF's content stream - *first*.
-#:
-#: Not cosmetic. A figure's children are drawn in ascending zorder, an Axes defaults to 0 and
-#: figure-level text to 3, so a page carrying a chart put the chart's artists into the stream ahead
-#: of its own heading. The page looked right and read wrong: the extracted text of the first genomes
-#: page began "near", "complete", "high", "quality" - the bar chart's tick labels - and its heading
-#: came tenth. Anything that reads a PDF's text rather than its pixels (copy-paste, a search index,
-#: a screen reader, `pymupdf.Page.get_text`) saw a tier name where the title belongs.
+#: zorder for an axes on a page with a heading, so the heading is written to the PDF's content
+#: stream first. Axes default to zorder 0 and figure text to 3; with the defaults, extracted text
+#: (copy-paste, search, screen readers, `pymupdf.Page.get_text`) began with the chart's tick
+#: labels instead of the page title.
 ARTIST_OVER_TEXT = 4
 
-#: A cell wider than this is truncated. GTDB lineages reach 120 characters and one of them would
-#: set the width of a whole column, which at twelve columns shrinks the font past legibility. The
-#: untruncated value is in the TSV written beside the PDF, and the page footer says so.
+#: Cells wider than this are truncated (GTDB lineages reach 120 characters). The full values are
+#: in the TSV written beside the PDF, as the page footer says.
 MAX_CELL = 34
 ELLIPSIS = "…"
 
-#: How deep below a run directory to look. Shared with :mod:`metawrap2.magtable` so the two agree
-#: about what "under this run directory" means - a report that found the stats table but not the
-#: assembly beside it would be a confusing half-report.
+#: How deep below a run directory to look. Shared with :mod:`metawrap2.magtable` so both search
+#: the same directories.
 MAX_DEPTH = _magtable.MAX_DEPTH
 
-#: QUAST metrics worth a page, in the order a reader wants them. QUAST writes 40-odd rows and most
-#: of the rest are its ``>= 5000 bp`` cuts, which belong in QUAST's own report.
+#: QUAST metrics shown, in display order. Most of QUAST's other 40-odd rows are ``>= 5000 bp``
+#: cuts.
 QUAST_METRICS = ("# contigs", "Total length", "N50", "N90", "Largest contig", "GC (%)")
 
-#: FastQC states the read count in its HTML report and in ``fastqc_data.txt``. Matched loosely
-#: because the markup has gained whitespace and attributes between FastQC versions, and a pattern
-#: that silently stopped matching would leave the read-QC page blank rather than absent - which is
-#: the exact confusion the "what was not run" page exists to prevent.
+#: FastQC's read count, from its HTML report or ``fastqc_data.txt``. Matched loosely because the
+#: HTML whitespace and attributes vary between FastQC versions.
 TOTAL_SEQUENCES_HTML = re.compile(r"Total Sequences\s*</td>\s*<td>\s*([0-9,]+)")
 TOTAL_SEQUENCES_TEXT = re.compile(r"^Total Sequences\t([0-9,]+)", re.MULTILINE)
 
-#: The two FastQC report directories ``read_qc`` writes, before and after cleaning, and fastp's
-#: JSON - preferred where the run used ``--fastp``, because it states both counts in one file.
+#: The FastQC report directories ``read_qc`` writes before and after cleaning, and fastp's JSON,
+#: which is preferred when present because it has both counts.
 PRE_QC_DIR = "pre-QC_report"
 POST_QC_DIR = "post-QC_report"
 FASTP_JSON = "fastp.json"
@@ -103,17 +82,16 @@ FASTP_JSON = "fastp.json"
 KRONA_DIR = os.path.join("hierarchy", "krona")
 ABUNDANCE_HEATMAP = "bin_abundance_heatmap.png"
 
-#: Functional wheels to a page. Two, because ``pathways`` writes two per unit and they are the same
-#: distribution with and without BRITE's scaffolding branches - a pair that exists to be compared.
-#: At one per page the reference run's 18 wheels were 18 pages of a 31-page report.
+#: Functional wheels per page. ``pathways`` writes two per unit (with and without BRITE's
+#: scaffolding branches), shown side by side. This also halves the page count (18 wheels on the
+#: reference run).
 WHEELS_PER_PAGE = 2
 
-#: Printed on the "what was not run" page. The wording is deliberate: a reader who takes a missing page for a
-#: negative result has been misled by the document rather than by the data.
+#: Printed on the "what was not run" page, so a missing page is not read as a negative result.
 ABSENCE_NOTE = (
-    "A module listed here produced no output under the directories this report was built from. "
-    "That is not a negative result - nothing looked. Re-run the module, or point this report at "
-    "the directory that holds its output."
+    "A module listed here produced no output under the directories this report was built from, "
+    "so its results are unknown, not negative. Run the module, or point this report at the "
+    "directory that holds its output."
 )
 
 __all__ = [
@@ -150,8 +128,8 @@ class Report(NamedTuple):
     path: str
     pages: int
     absent: List[Absence]
-    #: The per-MAG table, written beside the PDF because it is the only place the untruncated
-    #: lineages and full-precision abundances exist.
+    #: The per-MAG table written beside the PDF, with untruncated lineages and full-precision
+    #: abundances.
     mag_table: Optional[str]
 
 
@@ -161,9 +139,8 @@ class Report(NamedTuple):
 def _dirs(run_dirs: Sequence[str]) -> List[str]:
     """Each run directory and its subdirectories, at most :data:`MAX_DEPTH` down, deduplicated.
 
-    Two depths matter in practice: a caller may point this at one module's output directory
-    (``READ_QC/ERR011347``) or at the study directory that holds all of them, and the same marker
-    file is one level further down in the second case.
+    A caller may pass one module's output directory (``READ_QC/ERR011347``) or the study directory
+    that holds them, where the same files are one level deeper.
     """
     seen: List[str] = []
     for root in run_dirs:
@@ -193,9 +170,8 @@ def _with(run_dirs: Sequence[str], *relative: str) -> List[str]:
 def _relative(path: str, run_dirs: Sequence[str]) -> str:
     """*path* as ``<run directory>/<the rest>``, or unchanged if it is under none of them.
 
-    A caption is the one line on a page with no room to spare, and an absolute path can spend most
-    of it on directories before the part that identifies the file. The run directory's own name is kept at the front so the caption still says *which*
-    of several inputs a wheel came from.
+    Keeps captions short. The run directory's name is kept so the caption shows which input a
+    wheel came from.
     """
     target = os.path.abspath(path)
     for root in run_dirs:
@@ -219,9 +195,7 @@ def _row_count(path: str) -> int:
 def _column_counts(path: str, column: str) -> List[Tuple[str, int]]:
     """How many rows hold each distinct value of *column*, commonest first.
 
-    A row count of an existing table, grouped by one of that table's own columns. Nothing is
-    weighted, deduplicated or normalised, so this cannot disagree with the table it counts. An
-    unrecognised column name gives nothing rather than a guess at a similar one.
+    Plain row counts, with no weighting or deduplication. An unknown column returns an empty list.
     """
     header, rows = _table(path)
     lowered = [name.strip().lower() for name in header]
@@ -254,12 +228,10 @@ def _search(pattern: re.Pattern[str], path: str) -> Optional[int]:
 def _fastqc_total(report_dir: str) -> Optional[int]:
     """Reads in a FastQC report directory, summed over the mates it reported on.
 
-    Summed rather than taken from R1, because a page that said "12.6 M reads" for a paired sample
-    holding 25.2 M would be wrong by exactly a factor of two and look entirely plausible. The page
-    footer says the number is a sum over mates.
+    Summed over mates, not taken from R1 alone; the page footer says so.
 
-    None, not 0, when no report states a count: FastQC's HTML has changed shape between versions,
-    and a zero here would read as a sample with no reads in it.
+    Returns None, not 0, when no report states a count, so a parse failure is not shown as zero
+    reads.
     """
     if not os.path.isdir(report_dir):
         return None
@@ -293,10 +265,9 @@ def _fastp_totals(path: str) -> Tuple[Optional[int], Optional[int]]:
 def read_qc_counts(run_dirs: Sequence[str]) -> List[ReadCounts]:
     """Reads in and out per sample, from whichever report ``read_qc`` left behind.
 
-    ``read_qc`` writes one output directory per sample, named for the sample, holding FastQC
-    reports before and after cleaning (and ``fastp.json`` when fastp did the trimming). The sample
-    name is that directory's, which is where ``read_qc`` put it - not re-derived from a FASTQ
-    filename, which is the step that goes wrong on ``_1`` versus ``_R1`` naming.
+    ``read_qc`` writes one directory per sample with FastQC reports before and after cleaning
+    (and ``fastp.json`` when fastp trimmed). The sample name is the directory name, not parsed from
+    FASTQ file names, where ``_1`` and ``_R1`` naming differ.
     """
     counts: List[ReadCounts] = []
     for directory in _dirs(run_dirs):
@@ -315,10 +286,8 @@ def read_qc_counts(run_dirs: Sequence[str]) -> List[ReadCounts]:
 def assembly_stats(run_dirs: Sequence[str]) -> List[Tuple[str, Dict[str, str]]]:
     """QUAST's metrics per assembly, as ``(assembly name, metric -> value)``.
 
-    Read from ``QUAST_out/report.tsv`` rather than measured off the FASTA. ``assembly`` already
-    runs QUAST, and the numbers on this page have to be the numbers in that report: a second N50
-    implementation with a different definition of the contig set would be a page-long disagreement
-    with the file sitting next to it.
+    Read from ``QUAST_out/report.tsv`` (written by ``assembly``), not measured from the FASTA, so
+    the page matches QUAST's report.
     """
     stats: List[Tuple[str, Dict[str, str]]] = []
     for path in _with(run_dirs, "QUAST_out", "report.tsv"):
@@ -335,7 +304,7 @@ def assembly_stats(run_dirs: Sequence[str]) -> List[Tuple[str, Dict[str, str]]]:
 
 
 def krona_inputs(run_dirs: Sequence[str]) -> List[str]:
-    """Every Krona input file ``pathways`` wrote, sorted. One wheel per file, by contract."""
+    """Every Krona input file ``pathways`` wrote, sorted. One wheel per file."""
     found: List[str] = []
     for directory in _with(run_dirs, KRONA_DIR):
         found.extend(
@@ -349,10 +318,8 @@ def krona_inputs(run_dirs: Sequence[str]) -> List[str]:
 def _wheel(krona_txt: str, work_dir: str) -> Optional[str]:
     """The wheel PNG for a Krona input, reusing the one beside it when it is current.
 
-    ``pathways`` already draws these into the Krona directory, and redrawing is not free: the
-    reference run's hierarchy directory holds 18 input files at about 1.3 s a wheel, so a report
-    over it would spend 24 s re-rendering pictures that are already on disk. A PNG older than its
-    input is redrawn, because a stale wheel is worse than a slow report.
+    ``pathways`` already draws these, and each takes about 1.3 s (24 s for the 18 wheels of the
+    reference run). A PNG older than its input is redrawn.
     """
     beside = os.path.splitext(krona_txt)[0] + ".png"
     if os.path.isfile(beside) and os.path.getmtime(beside) >= os.path.getmtime(krona_txt):
@@ -369,8 +336,8 @@ def _run_records(run_dirs: Sequence[str]) -> List[Tuple[str, Dict[str, object]]]
             with open(path) as fh:
                 loaded = json.load(fh)
         except (OSError, ValueError):
-            # A half-written run_config.json is not worth failing a report over - the directory
-            # still appears on the summary page, without its provenance.
+            # Skip an unreadable run_config.json; the directory is still listed, without
+            # provenance.
             continue
         if isinstance(loaded, dict):
             records.append((os.path.dirname(path), loaded))
@@ -391,11 +358,9 @@ def _cell(row: Sequence[str], index: int) -> str:
 def _unscored_note(table: _magtable.Table) -> str:
     """How many rows carry no completeness, and where those genomes came from.
 
-    Without this the page is ambiguous in a way that matters. The table is the union of its inputs,
-    so a genome that appears only in `quant_bins`' abundance table - a different, usually larger bin
-    set than the refined one - gets a row with every quality cell blank. On the reference run that
-    is 13 of 26 rows, and a reader seeing half the table empty will reasonably suspect the report
-    rather than conclude that two inputs describe two different bin sets.
+    The table is the union of its inputs, so a genome found only in `quant_bins`' abundance table
+    (often a different, larger bin set) has blank quality cells. On the reference run that was 13
+    of 26 rows; this note explains them.
     """
     if "completeness" not in table.columns:
         return ""
@@ -404,8 +369,8 @@ def _unscored_note(table: _magtable.Table) -> str:
     if not unscored:
         return ""
     return (
-        " %d of %d genome(s) have no quality row in this bin set's stats table and are listed "
-        "because another input - usually an abundance table over a different bin set - names them."
+        " %d of %d genome(s) have no quality row in this bin set's stats table. They are listed "
+        "because another input names them, usually an abundance table over a different bin set."
         % (unscored, len(table.rows))
     )
 
@@ -426,9 +391,8 @@ def _table_lines(columns: Sequence[str], rows: Sequence[Sequence[str]]) -> List[
 def _font_for(lines: Sequence[str]) -> float:
     """Shrink the body font until the widest line fits the page, down to :data:`MIN_FONT`.
 
-    Shrunk rather than wrapped or clipped: a wrapped table row stops being a row, and a clipped one
-    silently loses its last columns - which for the MAG table are the per-sample abundances, the
-    columns a reader came for.
+    Wrapping would break rows and clipping would drop the last columns (the per-sample
+    abundances in the MAG table).
     """
     widest = max((len(line) for line in lines), default=0)
     if widest <= PAGE_CHARS:
@@ -448,9 +412,8 @@ class _Pdf:
     def missing(self, module: str, looked_for: str) -> None:
         """Record a page that was not drawn. Repeats are dropped, not listed twice.
 
-        Two pages can depend on one file - the MAG table and the abundance page both need
-        ``quant_bins``' matrix - and that page is a list of what is missing, not a list of
-        pages that wanted it.
+        Two pages can need the same file (the MAG table and the abundance page both read
+        ``quant_bins``' matrix).
         """
         entry = Absence(module, looked_for)
         if entry not in self.absent:
@@ -503,9 +466,8 @@ class _Pdf:
     ) -> None:
         """*head* repeated on every page, *body* split over as many pages as it needs.
 
-        Paginated rather than scaled to fit, because the MAG table is the point of the document and
-        a 300-genome catalogue shrunk onto one page is a grey rectangle. At least one page is always
-        written, so an empty body still produces the header and the footer that explains it.
+        Paginated instead of scaled, so large MAG tables stay legible. At least one page is
+        written, so an empty body still shows the header and footer.
         """
         remaining = list(body)
         first = True
@@ -525,10 +487,8 @@ class _Pdf:
     def image_page(self, title: str, images: Sequence[Tuple[str, str]], caption: str = "") -> None:
         """A page of one or two existing PNGs, each scaled to fit its half and not cropped.
 
-        Two per page because the two wheels of one unit are the same distribution with and without
-        BRITE's scaffolding branches, and the only thing anyone does with that pair is compare them
-        - which is impossible with one of them on the previous page. It also halves the page count:
-        the reference run's hierarchy directory holds 18 wheels, which was 18 of a 31-page report.
+        Two per page so a unit's two wheels (with and without BRITE's scaffolding branches) are
+        side by side; see :data:`WHEELS_PER_PAGE`.
         """
         import matplotlib.image as mpimg
         import matplotlib.pyplot as plt
@@ -572,13 +532,10 @@ def _tier_chart(counts: Sequence[Tuple[str, int]]) -> Callable[[Axes], None]:
 
 
 def _title_page(doc: _Pdf, title: str, records: Sequence[Tuple[str, Dict[str, object]]]) -> None:
-    """One page: what was run, when, which MetaWrap2, and where. Nothing a reader has to scroll past.
+    """Summary page: what was run, when, with which MetaWrap2 version, and where.
 
-    One page, and one line per module. The full per-run dumps - resolved parameters, tool versions,
-    databases - go to :func:`_provenance_appendix` at the end instead. They used to be here, and on
-    the reference run they filled **six pages before the first result**: somebody opening the report
-    to see what the run found read six pages of configuration first. Provenance has to be in the
-    document, but it is reference material, and reference material goes at the back.
+    One line per module. Resolved parameters, tool versions and databases go in
+    :func:`_provenance_appendix`; on the reference run they took six pages.
     """
     body = ["report written by MetaWrap2 %s" % __version__, "", "run directories"]
     for directory in doc.run_dirs:
@@ -613,8 +570,8 @@ def _title_page(doc: _Pdf, title: str, records: Sequence[Tuple[str, Dict[str, ob
         [],
         body,
         footer=(
-            "Resolved parameters, tool versions and databases for each of these runs are in the "
-            "appendix at the end of this report, and in full in each directory's %s and %s."
+            "Resolved parameters, tool versions and databases for each run are in the appendix "
+            "at the end of this report. The full records are in each directory's %s and %s."
             % (CONFIG_NAME, ENVIRONMENT_NAME)
         ),
     )
@@ -627,8 +584,7 @@ def _duration(seconds: object) -> str:
     return "%.0f s" % seconds if seconds < 600 else "%.1f h" % (seconds / 3600.0)
 
 
-#: What a run calls itself, in the order a reader wants it. Read out of ``run_config.json`` rather
-#: than reconstructed, so the dates in the appendix are the dates the run recorded for itself.
+#: Identity fields shown per run, in display order, read from ``run_config.json``.
 _RUN_IDENTITY = (
     ("module", "module"),
     ("run id", "run_id"),
@@ -647,9 +603,7 @@ _NO_CONFIG_FOOTER = (
 def _provenance_appendix(doc: _Pdf, records: Sequence[Tuple[str, Dict[str, object]]]) -> None:
     """The full per-run provenance, after the results and after "what was not run".
 
-    Deliberately last. A reader who wants the exact thread count or the GUNC database build will go
-    looking for it and find it; a reader who wants to know what the run recovered never has to read
-    past it. Nothing is dropped relative to what the title page used to show.
+    Placed last so the results come first.
     """
     body: List[str] = []
     for directory, record in records:
@@ -671,16 +625,14 @@ def _provenance_appendix(doc: _Pdf, records: Sequence[Tuple[str, Dict[str, objec
         "Appendix: provenance",
         [],
         body,
-        footer="Read back from each run's %s; nothing here is re-derived." % CONFIG_NAME,
+        footer="Read from each run's %s, as recorded at run time." % CONFIG_NAME,
     )
 
 
 def _provenance_text(run_dirs: Sequence[str], limit: int = 30) -> List[str]:
     """The first *limit* lines of any ``provenance.txt``, for a run with no machine-readable record.
 
-    Worth quoting rather than ignoring: it is the human-readable history of which steps produced
-    this output, which is most of what the summary page is for, and an appendix that could only
-    show a path would be worse than one that shows a step list it cannot parse.
+    It lists the steps that produced the output, which is most of what provenance is needed for.
     """
     lines: List[str] = []
     for path in _with(run_dirs, PROVENANCE_NAME):
@@ -722,8 +674,8 @@ def _read_qc_page(doc: _Pdf) -> None:
         lines[:2],
         lines[2:],
         footer=(
-            "Reads summed over both mates of a pair, as FastQC and fastp report them. A blank is a "
-            "count no report stated, which is not a count of zero."
+            "Reads summed over both mates of a pair, as FastQC and fastp report them. A blank "
+            "means no report gave the count; it does not mean zero."
         ),
     )
 
@@ -747,12 +699,12 @@ def _assembly_page(doc: _Pdf) -> None:
         "Assembly",
         lines[:2],
         lines[2:],
-        footer="Copied from QUAST's own report.tsv, not re-measured from the FASTA.",
+        footer="Copied from QUAST's report.tsv; not recomputed from the FASTA.",
     )
 
 
-#: Which module writes each of the MAG table's optional inputs, so "what was not run" can name the
-#: module a reader has to re-run rather than the file they would have to produce by hand.
+#: The module that writes each optional MAG-table input, so "what was not run" names the module to
+#: re-run.
 _MAG_INPUTS = {
     "taxonomy": ("classify_bins", _magtable.TAXONOMY_NAME),
     "abundance": ("quant_bins", _magtable.ABUNDANCE_NAME),
@@ -763,13 +715,10 @@ _MAG_INPUTS = {
 def _unjoined_note(table: _magtable.Table) -> str:
     """Which inputs exist but matched none of a bin set's genomes, and why those cells are blank.
 
-    The page would otherwise be ambiguous in the opposite direction from :func:`_unscored_note`: a
-    study-wide table that is present and simply does not describe these genomes leaves exactly the
-    same blank cells as one that was never written, and only this sentence tells them apart.
-
-    It is the normal state of a cohort run. ``classify_bins`` and ``quant_bins`` work on the
-    *dereplicated* catalogue, whose genome names need not resemble any one sample's ``bin_001``, so
-    there is no join to make and nothing to put in the cell but a guess.
+    Distinguishes an input that exists but describes other genomes from one that was never
+    written; both leave blank cells. This is normal for a cohort run: ``classify_bins`` and
+    ``quant_bins`` work on the dereplicated catalogue, whose genome names need not match a
+    sample's ``bin_001``.
     """
     if not table.unjoined:
         return ""
@@ -777,9 +726,9 @@ def _unjoined_note(table: _magtable.Table) -> str:
     for kind, sample in table.unjoined:
         by_kind.setdefault(kind, []).append(sample)
     return (
-        " Present, but matching no genome in the bin set named, so blank there rather than guessed:"
-        " %s - a cohort's taxonomy and abundance are keyed on dereplicated genome names, which need"
-        " not match a per-sample bin name."
+        " Present but matching no genome in the bin set named, so left blank: %s. A cohort's"
+        " taxonomy and abundance use dereplicated genome names, which may differ from per-sample"
+        " bin names."
         % "; ".join(
             "%s for %s" % (kind, ", ".join(samples)) for kind, samples in sorted(by_kind.items())
         )
@@ -787,11 +736,9 @@ def _unjoined_note(table: _magtable.Table) -> str:
 
 
 def _genomes_heading(table: _magtable.Table) -> str:
-    """``Genomes (62 across 3 bin sets)``: a heading that states what it covers.
+    """The genomes page heading, e.g. ``Genomes (62 across 3 bin sets)``.
 
-    The count alone was a trap on a per-sample study. The page said "Genomes (24)" for a study that
-    recovered 62 across three samples, and a reader had nothing to tell them that the number was
-    one sample's.
+    The bin set count is included so a per-sample study's total is not mistaken for one sample's.
     """
     if table.bin_sets > 1:
         return "Genomes (%d across %d bin sets)" % (len(table.rows), table.bin_sets)
@@ -816,8 +763,8 @@ def _mag_pages(doc: _Pdf, mag_table_path: Optional[str]) -> Optional[str]:
         lines[:2],
         lines[2:],
         footer=(
-            "A blank cell is a measurement that was not made, never a zero. Inputs with no file at "
-            "all, hence blank for every genome: %s.%s%s Cells are truncated to %d characters "
+            "A blank cell is a measurement that was not made; it does not mean zero. Inputs with "
+            "no file, blank for every genome: %s.%s%s Cells are truncated to %d characters "
             "here%s."
             % (
                 ", ".join(sorted(table.absent)) or "none",
@@ -848,8 +795,8 @@ def _abundance_pages(doc: _Pdf) -> None:
         lines[:2],
         lines[2:],
         footer=(
-            "Copied from %s. The unit is whichever quantifier ran - coverage for salmon and the "
-            "depth route, relative abundance for sylph - which that run's %s records."
+            "Copied from %s. The unit depends on the quantifier (coverage for salmon and the "
+            "depth route, relative abundance for sylph); that run's %s records which one ran."
             % (os.path.basename(path), CONFIG_NAME)
         ),
     )
@@ -865,9 +812,8 @@ def _abundance_pages(doc: _Pdf) -> None:
 def _krona_unit(krona_txt: str) -> Tuple[str, str]:
     """``genome.bin_003.pathways.txt`` -> ``("genome.bin_003", "pathways")``.
 
-    ``pathways`` writes two Krona inputs per unit - one with BRITE's scaffolding branches and one
-    without - distinguished by that last dotted component. Split rather than matched against a list
-    of known variants, so a third variant lands on a page of its own instead of disappearing.
+    ``pathways`` writes two inputs per unit (with and without BRITE's scaffolding branches),
+    distinguished by the last dotted component. Any other variant name is also kept.
     """
     stem = os.path.splitext(os.path.basename(krona_txt))[0]
     unit, _dot, variant = stem.rpartition(".")
@@ -877,8 +823,7 @@ def _krona_unit(krona_txt: str) -> Tuple[str, str]:
 def _function_pages(doc: _Pdf, work_dir: str) -> None:
     """The functional wheels, two to a page, drawn by :mod:`metawrap2.sunburst`.
 
-    Grouped by unit, so a genome's scaffolding-included and pathway-only wheels sit side by side -
-    the only comparison anybody makes between them.
+    Grouped by unit, so a genome's full and pathway-only wheels are side by side.
     """
     inputs = krona_inputs(doc.run_dirs)
     if not inputs:
@@ -889,9 +834,8 @@ def _function_pages(doc: _Pdf, work_dir: str) -> None:
         unit, variant = _krona_unit(krona_txt)
         png = _wheel(krona_txt, work_dir)
         if png is None:
-            # An empty distribution is a real result - a genome with no KO at all - and sunburst
-            # returns None rather than drawing a blank wheel. Named on "what was not run" rather
-            # skipped in silence, because a missing wheel otherwise reads as a missing genome.
+            # sunburst returns None for an empty distribution (a genome with no KO). List it on
+            # "what was not run" so the missing wheel is explained.
             doc.missing("pathways", "a non-empty distribution in %s" % os.path.basename(krona_txt))
             continue
         drawn.setdefault(unit, []).append((png, variant, krona_txt))
@@ -915,10 +859,8 @@ def _summary_page(
 ) -> None:
     """A page of row counts and per-column breakdowns for one module's tables.
 
-    *tables* is ``(filename, what one row is, the column to break down by)``, with an empty column
-    meaning "count the rows and nothing else". Row counts only: how many resistance gene calls, how
-    many viral contigs in each tier. Anything beyond counting a table's own rows belongs in the
-    module that wrote the table.
+    *tables* is ``(filename, what one row is, column to break down by)``; an empty column means
+    only the rows are counted.
     """
     lines: List[str] = []
     for filename, unit, column in tables:
@@ -935,15 +877,12 @@ def _summary_page(
 
 
 def _absence_page(doc: _Pdf) -> None:
-    """The page that is not optional: every module whose output was absent, named.
+    """List every module whose output was absent.
 
-    Drawn even when nothing is missing, because its own absence would be ambiguous - a reader could
-    not tell whether the report had checked.
+    Always drawn, so a reader can see the check was made even when nothing is missing.
     """
     if doc.absent:
-        # Laid out by hand rather than through _table_lines, which truncates a cell at MAX_CELL.
-        # Truncation is right for a lineage and wrong here: "viral_contigs.tsv / plasmid_conti…"
-        # does not tell a reader which file to go and look for.
+        # Not _table_lines, which would truncate the file names at MAX_CELL.
         lines = ["%-26s %s" % ("module / page", "looked for"), ""]
         lines += ["%-26s %s" % (entry.module, entry.looked_for) for entry in doc.absent]
     else:
@@ -955,8 +894,8 @@ def _absence_page(doc: _Pdf) -> None:
 
 # ── the document ─────────────────────────────────────────────────────────────────────────────
 
-#: ``amr``, ``viruses`` and ``strains`` each write a few flat tables and nothing else worth a plot,
-#: so each gets one page of row counts. Declared as data so adding a fourth module is a row here.
+#: ``amr``, ``viruses`` and ``strains`` write a few flat tables each, summarised as one page of row
+#: counts per module. Add a module by adding a row.
 _SUMMARIES = (
     (
         "Resistance and virulence",
@@ -972,7 +911,7 @@ _SUMMARIES = (
             ("plasmid_contigs.tsv", "plasmid contigs", ""),
             ("votus.tsv", "vOTUs", ""),
         ),
-        "Tiers are MIUViG's, as viruses wrote them - not re-derived here.",
+        "Tiers are MIUViG tiers, copied from the viruses output.",
     ),
     (
         "Strains",
@@ -995,8 +934,7 @@ def build_report(
 ) -> Report:
     """Write one PDF for *run_dirs* and return what was written and what was absent.
 
-    Pages are added in a fixed order whatever the run contains, so two reports of two runs can be
-    read the same way, and a page whose inputs are missing is recorded rather than quietly dropped.
+    Pages are always in the same order. A page whose inputs are missing is recorded as absent.
     """
     import matplotlib
 
@@ -1016,8 +954,7 @@ def build_report(
         pdf.infodict()["Title"] = heading
         pdf.infodict()["Creator"] = "MetaWrap2 %s" % __version__
 
-        # Read once and passed to both the summary page and the appendix, so the one-liner at the
-        # front and the full dump at the back cannot describe different sets of runs.
+        # Read once, so the summary page and the appendix describe the same runs.
         records = _run_records(run_dirs)
 
         _title_page(doc, heading, records)

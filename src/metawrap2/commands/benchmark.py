@@ -1,20 +1,18 @@
-"""`metawrap2 benchmark list|fetch|run|score` - measure the choices instead of arguing about them.
+"""`metawrap2 benchmark list|fetch|run|score`: benchmark MetaWrap2's options on known-truth data.
 
-MetaWrap2's defaults are supposed to be chosen on measured quality, with cost reported beside it
-rather than divided into it. This command is what makes
-that claim checkable by someone other than the person who made it: the datasets are declared as
-data, the comparisons are declared as data, and the results land in a committed TSV so a changed
-default arrives in review next to the numbers that justify it.
+Defaults are chosen on measured quality, with cost reported alongside. Datasets and comparisons
+are declared as data, and results go to a committed TSV so a changed default is reviewed with its
+numbers.
 
-Four verbs, in the order they are used:
+Subcommands, in order of use:
 
-- ``list``   what datasets and comparisons exist, and what a fetch would weigh.
-- ``fetch``  download one dataset, checksum-verified, inside the ``[limits]`` disk ceiling.
+- ``list``   declared datasets and comparisons, and the download size of each dataset.
+- ``fetch``  download one dataset, checksum-verified, within the ``[limits]`` disk ceiling.
 - ``run``    run one comparison's variants over one dataset under one budget, recording cost.
-- ``score``  read the tools' output into the tidy TSV, and rank the variants with their cost beside.
+- ``score``  read the tools' output into the TSV and rank the variants, with cost alongside.
 
-``fetch`` never runs implicitly. ``run`` on a dataset that is not present says how to fetch it and
-stops; it does not helpfully start a 95 GB download because someone typed a dataset name.
+``fetch`` never runs implicitly. ``run`` on a missing dataset prints how to fetch it and stops
+(a dataset can be 95 GB).
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ import json
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .. import checkm as _checkm
 from .. import command as _command
 from .. import gunc as _gunc
 from .. import limits as _limits
@@ -38,37 +37,43 @@ from ..constants import is_refined_bins_dirname
 
 
 def default_results(dataset_name: str) -> str:
-    """Where a dataset's results land by default. Committed, so a regression is a diff.
+    """Default results file for a dataset. It is committed, so a regression shows as a diff.
 
-    Anchored to the registry - and therefore to the checkout - rather than to the current directory.
-    This was ``os.path.join("benchmarks", "results")``, a relative path, so scoring a comparison from
-    anywhere but the repository root silently wrote a *second* results file under wherever that happened
-    to be, reported success, and left the committed one untouched. The numbers were real and had to be
-    merged back in by hand; the run that produced them looked completely normal.
+    Relative to the registry (the checkout), not the current directory. A relative path wrote a
+    second results file when scoring was run outside the repository root.
     """
     return os.path.join(_registry.registry_dir(), "results", "%s.tsv" % dataset_name)
 
 
 def _dry_run() -> bool:
-    """Is the global ``--dry-run`` in effect?
+    """True if the global ``--dry-run`` is in effect.
 
-    Read from the shared runner rather than from an option of this command's own. ``--dry-run`` is
-    a global flag that ``metawrap2``'s dispatcher strips before the subcommand's parser ever sees
-    it, so a local ``--dry-run`` here would be unreachable - and, worse, would default to False
-    and run for real while the user believed they had asked for a plan.
+    Read from the shared runner: the dispatcher strips ``--dry-run`` before this parser sees it, so
+    a local option would always be False.
     """
     return bool(_command.runner.dry_run)
 
 
 def _budget(args) -> _limits.Budget:
-    """The budget for this run: the config's ``[limits]``, with the global ``--max-*`` flags applied.
+    """The budget for this run: the config's ``[limits]`` with the global ``--max-*`` flags.
 
-    Resolved once here and handed down, rather than re-resolved per variant, so every variant of a
-    comparison is measured against the same grant. Two variants given different grants are not a
-    comparison.
+    Resolved once so every variant of a comparison runs under the same budget.
     """
     settings = load_settings(getattr(args, "config", None))
     return _limits.resolve(settings.limits)
+
+
+def _variant_detail(variant) -> str:
+    """What to show after an arm's name in ``benchmark list``.
+
+    A native arm shows its flags. An external arm has no flags, so it shows its version and the
+    env it runs in.
+    """
+    if not variant.is_external:
+        return " ".join(variant.args)
+    external = variant.external
+    version = external.version or "version from `%s`" % external.version_command
+    return "external: %s in env %s" % (version, external.env)
 
 
 def _list(args) -> int:
@@ -91,7 +96,7 @@ def _list(args) -> int:
         print("  %-24s %-16s %s" % (comparison.name, comparison.module, comparison.question or ""))
         for variant in comparison.variants:
             mark = " <- current default" if variant.default else ""
-            print("      %-30s %s%s" % (variant.name, " ".join(variant.args), mark))
+            print("      %-30s %s%s" % (variant.name, _variant_detail(variant), mark))
         if incumbent is None:
             print("      (no variant marked default; nothing to compare against)")
     print(
@@ -120,17 +125,13 @@ def _fetch_cmd(args) -> int:
 
     dry_run = _dry_run()
     if not ok:
-        # Answered before the confirmation is asked for: there is no point confirming a download
-        # that cannot land.
+        # Checked before asking for confirmation.
         print(
-            "\nRefusing to start: this would cross the [limits] disk ceiling.\n"
-            "Choose a --dest on another filesystem, or raise max_disk_fraction if you know the\n"
-            "rest of the machine can spare it."
+            "\nNot started: the download would exceed the [limits] disk ceiling.\n"
+            "Choose a --dest on another filesystem, or raise max_disk_fraction under [limits]."
         )
         return 1
-    # A benchmark dataset is ~95 GB from a public host. The size is printed and confirmed rather
-    # than assumed acceptable, because "I typed the dataset name" is not the same as "I meant to
-    # spend an afternoon and a hundred gigabytes".
+    # A dataset is ~95 GB, so the download needs --yes.
     if not args.yes and not dry_run:
         print(
             "\nThis will download %s to %s.\nRe-run with --yes to start it, or --dry-run to see "
@@ -194,8 +195,7 @@ def _run(args) -> int:
 def _record_field(work_dir: str, comparison: str, field: str):
     """One field out of a run's record, or None when there is no readable record.
 
-    Scoring has to work on a run someone else launched, possibly before a field existed, so a
-    missing record or a missing key is an absence to fall back from rather than an error.
+    Records from older runs may lack a field, so a missing record or key returns None.
     """
     path = os.path.join(work_dir, "%s.run.json" % comparison)
     try:
@@ -208,9 +208,8 @@ def _record_field(work_dir: str, comparison: str, field: str):
 def _say_sample_scope(work_dir: str, comparison: str) -> None:
     """Print which samples the run covered, if its record is still there.
 
-    A cohort module's rows carry no sample label, so the table cannot show on its own whether a
-    number came from three samples or ten - and `--max-samples` makes that a real possibility
-    rather than a hypothetical one. Missing record, no claim: an older run predates this.
+    Cohort module rows have no sample label, and `--max-samples` can limit the samples used, so the
+    count is printed here. Prints nothing if there is no record.
     """
     path = os.path.join(work_dir, "%s.run.json" % comparison)
     try:
@@ -222,6 +221,25 @@ def _say_sample_scope(work_dir: str, comparison: str) -> None:
         print("\n  Samples measured: %d  (%s)" % (len(samples), ", ".join(samples)))
 
 
+def _say_external_arms(work_dir: str, comparison: str) -> None:
+    """Print which arms were foreign pipelines, and which version of each ran.
+
+    Read from the run record, which holds the version that ran; the registry only says what would
+    run.
+    """
+    arms = _record_field(work_dir, comparison, "variants") or {}
+    external = {
+        name: record.get("external_version") or "an unrecorded version"
+        for name, record in arms.items()
+        if record.get("external")
+    }
+    if not external:
+        return
+    print("\n  External arm(s) - not MetaWrap2:")
+    for name, version in sorted(external.items()):
+        print("    %-28s %s" % (name, version))
+
+
 def _score(args) -> int:
     dataset = _registry.get_dataset(args.dataset)
     comparison = _registry.get_comparison(args.comparison)
@@ -230,35 +248,28 @@ def _score(args) -> int:
 
     metrics_wanted = args.metric or list(comparison.metrics)
     budget = _budget(args)
-    # The run record names the data the run actually used, so scoring finds the same gold standard
-    # without being told twice. --data overrides it, and covers records written before it was kept.
+    # Use the data directory from the run record; --data overrides it and covers older records.
     data_dir = (
         args.data
         or _record_field(work_dir, comparison.name, "data_dir")
         or os.path.join("benchmarks", "data", dataset.name)
     )
-    # The contigs the binners were given, for the sequence lengths AMBER weights its metrics by.
-    # Taken from the record rather than from the dataset, because --assembly means the dataset's
-    # gold assembly is not always what ran; it is only the fallback for records written without it.
+    # Contigs the binners were given, for AMBER's sequence lengths. Taken from the record because
+    # `run --assembly` may have replaced the gold assembly, which is the fallback.
     assembly = args.assembly or _record_field(work_dir, comparison.name, "assembly")
     if not assembly or not os.path.isfile(assembly):
         assembly = _runner.gold_path(dataset, "assembly", data_dir)
 
-    # Built once, from the dataset rather than from any run, and only when something asks for it:
-    # it reads every sample's read mapping, which is minutes of gunzip nobody should pay for
-    # scoring a binner. All variants then score against the same object, which is the point - three
-    # quantifiers measured against two truths would compare the truths.
+    # Built once from the dataset, and only for abundance metrics, since it decompresses every
+    # sample's read mapping (minutes). All variants are scored against the same truth.
     abundance_truth = None
     if any(m.startswith("abundance_") for m in metrics_wanted):
         abundance_truth = _abundance_truth(
             dataset, comparison, work_dir, data_dir=data_dir, assembly=assembly
         )
 
-    # Which variants exited non-zero, as the runner recorded them. The runner already discards a
-    # failed variant's cost rows; scoring read the record for data_dir and assembly but not for
-    # this, so a variant that crashed after its first binner wrote a directory had those partial
-    # bins scored, ranked, and written to the committed TSV - indistinguishable in the table from
-    # an arm whose cost measurement was merely lost.
+    # Variants that exited non-zero, from the run record. Their output is partial, so they are
+    # skipped unless --score-failed; otherwise partial bins were scored and ranked.
     failed = {
         name: record.get("returncode")
         for name, record in (_record_field(work_dir, comparison.name, "variants") or {}).items()
@@ -284,7 +295,7 @@ def _score(args) -> int:
             data_dir=data_dir,
             assembly=assembly,
             reassess=bool(getattr(args, "reassess", False)),
-            checkm2=bool(getattr(args, "checkm2", False)),
+            checkm2=bool(getattr(args, "checkm2", True)),
         )
         found = _collect_scores(
             dataset.name,
@@ -294,6 +305,7 @@ def _score(args) -> int:
             per_sample=comparison.module in _runner.PER_SAMPLE_MODULES,
             ranked_bin_set=_ranked_bin_set(bin_sets),
             abundance_truth=abundance_truth,
+            scorer="checkm2" if getattr(args, "checkm2", True) else "checkm1",
         )
         if found:
             print("  %-30s %d metric(s)" % (variant.name, len(found)))
@@ -308,7 +320,7 @@ def _score(args) -> int:
 
     if skipped:
         print(
-            "\n  Not scored - %d variant(s) whose run failed, so their output is partial:"
+            "\n  Not scored: %d variant(s) whose run failed, so their output is partial:"
             % len(skipped)
         )
         for name, rc in skipped:
@@ -317,15 +329,15 @@ def _score(args) -> int:
 
     if unranked:
         print(
-            "\n  Not ranked - %d variant(s) left several raw bin sets and no consolidated one:"
+            "\n  Not ranked: %d variant(s) left several raw bin sets and no consolidated one:"
             % len(unranked)
         )
         for name, labels in unranked:
             print("    %-28s %s" % (name, ", ".join(labels)))
         print(
-            "  Their numbers are recorded per bin set (metric__<set>) but not summed into a\n"
-            "  ranking: the sets overlap, so adding them counts the same genome more than once.\n"
-            "  Consolidate them first - that is what bin_refinement is for - and score again."
+            "  Their numbers are recorded per bin set (metric__<set>) and not summed, because\n"
+            "  the sets overlap and a sum would count a genome more than once.\n"
+            "  Consolidate them with bin_refinement and score again."
         )
 
     if rows:
@@ -337,6 +349,7 @@ def _score(args) -> int:
         return 1
 
     _say_sample_scope(work_dir, comparison.name)
+    _say_external_arms(work_dir, comparison.name)
     all_rows = _scoring.read_tsv(path)
     defaults = [v.name for v in comparison.variants if v.default]
     metrics = metrics_wanted
@@ -370,20 +383,16 @@ def _abundance_truth(
 ) -> Optional[Dict[str, Dict[str, float]]]:
     """Build the expected fraction per bin per sample, or explain why it cannot be built.
 
-    Returning None rather than raising: a missing abundance truth means the abundance metrics go
-    unscored, and everything else in the comparison still scores. Refusing to print a CheckM number
-    because a read mapping is absent would be the wrong trade.
+    Returns None instead of raising, so the other metrics are still scored.
 
-    The bins come from the run record, not from the variants' own output directories. Every variant
-    quantified the *same* bins - that is what makes the comparison a comparison - and the bins are
-    the thing the truth is about, so reading them from one place keeps the three tables on one set of
-    row labels.
+    The bins come from the run record's ``bins_from``. Every variant quantified the same bins, so
+    the truth is built once on one set of bin labels.
     """
     bins_from = _record_field(work_dir, comparison.name, "bins_from")
     if not bins_from or not os.path.isdir(bins_from):
         print(
-            "  Abundance metrics not scored: the run record for %s names no --bins-from directory\n"
-            "  that still exists, and a quantifier's truth is a statement about specific bins."
+            "  Abundance metrics not scored: the run record for %s names no existing\n"
+            "  --bins-from directory, and the abundance truth is computed per bin."
             % comparison.name
         )
         return None
@@ -392,8 +401,8 @@ def _abundance_truth(
         assembly and os.path.isfile(assembly)
     ):
         print(
-            "  Abundance metrics not scored: need both the gold assembly and its contig-to-genome\n"
-            "  mapping to work out how much of each genome landed in each bin."
+            "  Abundance metrics not scored: this needs the gold assembly and its\n"
+            "  contig-to-genome mapping, to compute how much of each genome is in each bin."
         )
         return None
     try:
@@ -417,16 +426,14 @@ def _assess_variant(
     data_dir: str,
     assembly: Optional[str] = None,
     reassess: bool = False,
-    checkm2: bool = False,
+    checkm2: bool = True,
 ) -> List[str]:
     """Run whichever assessors *metrics* needs over the bin sets under *root*. Returns those sets.
 
-    Assessment happens here, at score time, rather than inside the measured run - see
-    :mod:`metawrap2.benchmark.assess` for why the cost column depends on that choice.
+    Assessment runs at score time, outside the measured run (see :mod:`metawrap2.benchmark.assess`).
 
-    Already-assessed sets are skipped, because scoring is the cheap half of a benchmark and is meant
-    to be re-runnable: re-reading a table to add a metric should not restart a CheckM run that took
-    an hour. ``--reassess`` forces the work again for when the bins themselves have changed.
+    Already-assessed sets are skipped so scoring can be re-run cheaply. ``--reassess`` forces a
+    rerun when the bins have changed.
     """
     bin_sets = _assess.bin_dirs(root)
     if not bin_sets:
@@ -439,13 +446,12 @@ def _assess_variant(
     gold = _runner.gold_path(dataset, "binning", data_dir)
     if gold is not None and not os.path.isfile(gold):
         gold = None
+    scorer = "checkm2" if checkm2 else "checkm1"
     outstanding = (
-        bin_sets if reassess else [p for p in bin_sets if not _already_assessed(p, metrics)]
+        bin_sets if reassess else [p for p in bin_sets if not _already_assessed(p, metrics, scorer)]
     )
-    # AMBER is asked about separately because its output is one table for the whole variant rather
-    # than one file per bin set, so no per-set check can speak for it. It used to be covered by the
-    # per-set check standing in for every assessor, which meant a variant whose sets already had
-    # CheckM tables never got AMBER run on them at all.
+    # AMBER writes one table per variant, not per bin set, so it is checked separately. Otherwise
+    # sets with CheckM tables never got AMBER run on them.
     amber_outstanding = _assess.needs_amber(metrics) and not os.path.isfile(
         os.path.join(root, "amber", _assess.AMBER_RESULTS)
     )
@@ -470,59 +476,50 @@ def _assess_variant(
     return bin_sets
 
 
-def _already_assessed(bin_set: str, metrics: Sequence[str]) -> bool:
-    """Has *bin_set* already got everything *metrics* asks of a per-set assessor?
+def _already_assessed(bin_set: str, metrics: Sequence[str], scorer: str = "checkm2") -> bool:
+    """True if *bin_set* has the output of every per-set assessor (CheckM, GUNC) *metrics* needs.
 
-    Per-set is the qualifier that matters: CheckM and GUNC write one file per bin set, so their
-    output is evidence about this set, while AMBER writes one table for the variant and is left to
-    :func:`metawrap2.benchmark.assess.assess_bins` to decide about. A set that has its CheckM table
-    but not its GUNC report is not assessed, which is the case this function existed in a simpler
-    form for and got wrong: GUNC was added as a second per-set assessor and every set that had been
-    through CheckM would have been skipped before GUNC ever ran.
+    AMBER writes one table per variant and is handled by the caller. A set with a CheckM table but
+    no GUNC report is not assessed, and neither is one whose table *scorer* (``checkm1`` or
+    ``checkm2``) did not write. A table with no scored bin counts for either scorer.
     """
     present = []
     if _assess.needs_checkm(metrics):
-        present.append(os.path.isfile(bin_set + _STATS_SUFFIX))
+        stats = bin_set + _STATS_SUFFIX
+        written_by = _checkm.stats_scorer(stats)
+        present.append(os.path.isfile(stats) and written_by in (None, scorer))
     if _assess.needs_gunc(metrics):
         present.append(_gunc.find_report(bin_set + _GUNC_SUFFIX) is not None)
-    # A set nothing per-set was asked of counts as done, which leaves the AMBER-only case to the
-    # caller rather than answering it wrongly here.
+    # With no per-set assessor requested the set counts as done; the AMBER-only case is the
+    # caller's.
     return all(present)
 
 
-#: The suffix MetaWrap2 gives its own normalised bin-quality table, kept as a local name so the
-#: filename rule below reads as one rule rather than a string literal repeated three times.
+#: Suffix of MetaWrap2's normalised bin-quality table.
 _STATS_SUFFIX = ".stats.tsv"
 
-#: The bin set a consolidating module writes is recognised by its shape - metawrap_70_10_bins, named
-#: for the thresholds it was cut at - not by one literal name. When it is present it is the variant's
-#: answer, because it is the set a user would actually carry forward. See
+#: A consolidated bin set is recognised by its name pattern (metawrap_70_10_bins, from the
+#: thresholds used). When present it is the variant's result. See
 #: :func:`metawrap2.constants.is_refined_bins_dirname`.
 
 
 def _ranked_bin_set(bin_sets: Sequence[str]) -> Optional[str]:
-    """Which of *bin_sets* holds the numbers that are the variant's own, if any.
+    """The bin set whose metrics are ranked as the variant's, or None.
 
-    A variant that ran three binners leaves three bin sets, and the three overlap: the same genome
-    is usually recovered by more than one of them. The ranker sums a metric across everything it
-    finds for a variant, so recording all three as the variant's numbers would count that genome
-    three times and report an F1 of 2.4 - a number with no meaning that nonetheless sorts first.
+    Bin sets from several binners overlap, and the ranker sums a metric over everything recorded
+    for a variant, so ranking them all would count shared genomes more than once (an F1 of 2.4, for
+    example). The ranked set is:
 
-    So exactly one set can carry the variant's ranked metrics:
-
-    - the consolidated set if the variant has one, since that is what a user keeps;
-    - otherwise the only set, when there is only one;
-    - otherwise none, and the caller says so rather than picking a winner arbitrarily. Three raw
-      bin sets are not yet an answer to "which binner set is better" - they become one after
-      consolidation, and until then the honest report is that the variant cannot be ranked.
+    - the consolidated set, if there is exactly one;
+    - otherwise the only set, if there is one;
+    - otherwise none, and the caller reports the variant as unranked.
     """
     labels = [os.path.basename(path) for path in bin_sets]
     consolidated = [label for label in labels if is_refined_bins_dirname(label)]
     if len(consolidated) == 1:
         return consolidated[0]
     if consolidated:
-        # Several, which is a run resumed at different thresholds. Ranking an arbitrary one is the
-        # thing this function exists to refuse, and it is not more defensible here than for raw sets.
+        # Several consolidated sets (a run resumed at different thresholds): do not pick one.
         return None
     if len(labels) == 1:
         return labels[0]
@@ -532,43 +529,35 @@ def _ranked_bin_set(bin_sets: Sequence[str]) -> Optional[str]:
 def _for_bin_set(metric: str, label: str, ranked: Optional[str]) -> str:
     """*metric* as recorded for the bin set *label*: plain if it is the ranked set, suffixed if not.
 
-    The suffix keeps a per-binner number in the TSV - it is genuinely interesting which binner found
-    what - while making certain it is never summed into a ranking, because a ranking is over metric
-    names and a suffixed name is a different metric.
+    The suffix keeps per-binner numbers in the TSV under a different metric name, so they are not
+    summed into the ranking.
     """
     if not label or (ranked is not None and label == ranked):
         return metric
     return "%s__%s" % (metric, label)
 
 
-#: Where bin_refinement puts GUNC's report on the set it hands back (see its ``work_files/gunc``).
-#: There is no bin set name in that path, and there does not need to be: the module runs GUNC once,
-#: on the set it returns, so the report found there is the variant's own figure.
+#: Where bin_refinement writes GUNC's report on its output set. The module runs GUNC once, on that
+#: set, so the report is the variant's own figure.
 _GUNC_FINAL_DIR = os.path.join("work_files", "gunc")
 
-#: What score time appends to a bin directory to hold its GUNC report, the way CheckM's goes to
-#: ``<bin set>.checkm``. Here the bin set *is* in the path, which is what makes several sets per
-#: variant tellable apart.
+#: Suffix of the directory that holds a bin set's score-time GUNC report (``<bin set>.gunc``, like
+#: ``<bin set>.checkm``).
 _GUNC_SUFFIX = ".gunc"
 
 
 def _gunc_bin_set(path: str, root: str, sample: str) -> str:
     """Which bin set the GUNC report at *path* describes, as a label for :func:`_for_bin_set`.
 
-    GUNC's filenames say which database and CSS level the report is for, never which bins, so unlike
-    CheckM and AMBER there is no label to read out of the report itself. The directory holding it is
-    the evidence, and there are two that mean something:
+    GUNC's file names do not identify the bins, so the label comes from the directory:
 
-    * ``<bin set>.gunc/``, written at score time beside the bins it describes, gives ``<bin set>`` -
-      the same label AMBER's rows carry, so the two tools' numbers line up on one set.
-    * ``work_files/gunc/``, written by bin_refinement, gives the empty label, which
-      :func:`_for_bin_set` reads as the variant's own figure. The module runs GUNC once and only on
-      the set it hands back, so there is nothing else it could describe.
+    * ``<bin set>.gunc/`` (score time) gives ``<bin set>``, the same label as AMBER's rows.
+    * ``work_files/gunc/`` (bin_refinement) gives the empty label, which :func:`_for_bin_set`
+      treats as the variant's own figure.
 
-    Anything else keeps its path as the label, which is a number recorded without being ranked. That
-    is the conservative end: a fraction is not summable, and two reports under one metric name would
-    be added together by the ranker, so two sets that each passed every bin would rank at 2.0 -
-    ahead of a variant that was perfect and only scored once.
+    Any other directory keeps its relative path as the label, so the number is recorded but not
+    ranked. The ranker sums values under one metric name, and two pass fractions of 1.0 would rank
+    as 2.0.
     """
     directory = os.path.dirname(path)
     if directory.endswith(_GUNC_SUFFIX):
@@ -580,11 +569,10 @@ def _gunc_bin_set(path: str, root: str, sample: str) -> str:
 
 
 def _has_sibling_stats(path: str) -> bool:
-    """Is there a normalised ``.stats.tsv`` describing the same bins as the native report at *path*?
+    """True if a normalised ``.stats.tsv`` exists for the same bins as the native report at *path*.
 
-    Both CheckMs write their own report under ``<bin set>.checkm/`` and MetaWrap2 writes the
-    normalised table next to it as ``<bin set>.stats.tsv``. Reading both would record every count
-    twice under two sources, and the ranker sums sources.
+    CheckM writes its report under ``<bin set>.checkm/`` and MetaWrap2 writes
+    ``<bin set>.stats.tsv`` beside it. Reading both would count every bin twice.
     """
     checkm_dir = path
     while checkm_dir and not checkm_dir.endswith(".checkm"):
@@ -604,32 +592,27 @@ def _collect_scores(
     per_sample: bool = False,
     ranked_bin_set: Optional[str] = None,
     abundance_truth: Optional[Dict[str, Dict[str, float]]] = None,
+    scorer: Optional[str] = None,
 ) -> List[_scoring.Row]:
-    """Read whatever scoring output a variant's directory happens to hold.
+    """Read the scoring output found in a variant's directory.
 
-    Discovery by filename rather than by configuration: CheckM2, GUNC and AMBER each write a file
-    with a stable name, and a benchmark that required the user to say where each one landed would
-    be one more thing to get wrong between a run and its score.
+    Files are found by their fixed names (CheckM, GUNC, AMBER and module outputs).
 
-    *per_sample* says the runner put one subdirectory per sample under *root*, so its name is the
-    sample label. It is passed in rather than guessed at, because a cohort module's subdirectories
-    are named after its own working files and labelling those as samples would invent samples that
-    do not exist.
+    *per_sample* means the runner made one subdirectory per sample under *root*, named after the
+    sample. Cohort modules' subdirectories are working files, not samples.
 
-    *ranked_bin_set* names the one bin set whose numbers are the variant's own (see
-    :func:`_ranked_bin_set`). Every other bin set's numbers are recorded under a suffixed metric
-    name so they are kept as detail without being summed into the ranking.
+    *ranked_bin_set* is the bin set whose numbers are the variant's own (see
+    :func:`_ranked_bin_set`). Other sets are recorded under suffixed metric names.
 
-    *abundance_truth* is the expected fraction per bin per sample, for a quantifier comparison. It
-    has to be passed in rather than discovered here because, unlike every other file below, it is not
-    written by the run: it is built from the dataset's own read mappings, once, and reused for every
-    variant so the three quantifiers are held to one truth.
+    *abundance_truth* is the expected fraction per bin per sample for a quantifier comparison. It
+    is built from the dataset's read mappings, not the run, and shared by all variants.
+
+    *scorer* (``checkm1`` or ``checkm2``) skips ``.stats.tsv`` tables the other CheckM wrote, such
+    as an old table left when re-scoring failed.
     """
     rows: List[_scoring.Row] = []
-    # read_qc's two mate files contribute to one number per sample, so they are summed here rather
-    # than recorded as two rows: collect_ratios keys a measurement on (dataset, comparison, variant,
-    # sample, metric) and deliberately not on the source file, so two rows collapsed to whichever
-    # mate was walked last and every read_qc figure was one mate's count. Keyed (sample, metric).
+    # read_qc's two mate files are summed into one value per (sample, metric). collect_ratios keys
+    # rows without the source file, so two rows would collapse to one mate's count.
     read_totals: Dict[Tuple[str, str], float] = {}
     read_sources: Dict[Tuple[str, str], List[str]] = {}
 
@@ -652,9 +635,10 @@ def _collect_scores(
         for name in sorted(names):
             path = os.path.join(base, name)
             if name.endswith(_STATS_SUFFIX):
-                # MetaWrap2's own normalised table, written by either CheckM. Preferred over the
-                # tool's native report below so one CheckM run contributes one set of rows: CheckM2
-                # writes both, and reading both would double every count.
+                # MetaWrap2's normalised table from either CheckM. Preferred over the native report
+                # below so each CheckM run is counted once.
+                if scorer and _checkm.stats_scorer(path) not in (None, scorer):
+                    continue
                 label = name[: -len(_STATS_SUFFIX)]
                 counts = _scoring.quality_counts(_scoring.bin_quality(path))
                 for metric, count in sorted(counts.items()):
@@ -676,17 +660,14 @@ def _collect_scores(
                         sample,
                     )
             elif name == "results.tsv":
-                # One AMBER run can hold several bin sets, tagged with the label they were submitted
-                # under, so they are read per set rather than folded together.
+                # One AMBER table can hold several bin sets; read them per label.
                 by_tool = _scoring.amber_metrics_by_tool(path)
                 for label, metrics in sorted(by_tool.items()):
                     for metric, score in sorted(metrics.items()):
                         add(_for_bin_set(metric, label, ranked_bin_set), score, name, sample)
             elif name == "bin_abundance_table.tsv" and abundance_truth:
-                # The one metric here that is not read off the run's own output: the table says what
-                # the quantifier thought, and only the dataset's read mappings say what was true.
-                # Scored whole rather than per sample - a correlation across two bins is noise, so
-                # the module averages the samples itself.
+                # Scored against the truth built from the dataset's read mappings. The scorer
+                # averages over samples itself, so the whole table is scored at once.
                 try:
                     scored = _abundance.score(path, abundance_truth)
                 except _abundance.AbundanceError as exc:
@@ -700,8 +681,7 @@ def _collect_scores(
             elif name.startswith("final_pure_reads_") and name.endswith(
                 (".fastq", ".fq", ".fastq.gz", ".fq.gz")
             ):
-                # read_qc's product, one file per mate. Accumulated and emitted once below, so a
-                # sample's reads_kept is both mates rather than whichever file was walked last.
+                # read_qc output, one file per mate. Summed and emitted once below.
                 for metric, stat in sorted(_scoring.read_stats(path).items()):
                     key = (sample, metric)
                     read_totals[key] = read_totals.get(key, 0.0) + float(stat)
@@ -750,8 +730,7 @@ def main(argv: List[str]) -> int:
     p_run.add_argument(
         "--data", help="where the dataset was fetched (default benchmarks/data/<ds>)"
     )
-    # --work is a synonym because `score` names the same directory that way, and a flag that only
-    # works on one of two commands you type in sequence is a papercut with no upside.
+    # --work is accepted because `score` uses that name for the same directory.
     p_run.add_argument(
         "-o", "--output", "--work", help="working directory (default benchmarks/work/<dataset>)"
     )
@@ -769,7 +748,7 @@ def main(argv: List[str]) -> int:
         "--max-samples",
         type=int,
         metavar="N",
-        help="use only the first N samples - for comparisons too expensive over the whole dataset",
+        help="use only the first N samples, for comparisons too expensive to run on every sample",
     )
     p_run.add_argument(
         "--assembly",
@@ -799,18 +778,26 @@ def main(argv: List[str]) -> int:
         action="store_true",
         help="re-run CheckM/AMBER on bins that already have results, for when the bins changed",
     )
-    p_score.add_argument(
-        "--checkm2",
-        action="store_true",
-        help="score bin quality with CheckM2 instead of CheckM1 (needs `metawrap2 install-env "
-        "checkm2`). CheckM1's pplacer stage wants roughly 40 GB per thread; CheckM2 "
-        "predicts completeness from a neural net and needs a fraction of that",
+    scorer = p_score.add_mutually_exclusive_group()
+    scorer.add_argument(
+        "--checkm1",
+        dest="checkm2",
+        action="store_false",
+        help="deprecated: score bin quality with CheckM1 on its full genome tree instead of "
+        "CheckM2 (about 40 GB of RAM per pplacer thread; needs `metawrap2 install-db checkm`)",
     )
+    scorer.add_argument(
+        "--checkm2",
+        dest="checkm2",
+        action="store_true",
+        help="score bin quality with CheckM2 (the default)",
+    )
+    p_score.set_defaults(checkm2=True)
     p_score.add_argument(
         "--score-failed",
         action="store_true",
-        help="score variants whose run exited non-zero too. Their output is partial, so the number "
-        "is not comparable with an arm that finished; skipped by default",
+        help="also score variants whose run exited non-zero (default: skip them). Their output is "
+        "partial, so the scores are not comparable with finished variants",
     )
     p_score.add_argument("--results", help="results TSV to read and append to")
     p_score.add_argument(
@@ -821,8 +808,8 @@ def main(argv: List[str]) -> int:
     p_score.add_argument(
         "--cost-metric",
         default="cpu_hours",
-        help="the denominator of the ratio (default cpu_hours, which is what MetaWrap2 picks "
-        "defaults on; wall_seconds rewards a tool for being given more cores)",
+        help="cost metric shown beside each ranked metric (default cpu_hours, which MetaWrap2 "
+        "uses when choosing defaults; wall_seconds favours runs given more cores)",
     )
 
     args = ap.parse_args(argv)

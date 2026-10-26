@@ -1,30 +1,20 @@
 """Protein domains from Pfam, for the genes KEGG cannot place.
 
-On real CAMI2 bins, 41% of called genes take a curated KEGG ortholog. The rest are not junk - they
-are genes whose function is known at the domain level and not at the pathway level, and a functional
-report that drops them says less about the organism than it could. Pfam is the answer to "what kind
-of protein is this" where KEGG's answer is "which reaction does it catalyse", and the two are
-complementary rather than competing.
+On CAMI2 bins, 41% of called genes get a curated KEGG ortholog. Many of the rest have a function
+known at the domain level but not the pathway level. Pfam describes what kind of protein a gene
+encodes; KEGG describes which reaction it catalyses.
 
-**Pfam's own cutoffs, not an e-value.** Every Pfam family ships a gathering threshold (GA), curated
-per family, and a hit above GA is what Pfam means by a match - the same arrangement KOfam has and the
-same reason to honour it: an e-value threshold that is right for a long, well-conserved family is
-wrong for a short one, and a single cutoff across 21,000 families gets most of them wrong in one
-direction or the other. PyHMMER applies GA directly through its `bit_cutoffs="gathering"` mode, so
-this module does not reimplement the comparison, and :data:`CUTOFF_MODE` is the one place that
-choice is stated.
+**Cutoffs are Pfam's gathering thresholds (GA).** Each family has a curated GA, and a hit above it
+is what Pfam defines as a match. A single e-value cutoff across 21,000 families would be too
+strict for some and too loose for others. PyHMMER applies GA through
+`bit_cutoffs="gathering"`; :data:`CUTOFF_MODE` records the choice.
 
-**Domains, not proteins.** A protein can carry several domains and the same domain twice, so a
-Pfam result is a list of *regions* rather than a label. :class:`DomainHit` keeps the coordinates and
-:func:`architecture` renders the ordered list, because "ABC transporter + periplasmic binding" is a
-different protein from either domain alone, and a report that kept only the best hit per gene would
-flatten that.
+**Results are domains, not proteins.** A protein can carry several domains, or the same domain
+twice. :class:`DomainHit` keeps the coordinates and :func:`architecture` renders the ordered list.
 
-Why not InterProScan, which is the usual tool here: it is a Java wrapper around a dozen member
-databases, its bioconda build is four years old, and its data is about 50 GB. Pfam is the member
-database most of its users want, PyHMMER is already how this package searches HMMs, and 399 MB of
-Pfam-A costs an afternoon rather than a filesystem. The other member databases are a real gap and
-are named as one in the plan rather than papered over here.
+InterProScan is not used: it is a Java wrapper around a dozen member databases, its bioconda
+build is four years old, and its data is about 50 GB. Pfam-A is 399 MB and is searched with
+PyHMMER, which this package already uses. The other member databases are not covered.
 """
 
 from __future__ import annotations
@@ -34,19 +24,17 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-#: How the bit-score cutoff is chosen. Pfam's gathering threshold is curated per family and is what
-#: Pfam means by a match; `--cut_ga` is HMMER's name for it and `bit_cutoffs="gathering"` is
-#: PyHMMER's. Recorded as a constant because it is the method rather than a tuning parameter.
+#: How the bit-score cutoff is chosen: Pfam's per-family gathering threshold (HMMER `--cut_ga`,
+#: PyHMMER `bit_cutoffs="gathering"`).
 CUTOFF_MODE = "gathering"
 
-#: Fallback when a profile carries no gathering threshold. Pfam-A's profiles all do, so this is for
-#: a custom or truncated HMM file; it is reported per hit so a GA-less call is never mistaken for a
-#: curated one.
+#: Fallback when a profile has no gathering threshold. All Pfam-A profiles have one, so this is for
+#: custom or truncated HMM files; each such hit is flagged (``curated_cutoff=False``).
 FALLBACK_MAX_EVALUE = 1e-5
 
-#: Pfam accessions look like PF00001.23 - family then version. The version is kept in the output
-#: because a domain call is only reproducible against the release that made it, and stripped for
-#: joins, where a version mismatch would silently lose rows.
+#: Pfam accessions look like PF00001.23 (family, then version). The version is kept in the output,
+#: since families change between releases, and stripped for joins, so a version mismatch does not
+#: drop rows.
 _ACCESSION = re.compile(r"^(PF\d{5})(?:\.(\d+))?$")
 
 
@@ -57,8 +45,8 @@ class DomainHit:
     gene: str
     accession: str
     name: str
-    #: Envelope coordinates on the protein, 1-based inclusive - the region HMMER believes the
-    #: domain occupies, which is wider and more honest than the alignment coordinates.
+    #: Envelope coordinates on the protein, 1-based inclusive: the region HMMER assigns to the
+    #: domain, wider than the alignment coordinates.
     start: int
     end: int
     bit_score: float
@@ -78,11 +66,10 @@ class DomainHit:
 
 
 def _as_text(value) -> str:
-    """pyhmmer returns names as bytes in some versions and str in others; normalise once.
+    """Return pyhmmer names as str; some pyhmmer versions return bytes.
 
-    The same helper kofam.py has, for the same reason. Duplicated deliberately rather than shared:
-    one of these two modules changing its pyhmmer version should not be able to move the other's
-    behaviour.
+    kofam.py has the same helper. It is duplicated so that a pyhmmer change in one module cannot
+    affect the other.
     """
     if value is None:
         return ""
@@ -97,9 +84,7 @@ def _hits_from_hmmer(
     """Turn PyHMMER's TopHits into domain hits. Separated so the parsing can be tested alone."""
     for top in hmmer_hits:
         # `top.query`, not `top.query_name`: pyhmmer 0.11 replaced the flat attributes with the
-        # query object, and the older spelling raises AttributeError - which is how this failed the
-        # first time it was run against a real profile set, caught per genome so one failure did
-        # not cost the others.
+        # query object, and the older name raises AttributeError.
         query = _as_text(getattr(top.query, "name", None))
         accession = _as_text(getattr(top.query, "accession", None)) or query
         for hit in top:
@@ -125,18 +110,18 @@ def search(
 ) -> List[DomainHit]:
     """Search *proteins* against Pfam-A, honouring each family's gathering threshold.
 
-    *proteins* is (gene id, sequence). Returns every included domain, not one hit per gene: a
-    protein carrying two domains is two rows, which is what makes an architecture recoverable.
+    *proteins* is (gene id, sequence). Returns every included domain, so a protein with two
+    domains gives two rows.
 
-    The gathering thresholds come from the HMM file itself, so nothing here has to ship a table of
-    them - and a profile without one falls back to an e-value and says so in the row.
+    The gathering thresholds are read from the HMM file. A profile without one falls back to an
+    e-value cutoff, flagged in the row.
     """
     import pyhmmer
 
     alphabet = pyhmmer.easel.Alphabet.amino()
-    # Typed loosely for the reason kofam.py documents: pyhmmer's stubs type hmmsearch's sequence
-    # argument invariantly in its alphabet, so an amino-acid block does not satisfy
-    # Iterable[DigitalSequence[Alphabet]] even though that is exactly what it wants.
+    # Typed loosely, as in kofam.py: pyhmmer's stubs type hmmsearch's sequence argument
+    # invariantly in its alphabet, so an amino-acid block does not satisfy
+    # Iterable[DigitalSequence[Alphabet]].
     sequences: Any = [
         pyhmmer.easel.TextSequence(name=gene.encode(), sequence=sequence).digitize(alphabet)
         for gene, sequence in proteins
@@ -150,8 +135,8 @@ def search(
             accession = _as_text(hmm.accession or hmm.name)
             curated[accession] = hmm.cutoffs.gathering_available()
             profiles.append(hmm)
-        # One pass over the profile set with every sequence, which is how PyHMMER wants it and is
-        # also the only way the gathering thresholds can come from the profiles themselves.
+        # One pass over the profile set with all sequences, which lets the gathering thresholds
+        # come from the profiles.
         results = pyhmmer.hmmsearch(
             profiles,
             sequences,
@@ -165,9 +150,7 @@ def search(
 def architecture(hits: Sequence[DomainHit]) -> str:
     """One protein's domains in the order they appear, as `A + B + A`.
 
-    Ordered and repeated rather than a set: "ABC transporter + periplasmic binding protein" is a
-    different protein from either domain alone, and two copies of a domain is a different protein
-    from one.
+    Ordered and with repeats, since the order and count of domains distinguish proteins.
     """
     return " + ".join(hit.name for hit in sorted(hits, key=lambda hit: hit.start))
 
@@ -179,7 +162,7 @@ class Coverage:
     genes: int
     genes_with_a_domain: int
     domains: int
-    #: Genes with a Pfam domain and no KEGG ortholog - the gap this module exists to fill.
+    #: Genes with a Pfam domain and no KEGG ortholog.
     genes_rescued: Optional[int] = None
 
     @property
@@ -198,9 +181,7 @@ def coverage(
 ) -> Coverage:
     """Count what Pfam placed, and how much of it KEGG had not.
 
-    The second number is the one worth reporting: Pfam annotating 70% of genes is interesting only
-    beside the share KEGG already had, because the overlap is large and the increment is what the
-    extra search bought.
+    The increment over KEGG is the useful figure, because the two sets overlap heavily.
     """
     annotated = {hit.gene for hit in hits}
     rescued = None
@@ -234,8 +215,7 @@ def domain_row(hit: DomainHit, genome: str) -> Dict[str, str]:
     return {
         "genome": genome,
         "gene": hit.gene,
-        # Versioned accession and bare family side by side: the first dates the call, the second
-        # joins across releases.
+        # Versioned accession for the release, bare family for joins across releases.
         "pfam_accession": hit.accession,
         "pfam_family": hit.family,
         "domain_name": hit.name,
@@ -273,27 +253,23 @@ def architecture_rows(hits: Sequence[DomainHit], genome: str) -> List[Dict[str, 
     ]
 
 
-#: What Pfam calls its release notes, and the only file this reads.
+#: Name of Pfam's release notes file, the only file read for the version.
 NOTES_NAME = "relnotes.txt"
 
-#: A notes file is a couple of kilobytes; Pfam-A.hmm is 2.2 GB. Anything above this ceiling is not
-#: release notes however it is named, and scanning it to the last line for a `RELEASE n` that is
-#: not in it is minutes of IO to print "unknown" - which is what `annotate --pfam` did on every
-#: run, because the configured PFAM_DB *is* the HMM file.
+#: Size limit for the notes file. Release notes are a few KB; Pfam-A.hmm is 2.2 GB. Larger files are
+#: not scanned, because the configured PFAM_DB is usually the HMM file and scanning it took minutes.
 NOTES_MAX_BYTES = 1 << 20
 
 
 def release_from_notes(path: str) -> str:
     """The Pfam release from its own `relnotes.txt`, or "unknown".
 
-    Read rather than taken from a directory name: a domain call is only reproducible against the
-    release that made it, and Pfam's families are renumbered between releases.
+    Read from the notes, not the directory name, because Pfam renumbers families between
+    releases.
 
-    *path* may be the notes file, the directory holding it, or - the shape the tool actually
-    passes - a sibling file in that directory. ``install-db pfam`` downloads relnotes.txt for this
-    one purpose and then records ``<dir>/Pfam-A.hmm`` in the config (``key_file="Pfam-A.hmm"``),
-    so the only caller that matters arrived here with a file that is not the notes, and every
-    `annotate --pfam` run printed "Pfam release unknown" beside a directory that said 38.2.
+    *path* may be the notes file, the directory holding it, or a sibling file in that directory.
+    The last is the usual case: ``install-db pfam`` downloads relnotes.txt and records
+    ``<dir>/Pfam-A.hmm`` in the config (``key_file="Pfam-A.hmm"``).
     """
     candidate = path
     if os.path.isdir(candidate):
@@ -317,14 +293,14 @@ def release_from_notes(path: str) -> str:
 
 #: Printed with every Pfam result.
 DOMAIN_CAVEAT = (
-    "a Pfam domain says what kind of protein this is, not what reaction it catalyses: a gene with "
-    "a kinase domain and no KEGG ortholog is a kinase of unknown pathway, which is more than "
-    "nothing and less than a function. Hits are called at each family's own gathering threshold, "
-    "which is what Pfam means by a match"
+    "a Pfam domain gives the protein type, not the reaction it catalyses: a gene with "
+    "a kinase domain and no KEGG ortholog is a kinase of unknown pathway. Hits are called at "
+    "each family's own gathering threshold, "
+    "Pfam's definition of a match"
 )
 
 #: Printed when Pfam is reported beside KEGG.
 INCREMENT_CAVEAT = (
-    "the number to read is not how many genes Pfam placed but how many it placed that KEGG had "
-    "not: the overlap between the two is large, and the increment is what the extra search bought"
+    "the useful number is how many genes Pfam annotated that KEGG did "
+    "not; the two overlap heavily, so the total Pfam count overstates what the search adds"
 )

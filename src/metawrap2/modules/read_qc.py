@@ -3,11 +3,10 @@
 Comprehensive QC of raw paired-end reads in preparation for assembly and downstream work:
 optional FastQC report of the input, quality/adapter trimming with Trim Galore, removal of
 host sequences with bmtagger, and an optional FastQC report of the cleaned reads. Gzipped
-inputs are accepted and transparently decompressed into the output folder first.
+inputs are accepted and decompressed into the output folder first.
 
-This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
-block below, and the tunable numbers/defaults in the CONSTANTS block. Change a flag there
-and it takes effect — no need to follow the orchestration logic underneath.
+The commands each tool runs are in the COMMANDS block below, and the tunable numbers and
+defaults in the CONSTANTS block.
 
 Author: Gherman Uritskiy.
 """
@@ -55,26 +54,21 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["read_qc"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# --outdir, not -o: FastQC 0.13.0 rewrote this CLI in argparse and dropped the short spelling, so a
-# fresh env solve (the pin below had no upper bound) killed the very first step of the pipeline with
-# `fastqc: error: unrecognized arguments: -o .../pre-QC_report`. 0.12.x accepts --outdir too, so one
-# spelling works on both. The other three flags here are not at risk: argparse reports every
-# unrecognised argument in a single message, and 0.13.0's message named only -o, so -q, -t and
-# -f fastq were all accepted by it.
+# --outdir, not -o: FastQC 0.13.0 moved to argparse and dropped -o, failing with
+# `fastqc: error: unrecognized arguments: -o ...`. 0.12.x also accepts --outdir. 0.13.0 accepts
+# -q, -t and -f fastq (its error named only -o).
 FASTQC = "fastqc -q -t {threads} --outdir {outdir} -f fastq {files}"
-# The trimming report is no longer suppressed with --no_report_file. It is the only place Trim
-# Galore's retention numbers exist - without it this path cannot say how many pairs it kept, and
-# saying nothing about a large loss is the defect _report_retention exists to fix.
+# No --no_report_file: the trimming report is the only source of Trim Galore's retention numbers,
+# which _report_retention reads.
 TRIM_GALORE = "trim_galore --paired -j {trim_threads} -o {outdir} {r1} {r2}"
 TRIM_GALORE_SINGLE = "trim_galore -j {trim_threads} -o {outdir} {reads}"
 FASTP = "fastp -i {r1} -I {r2} -o {o1} -O {o2} -w {trim_threads} -j {json} -h {html}"
 FASTP_SINGLE = "fastp -i {reads} -o {o1} -w {trim_threads} -j {json} -h {html}"
-# Appended to either fastp command by --fastp-quality-trim, and only by it. fastp's defaults do no
-# quality trimming whatsoever: they *filter* a read when more than 40% of its bases fall below Q15
-# and keep the rest at full length. These three flags make it trim the bad ends instead, which is
-# what trim-galore does. This is opt-in and must stay opt-in - moving the shipped default takes a
-# committed measurement on a benchmark dataset, and the only data where the two behaviours diverge
-# is low-quality data that the current benchmark set does not contain.
+# Appended to either fastp command only by --fastp-quality-trim. fastp's defaults do no quality
+# trimming: they discard a read when more than 40% of its bases are below Q15 and keep the rest at
+# full length. These flags trim low-quality ends instead, as trim-galore does. Opt-in: changing the
+# default needs a benchmark measurement, and the current benchmark set has no low-quality data where
+# the two behaviours differ.
 FASTP_QUALITY_TRIM = "--cut_front --cut_tail --cut_mean_quality 20"
 BMTAGGER = "bmtagger.sh -b {bitmask} -x {srprism} -T {tmpdir} -q1" " -1 {r1} -2 {r2} -o {listfile}"
 BMTAGGER_SINGLE = (
@@ -82,33 +76,25 @@ BMTAGGER_SINGLE = (
 )
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_HOST = "hg38"  # prefix of the host index inside the bmtagger database folder
-# trim_galore's own docs warn that -j above 4 gives no further speedup (cutadapt scaling),
-# and it spawns ~4 processes per core, so we cap it rather than passing -t straight through.
+# trim_galore's docs say -j above 4 gives no further speedup (cutadapt scaling), and it spawns
+# ~4 processes per core, so -t is capped.
 TRIM_GALORE_MAX_THREADS = 4
-# fastp is single-pass and threads properly, but its own docs put the useful ceiling at 16 -
-# beyond that it is I/O bound and the extra workers just contend.
+# fastp's docs put the useful thread ceiling at 16; beyond that it is I/O bound.
 FASTP_MAX_THREADS = 16
-# FastQC's -t is files-processed-in-parallel, and it refuses anything above 4 out loud:
-# `[WARNING] You can't use more than 4 threads per file - setting this many is a waste`. On a
-# large host that warning was the only thing either FastQC step had to say, twice per run, so the
-# cap is applied here instead of passing -t straight through.
+# FastQC's -t is files processed in parallel, and above 4 it warns `[WARNING] You can't use more
+# than 4 threads per file - setting this many is a waste`, so -t is capped.
 FASTQC_MAX_THREADS = 4
-#: Warn when the trimmer keeps less than this share of the input pairs. 70% sits in the empty space
-#: between the two regimes rather than near either of them: on the CAMI2 GI benchmark (modern reads)
-#: both trimmers keep over 99% of pairs, while on the MetaHIT 2010-era 75 bp cohort fastp's defaults
-#: kept 41.5% (14,755,926 of 25,242,208 reads discarded whole, none shortened) where trim-galore
-#: kept 95%. So anything under 70% is not normal library variation, it is the
-#: filter-instead-of-trim divergence - which on that cohort made nonpareil ask for 20x more
-#: sequencing where the trimmed reads asked for 4.06x, a five-fold error in a budget number.
+#: Warn when the trimmer keeps less than this share of the input pairs. On the CAMI2 GI benchmark
+#: (modern reads) both trimmers keep over 99% of pairs. On the MetaHIT 2010-era 75 bp cohort fastp's
+#: defaults kept 41.5% (14,755,926 of 25,242,208 reads discarded whole, none shortened) and
+#: trim-galore kept 95%. Below 70% usually means fastp is discarding reads it could trim; on that
+#: cohort nonpareil then estimated 20x more sequencing, against 4.06x from the trimmed reads.
 LOW_RETENTION_WARN = 0.70
-#: Which trimmer runs by default. Measured, not assumed: `benchmark run cami2_gi trimmer` over the
-#: 10 CAMI2 GI samples (333M read pairs) put fastp ahead on both halves of the ratio at once - it
-#: kept marginally more of everything (+0.03% reads, +0.83% bases, +0.40% Q30 bases) for 5.8% fewer
-#: CPU-hours and 29% less wall time, because cutadapt stops scaling at 4 threads and fastp does not.
-#: The quality margins are small enough to call a tie, and cost is what breaks a tie. trim-galore
-#: remains fully supported via
-#: --trimmer trim-galore, and is the better choice if 1.3 GB of RSS is too much (it peaks at 0.1 GB).
-#: Re-measure with `metawrap2 benchmark score cami2_gi trimmer`.
+#: Default trimmer. `benchmark run cami2_gi trimmer` over the 10 CAMI2 GI samples (333M read pairs):
+#: fastp kept slightly more (+0.03% reads, +0.83% bases, +0.40% Q30 bases) with 5.8% fewer CPU-hours
+#: and 29% less wall time, since cutadapt stops scaling at 4 threads. The quality difference is
+#: negligible, so cost decided. --trimmer trim-galore is supported and peaks at 0.1 GB RSS against
+#: fastp's 1.3 GB. Re-measure with `metawrap2 benchmark score cami2_gi trimmer`.
 DEFAULT_TRIMMER = "fastp"
 TRIMMERS = ("trim-galore", "fastp")
 # ───────────────────────────────────────────────────────────────────────────────────────────
@@ -141,39 +127,38 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="prefix of host index in bmtagger database folder (default hg38)",
     )
     p.add_argument(
-        "--skip-bmtagger", action="store_true", help="dont remove host sequences with bmtagger"
+        "--skip-bmtagger", action="store_true", help="do not remove host sequences with bmtagger"
     )
     p.add_argument(
-        "--skip-trimming", action="store_true", help="dont trim sequences with trimgalore"
+        "--skip-trimming", action="store_true", help="do not trim sequences (skips the trimmer)"
     )
     p.add_argument(
         "--trimmer",
         choices=list(TRIMMERS),
         default=DEFAULT_TRIMMER,
-        help="which trimmer to use (default %s). fastp is single-pass and threads to %d, past the "
-        "%d-thread cutadapt ceiling trim-galore is stuck behind, and on CAMI2 it kept marginally "
-        "more bases for less CPU; both are fully supported."
+        help="which trimmer to use (default %s). fastp makes one pass and uses up to %d threads; "
+        "trim-galore is limited to %d threads by cutadapt. On CAMI2 fastp kept slightly more "
+        "bases for less CPU. Both are supported."
         % (DEFAULT_TRIMMER, FASTP_MAX_THREADS, TRIM_GALORE_MAX_THREADS),
     )
     p.add_argument(
         "--fastp-quality-trim",
         action="store_true",
         help="make fastp trim low-quality read ends (%s) instead of only discarding whole "
-        "low-quality reads. Worth setting on older or lower-quality libraries, where fastp's "
-        "defaults throw away most of the data; off by default on purpose, because moving the "
-        "shipped default needs a committed measurement on a benchmark dataset and the two "
-        "behaviours only diverge on low-quality reads the current benchmark set does not "
-        "contain. No effect with --trimmer trim-galore, which already trims." % FASTP_QUALITY_TRIM,
+        "low-quality reads. Use it on older or lower-quality libraries, where fastp's defaults "
+        "discard most of the data. Off by default, because the two behaviours differ only on "
+        "low-quality reads and the benchmark datasets contain none to measure the change on. "
+        "No effect with --trimmer trim-galore, which already trims." % FASTP_QUALITY_TRIM,
     )
     p.add_argument(
         "--skip-pre-qc-report",
         action="store_true",
-        help="dont make FastQC report of input sequences",
+        help="do not make a FastQC report of the input sequences",
     )
     p.add_argument(
         "--skip-post-qc-report",
         action="store_true",
-        help="dont make FastQC report of final sequences",
+        help="do not make a FastQC report of the final sequences",
     )
     layout = p.add_mutually_exclusive_group()
     layout.add_argument(
@@ -201,9 +186,8 @@ def _sample_name(reads_1: str) -> str:
 def _trim_stem(path: str) -> str:
     """The stem Trim Galore derives its output filename from: basename minus one extension.
 
-    Trim Galore names its output after the *input file*, not after the sample, so this has to
-    follow whatever we actually handed it (which may be a decompressed or de-interleaved
-    intermediate rather than the user's original file).
+    Trim Galore names its output after the input file, not the sample, so this follows the file it
+    was given (which may be a decompressed or de-interleaved intermediate).
     """
     base = os.path.basename(path)
     for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
@@ -277,16 +261,14 @@ def _run_trim_galore(args, env, streams: List[str], paired: bool) -> List[str]:
 def _run_fastp(args, env, streams: List[str], trimmed: List[str], paired: bool) -> List[str]:
     """Trim with fastp. Returns the files it produced, in mate order.
 
-    fastp writes where it is told, so unlike Trim Galore there is no output-naming convention to
-    predict - it is pointed straight at the final `trimmed_N.fastq` names, and the move afterwards
-    is a no-op. It also emits a JSON/HTML report, which is kept: the JSON carries before/after read
-    counts and Q30 fractions, which is what a trimmer comparison is scored on.
+    fastp writes to the given paths, so it is pointed at the final `trimmed_N.fastq` names and the
+    later move is a no-op. Its JSON/HTML report is kept: the JSON has the before/after read counts
+    and Q30 fractions that the trimmer benchmark scores.
     """
     trim_threads = min(args.threads, FASTP_MAX_THREADS)
     report_json = os.path.join(args.output, "fastp.json")
     report_html = os.path.join(args.output, "fastp.html")
-    # Appended, never interpolated, so that without --fastp-quality-trim the command is byte for
-    # byte the one this module has always run.
+    # Appended, so without --fastp-quality-trim the command is unchanged.
     extra = " " + FASTP_QUALITY_TRIM if args.fastp_quality_trim else ""
     if paired:
         run(
@@ -335,20 +317,18 @@ class _Retention(NamedTuple):
         return self.after / self.before if self.before else 0.0
 
 
-#: fastp's own ``filtering_result`` keys, with the words the retention line uses for them.
-#: ``low_quality_reads`` is the one that matters: it counts reads *discarded whole* because more
-#: than 40% of their bases were under Q15, not reads that were shortened. On the MetaHIT cohort it
-#: was 14,755,926 against too_short_reads of exactly 0, which is what gave the mechanism away.
+#: fastp's ``filtering_result`` keys, with the labels the retention line uses.
+#: ``low_quality_reads`` counts reads discarded whole because more than 40% of their bases were
+#: under Q15. On the MetaHIT cohort it was 14,755,926, with too_short_reads at 0.
 _FASTP_FILTER_REASONS = (
     ("low_quality_reads", "quality filtering"),
     ("too_short_reads", "too short"),
     ("too_many_N_reads", "too many Ns"),
     ("too_long_reads", "too long"),
 )
-#: Trim Galore has no machine-readable report, so these read the human one. The wording has moved
+#: Trim Galore has no machine-readable report, so these parse the text one. The wording varies
 #: between versions ("Total number of sequences analysed:" vs "...analysed for the length cutoff of
-#: 20 bp:"), hence the loose middles - a pattern that stops matching costs the retention line, and
-#: this line is not worth failing a QC step for.
+#: 20 bp:"), hence the loose middles. If a pattern stops matching, only the retention line is lost.
 _TG_PAIRS_IN = re.compile(r"Total number of sequences analysed[^:\n]*:\s*([\d,]+)")
 _TG_PAIRS_DROPPED = re.compile(r"Number of sequence pairs removed[^:\n]*:\s*([\d,]+)")
 _TG_READS_IN = re.compile(r"([\d,]+) sequences processed in total")
@@ -361,7 +341,7 @@ def _count(text: str) -> int:
 
 
 def _thousands(value: int) -> str:
-    """12621104 -> "12,621,104". Eight-digit read counts are unreadable without the separators."""
+    """Format with thousands separators: 12621104 -> "12,621,104"."""
     return f"{value:,}"
 
 
@@ -370,9 +350,8 @@ def _fastp_retention(path: str, paired: bool) -> Optional[_Retention]:
 
     The keys are fastp's own: ``summary.before_filtering.total_reads``,
     ``summary.after_filtering.total_reads`` and the ``filtering_result`` block. fastp counts reads,
-    so a paired run's numbers are twice the pair count and are halved here. A report that is
-    missing, truncated, or written by some future fastp under other key names returns None rather
-    than raising: the retention line is worth having, not worth failing a finished QC step over.
+    so a paired run's numbers are halved here. A missing, truncated or differently keyed report
+    returns None instead of raising, so it does not fail a finished QC step.
     """
     import json
 
@@ -399,9 +378,8 @@ def _fastp_retention(path: str, paired: bool) -> Optional[_Retention]:
 def _trim_galore_retention(out_dir: str, paired: bool) -> Optional[_Retention]:
     """Retention out of Trim Galore's own ``*_trimming_report.txt``, or None if unreadable.
 
-    Every report in the folder is searched rather than one guessed filename: a paired run writes
-    one per mate and only one of the two carries the pair-level totals, and which one that is has
-    not been stable across Trim Galore releases.
+    All reports in the folder are searched: a paired run writes one per mate, and which one holds
+    the pair-level totals has changed between Trim Galore releases.
     """
     text = ""
     for path in sorted(glob.glob(os.path.join(out_dir, "*_trimming_report.txt"))):
@@ -425,30 +403,28 @@ def _trim_galore_retention(out_dir: str, paired: bool) -> Optional[_Retention]:
 
 
 def _retention_advice(trimmer: str) -> str:
-    """What to do about a low-retention run, which differs by which trimmer produced it."""
+    """Advice for a low-retention run, depending on the trimmer."""
     if trimmer == "fastp":
         return (
-            "fastp's defaults filter a read out whole when more than 40% of its bases fall "
-            "below Q15, and do no quality trimming at all unless asked, so these were discarded "
-            "rather than shortened. On older or lower-quality data - 2010-era 75 bp reads, say - "
-            "use --trimmer trim-galore, which trims the bad tail and keeps the shorter read, or "
-            "keep fastp and add --fastp-quality-trim. A loss this size carries downstream: it "
-            "inflates every coverage, diversity and how-much-more-sequencing estimate computed "
-            "from these reads."
+            "By default fastp removes a read when more than 40% of its bases are below Q15 and "
+            "does no quality trimming, so these reads were discarded, not shortened. On older or "
+            "lower-quality data (for example 75 bp reads from around 2010), use --trimmer "
+            "trim-galore, which trims low-quality tails and keeps the shorter read, or keep "
+            "fastp and add --fastp-quality-trim. A loss this large affects every coverage, "
+            "diversity and sequencing-effort estimate computed from these reads."
         )
     return (
         "Check the length cutoff and adapter detection in the *_trimming_report.txt files in the "
-        "output folder before using these reads: on older or lower-quality data a short read "
-        "length and an aggressive cutoff can drop most of a library."
+        "output folder before using these reads. On older or lower-quality data, short reads "
+        "and a strict cutoff can remove most of a library."
     )
 
 
 def _report_retention(args, paired: bool) -> None:
     """Say how much of the input survived trimming, and warn when it was too little.
 
-    Always printed, because the number it reports is the one a silent 58.5% loss hid. Both
-    trimmers already write it down; this only reads what they wrote, so an unreadable report is a
-    quiet skip and never an error.
+    Always printed. Guards against an unreported loss, as when fastp discarded 58.5% of a library.
+    The numbers come from the trimmer's own report; if it cannot be read, nothing is printed.
     """
     unit = "pairs" if paired else "reads"
     if args.trimmer == "fastp":
@@ -512,8 +488,8 @@ def main(argv: List[str]) -> int:
     settings = load_settings(args.config)
     resolve_threads(args, settings)
     absolutize_paths(args)
-    # Every read file must exist, be non-empty, and not end mid-record: an empty or truncated
-    # FASTQ otherwise produces an empty assembly, zero bins, and a failure several modules later.
+    # Every read file must exist, be non-empty and not end mid-record; otherwise the failure shows
+    # up several modules later as an empty assembly.
     check_disk_space(
         "read_qc", settings, [p for p in (args.reads_1, args.reads_2) if p], args.output
     )
@@ -541,9 +517,8 @@ def main(argv: List[str]) -> int:
 
         sample = _sample_name(args.reads_1)
 
-        # Interleaved input is split into mates first and then follows the ordinary paired
-        # path: Trim Galore has no interleaved mode, and treating it as single-end would throw
-        # away the pairing the assembler and binners rely on.
+        # Interleaved input is split into mates and then handled as paired: Trim Galore has no
+        # interleaved mode, and single-end handling would lose the pairing.
         if layout.layout == "interleaved":
             streams = _deinterleave_input(args, sample)
             paired = True
@@ -551,8 +526,8 @@ def main(argv: List[str]) -> int:
             streams = [p for p in (args.reads_1, args.reads_2) if p]
             paired = layout.layout == "paired"
 
-        # Decompress whatever we are about to feed the tools, remembering the copies so they
-        # can be removed at the end (several GB per sample of pure duplication otherwise).
+        # Decompress the tool inputs and remember the copies so they can be removed at the end
+        # (several GB per sample).
         original = list(streams)
         streams = [_decompress(p, args.output) for p in streams]
         decompressed = [p for p, was in zip(streams, original) if p != was]
@@ -575,8 +550,7 @@ def main(argv: List[str]) -> int:
                 announcement("RUNNING TRIM-GALORE")
                 produced = _run_trim_galore(args, env, streams, paired)
             for src, dest in zip(produced, trimmed):
-                # fastp was pointed at the final names already; only Trim Galore's convention-named
-                # output needs moving.
+                # fastp already wrote to the final names; only Trim Galore's output needs moving.
                 if os.path.abspath(src) != os.path.abspath(dest):
                     fs_move(src, dest)
             if not file_size(trimmed[0]):
@@ -625,14 +599,14 @@ def main(argv: List[str]) -> int:
                 )
             run(cmd, env=env, tool="bmtagger.sh")
             if not dry_run() and not (os.path.isfile(listfile) and os.path.getsize(listfile)):
-                warning("No contamination reads found, which is very unlikely.")
+                warning("No host reads found. This is unusual; check the host index.")
 
             if not dry_run():
                 comm("Now sorting out found host reads from the main fastq files...")
                 for src, dest in zip(streams, clean):
                     with open(dest, "w") as out:
                         skip_human_reads.filter_reads(listfile, src, out)
-                comm("Now keeping the host reads in their own files... for science...")
+                comm("Now writing the host reads to their own files...")
                 for i, src in enumerate(streams):
                     host = os.path.join(args.output, "host_reads_%d.fastq" % (i + 1))
                     with open(host, "w") as out:
@@ -658,10 +632,9 @@ def main(argv: List[str]) -> int:
             for i in range(len(streams))
         ]
         if ckpt.todo("finalize"):
-            # `streams` are intermediates we created inside args.output in every case except
-            # "--skip-trimming --skip-bmtagger with uncompressed input", where they are still
-            # the user's raw input. Moving those would destroy the user's data, so copy when
-            # the source is not ours to move.
+            # `streams` are intermediates inside args.output, except with --skip-trimming
+            # --skip-bmtagger on uncompressed input, where they are the user's raw files. Copy
+            # those instead of moving them.
             for src, dest in zip(streams, final):
                 if os.path.abspath(src) == os.path.abspath(dest):
                     continue
@@ -670,7 +643,10 @@ def main(argv: List[str]) -> int:
                 elif dry_run():
                     continue
                 else:
-                    comm("Copying (not moving) input %s - it is outside the output directory" % src)
+                    comm(
+                        "Copying input %s instead of moving it, since it is outside the "
+                        "output directory" % src
+                    )
                     shutil.copyfile(src, dest)
             for path in final:
                 expect_produced(path, "final QC'ed reads")
@@ -682,8 +658,7 @@ def main(argv: List[str]) -> int:
             _fastqc_report(args, env, "post-QC_report", final)
             ckpt.done("post_qc_report")
 
-        # Drop the decompressed copies of the (compressed) inputs - the final reads are
-        # written, so these are now just a duplicate of data the user already has.
+        # Remove the decompressed copies of compressed inputs now that the final reads exist.
         for path in decompressed if not dry_run() else []:
             if os.path.isfile(path) and os.path.abspath(path) not in {
                 os.path.abspath(f) for f in final

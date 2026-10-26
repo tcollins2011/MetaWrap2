@@ -1,13 +1,9 @@
-"""A default `cohort` planned a binning step that could not run, and paid for a study first.
+"""Tests that `cohort` gives binning the alignments that BAM-reading binners need.
 
-With the cohort coverage stage on, every sample's binning got `--depth <slice>`. The default binner
-pair is metaBAT2 + SemiBin2, and SemiBin2 reads the alignments themselves - `binning` refuses
-`--depth` with it by name. So the shipped cohort path died at the first binning step, after read QC,
-assembly and a cohort-wide alignment pass had all been paid for. A user hit it on 36 water samples.
-
-The fix is the missing piece rather than a narrower default: `coverage --split-bams` writes one BAM
-per assembly per sample, and the binning step is given both - the table for metaBAT2, the
-alignments for SemiBin2.
+The default binners are metaBAT2 + SemiBin2. SemiBin2 reads alignments, and `binning` rejects
+`--depth` alone for it, so a cohort plan with only the depth slice failed at the first binning
+step, after read QC, assembly and coverage. `coverage --split-bams` now writes one BAM per assembly
+per sample, and binning gets both the depth table and the BAMs.
 """
 
 import os
@@ -51,12 +47,12 @@ def test_the_default_cohort_gives_binning_both_the_table_and_the_alignments(tmp_
     binning = _argv(steps, "binning:A")
     assert "--depth" in binning and "--bams" in binning
     assert binning[binning.index("--bams") + 1] == layout.coverage_bams("A")
-    # The BAMs are this assembly's, not the catalogue's: one directory per assembly label.
+    # The BAMs are for this assembly, not the catalogue: one directory per assembly label.
     assert binning[binning.index("--bams") + 1].endswith(os.path.join("bams", "A"))
 
 
 def test_a_table_only_binner_set_does_not_pay_for_the_split(tmp_path):
-    """`--preset fast` is metaBAT2 + MaxBin2, both of which read the table. No BAMs needed."""
+    """`--preset fast` (metaBAT2 + MaxBin2) reads only the table, so no BAMs are split."""
     body = SHEET.replace(
         "coassemble = false", 'coassemble = false\n\n[modules]\nbinning = "--preset fast"'
     )
@@ -67,7 +63,7 @@ def test_a_table_only_binner_set_does_not_pay_for_the_split(tmp_path):
 
 
 def test_every_bam_reading_binner_triggers_the_split(tmp_path):
-    """Not just SemiBin2: CONCOCT, VAMB and COMEBin read alignments too."""
+    """Every binner in BAM_BINNERS (SemiBin2, CONCOCT, VAMB, COMEBin) triggers the split."""
     for binner in _binning.BAM_BINNERS:
         body = SHEET.replace(
             "coassemble = false",
@@ -79,7 +75,7 @@ def test_every_bam_reading_binner_triggers_the_split(tmp_path):
 
 
 def test_binning_accepts_depth_and_bams_together():
-    """The refusal has to stay for `--depth` alone and go away when the alignments are there."""
+    """`binning` accepts `--depth` with `--bams` for SemiBin2."""
     parser_opts = _binning._parse_args(
         ["-a", "asm.fa", "-o", "out", "--depth", "d.txt", "--bams", "bams", "--semibin2"]
     )

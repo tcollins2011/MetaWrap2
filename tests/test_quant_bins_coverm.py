@@ -1,10 +1,8 @@
 """quant_bins --quantifier coverm: one invocation for every sample, and the table it produces.
 
-The salmon path and the coverm path write the same ``bin_abundance_table.tsv`` and everything
-downstream reads it the same way, so what is worth pinning here is the translation between CoverM's
-table and that contract: row labels go through the same :func:`bin_label` the salmon path uses,
-columns are matched by position against our own sample labels, and CoverM's ``unmapped`` row - which
-is not a bin - is gone.
+Both the salmon and coverm paths write the same ``bin_abundance_table.tsv``. Checked: row labels go
+through :func:`bin_label` as in the salmon path, columns are matched by position to our sample
+labels, and CoverM's ``unmapped`` row is dropped.
 """
 
 import os
@@ -89,23 +87,22 @@ def test_the_abundance_table_is_written_and_the_heatmap_drawn(coverm_run, tmp_pa
         lines = fh.read().splitlines()
     assert lines[0] == "Genomic bins\ta\tb"
     assert lines[1:] == ["bin.1\t60.0\t20.0", "bin.2\t35.0\t75.0"]
-    # The heatmap is the same picture from the same table, whichever quantifier filled it in.
+    # The heatmap is drawn from the table regardless of quantifier.
     assert any(isinstance(c, list) and "metawrap2.scripts.make_heatmap" in c for c in commands)
 
-    # Every sample on one command line, against a genome list naming the bins actually there.
+    # All samples on one command line, with a genome list of the bins in the folder.
     (coverm,) = [c for c in commands if isinstance(c, str) and c.startswith("coverm")]
     assert "--coupled a_1.fastq a_2.fastq b_1.fastq b_2.fastq" in coverm
     listing = os.path.join(args.output, "coverm_genomes.txt")
     assert "--genome-fasta-list %s" % listing in coverm
     with open(listing) as fh:
         assert [os.path.basename(p) for p in fh.read().split()] == ["bin.1.fasta", "bin.2.fasta"]
-    # CoverM's own defaults for these are 0 - every alignment counts, however poorly it matches -
-    # which on a MAG catalogue reports reads from a relative as this genome's abundance.
+    # CoverM's defaults for the read filters are 0, which counts reads from relatives.
     assert "--min-covered-fraction 10" in coverm
     assert "--min-read-percent-identity 90" in coverm
     assert "--min-read-aligned-percent 75" in coverm
 
-    # Columns are matched by position, so a miscount has to stop rather than mislabel.
+    # Columns are matched by position, so a column-count mismatch raises.
     raw = _coverm_output(tmp_path, ["sampleA_1.fastq"], [["bin.1", "50.0"]])
     with pytest.raises(RuntimeError, match="1 value column"), open(tmp_path / "x.tsv", "w") as fh:
         quant_bins._coverm_table(raw, ["sampleA", "sampleB"], fh)

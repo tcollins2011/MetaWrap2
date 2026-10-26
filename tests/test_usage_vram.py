@@ -1,10 +1,8 @@
-"""Peak GPU memory, which rusage cannot see and which decides whether a step runs at all.
+"""Peak GPU memory measurement, which rusage does not provide.
 
-Three tools here can use a GPU - SemiBin2, VAMB and COMEBin - and a card either holds the model or
-the step dies in the allocator, so the VRAM figures in the README's hardware table are measured per
-step rather than copied from an upstream README. These tests pin the parts that have to be right
-for those figures to mean anything, all without a driver: the parse of what nvidia-smi writes, the
-per-device peak, and the rule that a step which touched no GPU reports nothing rather than zero.
+SemiBin2, VAMB and COMEBin can use a GPU, and a step fails if the model does not fit, so the VRAM
+figures in the README's hardware table are measured per step. Tested without a driver: parsing
+nvidia-smi output, the per-device peak, and that a step that used no GPU reports nothing, not zero.
 """
 
 import os
@@ -36,9 +34,8 @@ def test_parses_a_driver_row():
 def test_drops_rows_the_driver_could_not_fill():
     """A row with no readable memory is dropped, never counted as zero.
 
-    The regression: a zero pulls a *peak* down when it is averaged or summed with real samples,
-    while a dropped row can only fail to raise it. nvidia-smi writes `[Not Found]` for a process
-    that exited between the enumeration and the query, and `[N/A]` on some driver versions in
+    A zero would lower a peak when combined with real samples. nvidia-smi writes `[Not Found]` for
+    a process that exited between enumeration and query, and `[N/A]` on some drivers in
     containers.
     """
     text = "[Not Found], GPU-aaa, [N/A]\n999, GPU-aaa, [Not Found]\n1, GPU-aaa, 64\n"
@@ -48,8 +45,8 @@ def test_drops_rows_the_driver_could_not_fill():
 def test_peak_is_per_device_not_summed_across_them():
     """Two cards holding 900 MiB each is a 900 MiB requirement, not 1800.
 
-    The figure answers "will this fit on one card", so devices are never added together. Within a
-    device the processes *are* added, because several workers on one card have to fit together.
+    The figure is per card, so devices are not summed. Processes on one device are summed, since
+    they must fit together.
     """
     samples = [
         [(1, "GPU-a", 500), (2, "GPU-a", 400), (3, "GPU-b", 900)],
@@ -59,7 +56,7 @@ def test_peak_is_per_device_not_summed_across_them():
 
 
 def test_peak_counts_only_the_processes_asked_for():
-    """Another tenant's training job on the same card must not become this step's requirement."""
+    """GPU processes outside this step's process tree are not counted."""
     samples = [[(1, "GPU-a", 300), (4242, "GPU-a", 20000)]]
     assert usage.peak_device_memory(samples, belongs=lambda pid: pid == 1) == 300
 
@@ -73,16 +70,14 @@ def test_no_samples_is_zero_rather_than_an_error():
 def test_process_tree_walk_finds_a_parent_and_stops_at_a_stranger():
     assert usage.in_process_tree(os.getpid(), os.getpid())
     assert usage.in_process_tree(os.getpid(), os.getppid())
-    # pid 1 is nobody's descendant here, so a GPU process belonging to another user's run is not
-    # attributed to this step.
+    # pid 1 is not a descendant of this step, so its GPU use is not attributed to the step.
     assert not usage.in_process_tree(1, os.getpid())
 
 
 def test_a_step_that_touched_no_gpu_reports_no_vram_key():
-    """Absence rather than zero, for the same reason a blank cell is not a zero elsewhere.
+    """A step that used no GPU has no VRAM fields, instead of a zero.
 
-    `peak_gpu_memory_bytes: 0` on every CPU step of a machine that happens to have a card would
-    read as "measured, used nothing", which is a claim about the tool rather than about the step.
+    `peak_gpu_memory_bytes: 0` on CPU steps of a GPU machine would read as a measurement.
     """
     rc, measured = usage.run_measured(["true"])
     assert rc == 0
@@ -91,11 +86,9 @@ def test_a_step_that_touched_no_gpu_reports_no_vram_key():
 
 
 def test_a_standalone_module_reports_vram_too(monkeypatch):
-    """The regression: VRAM appeared under `run` and nowhere else.
+    """A module invoked directly reports peak VRAM, as it does under `run`.
 
-    A module invoked directly measures itself from the inside, and rusage has no GPU figure to
-    reconstruct one from - so the three binners that can train on a GPU printed peak VRAM as a
-    study step and nothing at all when run the way the docs run them.
+    A standalone module measures itself from the inside, and rusage has no GPU figure.
     """
     monkeypatch.setattr(_common, "_active_gpu_watcher", _Watcher(2048, {"GPU-a"}))
     measured = _common.self_usage(_Rec())
@@ -105,7 +98,7 @@ def test_a_standalone_module_reports_vram_too(monkeypatch):
 
 
 def test_a_standalone_cpu_run_on_a_gpu_machine_reports_none(monkeypatch):
-    """A watcher that saw nothing contributes nothing, even though it ran."""
+    """A watcher that recorded no GPU use adds no VRAM fields."""
     monkeypatch.setattr(_common, "_active_gpu_watcher", _Watcher(0, set()))
     measured = _common.self_usage(_Rec())
     assert "peak_gpu_memory_bytes" not in measured
@@ -124,5 +117,5 @@ def test_summary_states_vram_and_how_many_devices_held_it():
         }
     )
     assert "6.0 GB peak VRAM on 2 GPU(s)" in line
-    # The CPU figures are still there: VRAM is an addition to the cost line, not a replacement.
+    # The CPU figures are still present alongside VRAM.
     assert "2.0 cores busy" in line and "2.0 GB peak memory" in line

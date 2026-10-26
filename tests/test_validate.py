@@ -1,9 +1,8 @@
 """Tests for metawrap2.validate: catching empty and truncated files before a tool sees them.
 
-The point of these checks is that a *present but unusable* file is worse than a missing one,
-because it propagates silently through the pipeline. So the cases that matter here are the
-plausible-looking ones: the library cut off by a full disk, the gzip whose download stopped
-halfway, the FASTA ending on a header with no sequence.
+A present but unusable file can pass through the pipeline unnoticed, so the cases tested are
+files that look valid: a library cut off by a full disk, a gzip whose download stopped halfway, a
+FASTA ending on a header with no sequence.
 """
 
 from __future__ import annotations

@@ -1,9 +1,7 @@
 name: Lockfiles
 
-# A committed lockfile that no longer resolves is worse than no lockfile: it promises
-# reproducibility and delivers a failed solve, at the moment someone is trying to reproduce a
-# result. Creating a conda environment is far too slow for every push, so it is checked here,
-# monthly and on demand.
+# Checks that committed lockfiles still resolve. Creating a conda environment is too slow for
+# every push, so this runs monthly and on demand.
 #
 #   envs     - list every environment from src/metawrap2/envs/*.yaml, so a new env is covered the
 #              day its yaml lands.
@@ -12,15 +10,15 @@ name: Lockfiles
 #              each runner's disk well clear of the limit; one runner building all of them would not.
 #   publish  - collect the new lockfiles and, if any changed, push them to chore/refresh-lockfiles.
 #
-# The run fails only when something is broken: a yaml that will not solve, or a lockfile that will
-# not install. Drift is not a failure. It goes to a branch and into the run summary, and a pull
-# request is opened too if the repository lets Actions open one (Settings > Actions > General >
-# "Allow GitHub Actions to create and approve pull requests"). Without that setting, the old PR
-# step failed the whole run every week after every solve had succeeded.
+# The run fails only when a yaml will not solve or a lockfile will not install. Drift is not a
+# failure: it goes to a branch and into the run summary, and a pull request is opened if the
+# repository lets Actions open one (Settings > Actions > General > "Allow GitHub Actions to
+# create and approve pull requests"). Without that setting, the PR step used to fail the whole
+# run after every solve had succeeded.
 
 on:
   schedule:
-    # First Monday of the month, early. A month of drift is still a small diff.
+    # First Monday of the month, early.
     - cron: "17 4 1-7 * 1"
   workflow_dispatch:
     inputs:
@@ -28,7 +26,7 @@ on:
         description: "Environments to refresh (space-separated), or 'all'"
         default: "all"
   pull_request:
-    # A PR that edits a lockfile or an environment spec must prove the result still resolves.
+    # A PR that edits a lockfile or an environment spec must show the result still resolves.
     paths:
       - "src/metawrap2/envs/**"
 
@@ -77,7 +75,7 @@ jobs:
 
   refresh:
     name: Re-solve (${{ matrix.conda_env }})
-    # On a PR the point is to verify, not to rewrite.
+    # On a PR, verify only; do not rewrite.
     if: github.event_name != 'pull_request'
     needs: envs
     runs-on: ubuntu-latest
@@ -90,7 +88,7 @@ jobs:
         shell: bash -el {0}
     steps:
       - uses: actions/checkout@v4
-      # Miniforge ships conda + mamba, which is what `metawrap2 install-env` drives.
+      # Miniforge ships conda + mamba, which `metawrap2 install-env` uses.
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
@@ -110,8 +108,8 @@ jobs:
   publish:
     name: Publish the refreshed lockfiles
     needs: refresh
-    # Publish whatever solved, even if one env failed: that failure is already reported by its own
-    # job, and holding back the rest would only make next month's diff bigger.
+    # Publish whatever solved, even if one env failed: that failure is reported by its own job, and
+    # holding back the rest would make next month's diff bigger.
     if: always() && github.event_name != 'pull_request' && needs.refresh.result != 'skipped'
     runs-on: ubuntu-latest
     permissions:
@@ -147,7 +145,7 @@ jobs:
           elif gh pr create --head "$branch" --title "chore: refresh conda lockfiles" --body "$body"; then
             echo "Opened a lockfile PR." | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            # Not a failure: the lockfiles are on the branch, ready to review and merge.
+            # Not an error: the lockfiles are on the branch, ready to review and merge.
             msg="Lockfiles changed ($changed) and are on branch $branch. This repository does not let Actions open pull requests, so open one from that branch."
             echo "::notice::$msg"
             echo "$msg" >> "$GITHUB_STEP_SUMMARY"

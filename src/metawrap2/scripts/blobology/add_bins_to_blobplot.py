@@ -7,10 +7,10 @@ well as by taxonomy:
 ``bin``
     the bin this contig belongs to, or ``Unbinned``
 ``binned_yes_no``
-    ``Binned`` / ``Unbinned`` - for a two-colour "what did we recover?" plot
+    ``Binned`` / ``Unbinned``, for a two-colour plot of what was binned
 ``binned_phylum``
-    the contig's phylum if it was binned, else ``Unbinned`` - so the phylum plot shows only
-    the part of the community that made it into genomes
+    the contig's phylum if it was binned, else ``Unbinned``, so the phylum plot shows only the
+    binned part of the community
 
 The annotated table goes to stdout; ``blobology`` redirects it back over the input file.
 """
@@ -31,10 +31,9 @@ NEW_COLUMNS = ("bin", "binned_yes_no", "binned_phylum")
 def load_contig_bins(bin_folder: str) -> Dict[str, str]:
     """Map each contig id to the name of the bin file that contains it.
 
-    Keyed on :func:`contig_id` - the header up to the first whitespace - which is what the
-    blobplot's ``seqid`` column holds. The original keyed on the whole header line, so a bin
-    whose contigs carry tool-added annotations (metaBAT2 writes ``total_depth=..``) matched
-    nothing and the blobplot came out entirely unbinned.
+    Keyed on :func:`contig_id` (the header up to the first whitespace), as in the blobplot's
+    ``seqid`` column. Keying on the whole header fails for headers with annotations such as
+    metaBAT2's ``total_depth=..``.
     """
     contig_bins: Dict[str, str] = {}
     for bin_file in sorted(os.listdir(bin_folder)):

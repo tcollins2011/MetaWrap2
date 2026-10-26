@@ -1,17 +1,12 @@
 """Refining twice into the same output folder.
 
-This is the ordinary thing to do when a run was wrong for a reason outside refinement - a binner was
-re-run, a bin set was corrected - and it failed in the worst available way: the second run did all of
-the work, wrote every final bin, plotted the figures, and *then* raised FileExistsError while tidying
-its working sets into ``work_files``, because ``os.replace`` will overwrite a file but refuses a
-directory that already has anything in it. It was found on a real 8 cpu-hour re-refinement that
-returned 70 complete bins and exit code 1, with nothing in the log after "MOVING OVER TEMPORARY
-FILES" - a successful run reported as a failure, having also left its remaining bin sets half-moved
-for the next ``--resume`` to trip over.
+A rerun (e.g. after a binner was re-run or a bin set corrected) used to finish all its work and
+then raise FileExistsError while moving its working sets into ``work_files``, because
+``os.replace`` refuses a non-empty directory. An 8 CPU-hour re-refinement wrote 70 bins and
+exited 1, with the remaining bin sets half-moved.
 
-CheckM is faked the way the other bin_refinement test modules fake it: with a deterministic
-stand-in derived from each bin's contig set, so consolidation does real work and the run reaches the
-finalisation step under test.
+CheckM is faked as in the other bin_refinement tests, with a deterministic stand-in derived from
+each bin's contig set, so consolidation does real work and the run reaches finalisation.
 """
 
 from __future__ import annotations
@@ -71,8 +66,8 @@ def _fake_run_checkm(bins_dir, **kwargs):
 def fake_checkm(monkeypatch):
     monkeypatch.setattr(bin_refinement._checkm, "run_checkm", _fake_run_checkm)
     monkeypatch.setattr(checkm_mod, "run_checkm", _fake_run_checkm)
-    # Nothing enters a conda env here, but env_for checks the env manager is findable first and
-    # mamba is not on PATH in a non-login shell.
+    # No conda env is used, but env_for checks the env manager is on PATH first, and mamba is not
+    # on PATH in a non-login shell.
     monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
 
 
@@ -94,13 +89,12 @@ def _bin_sets(tmp_path, letters, sets=None):
 def _run(tmp_path, letters, force=False, sets=None, resume=False):
     """One full refinement into tmp_path/refined. Returns the output directory.
 
-    ``force`` on the rerun, because an output folder holding a finished run is refused without it -
-    which is the right default, and is also why the failure below was not caught by anything: the
-    only supported way to redo a run in place is the one path nothing exercised end to end.
+    ``force`` is needed on the rerun, since an output folder holding a finished run is refused
+    without it.
 
-    Set through the runner rather than passed in argv: ``--force`` is a global flag that ``cli.main``
-    strips before the module ever sees it, so a module parser handed it exits 2. Reset in a finally
-    because it is module-global state that would otherwise leak into the next test.
+    Set through the runner, not argv: ``--force`` is a global flag that ``cli.main`` strips before
+    the module sees it, so the module parser would exit 2. Reset in a finally because it is
+    module-global state.
     """
     dirs = _bin_sets(tmp_path, letters, sets)
     out = tmp_path / "refined"
@@ -123,26 +117,24 @@ def _final(out):
 
 
 def test_a_second_run_into_the_same_folder_succeeds(tmp_path):
-    """The bug: the second run raised at the end, after writing everything it was asked for."""
+    """A second run into the same folder with --force succeeds and gives the same bins."""
     first = _run(tmp_path, "AB")
     expected = _final(first)
     assert expected, "the first run has to produce bins for the second to be a rerun at all"
 
     second = _run(tmp_path, "AB", force=True)
     assert _final(second) == expected
-    # Half-moved working sets are the state the failure left, and what breaks the next --resume.
+    # No half-moved working sets are left behind.
     assert [f for f in os.listdir(second) if f.startswith("bins")] == []
     work = os.path.join(second, "work_files")
     assert "binsA" in os.listdir(work) and "binsB" in os.listdir(work)
 
 
 def test_resuming_does_not_clean_what_it_is_resuming_from(tmp_path):
-    """--resume reaches the same already-exists output folder as --force and means the opposite.
+    """--resume does not delete the bin sets its checkpoints skip rebuilding.
 
-    The clean was unconditional, so a resume deleted the bin sets whose checkpoint it was about to
-    honour. Checked on the final bins rather than on the intermediates: a resume that destroyed its
-    inputs and silently rebuilt nothing would still "succeed", and the only statement worth making is
-    that the answer is unchanged.
+    The clean used to be unconditional, so a resume deleted those bin sets. Checked on the final
+    bins, since a resume that deleted its inputs and rebuilt nothing could still exit 0.
     """
     first = _run(tmp_path, "AB")
     expected = _final(first)

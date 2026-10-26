@@ -3,7 +3,7 @@
 Every module writes three files into its ``-o`` output directory, alongside the data:
 
 * ``run_config.json`` - the full, machine-readable run record: module, MetaWrap2 version,
-  resolved parameters (options *and* defaults), config file, conda env, databases, platform,
+  resolved parameters (options and defaults), config file, conda env, databases, platform,
   start/end/duration, inputs, the exact commands run, and the complete ``lineage``.
 * ``run_commands.txt`` - the exact commands that were run, in order. The first line is the
   top-level ``metawrap2 <module> ...`` invocation (re-running it reproduces the output 1:1);
@@ -49,10 +49,9 @@ def _now() -> str:
 def conda_env_packages(env: Optional[str], env_manager: str = "mamba") -> List[str]:
     """Every package in conda env *env* as ``name=version=build``, or [] if unavailable.
 
-    Recorded so a run can be reproduced exactly, and so "it worked last month" can be
-    compared against "it fails today" at the level of individual package builds - which is
-    where these failures actually come from (an unpinned solve picking a new Python, a new
-    setuptools removing pkg_resources).
+    Recorded for reproducibility and for comparing a working and a failing run at the level of
+    package builds (for example, an unpinned solve picking a new Python, or a new setuptools
+    removing pkg_resources).
     """
     if not env:
         return []
@@ -89,16 +88,12 @@ def conda_env_packages(env: Optional[str], env_manager: str = "mamba") -> List[s
 
 
 def source_revision() -> Dict[str, str]:
-    """Which MetaWrap2 *tree* this is, when that is knowable.
+    """The MetaWrap2 source revision, when running from a git checkout.
 
-    ``metawrap2_version`` says "2.1.0", and between releases that names many different trees -
-    including one with local edits, which is the normal state of a package whose whole design
-    invites you to edit the module files. So when MetaWrap2 is running from a git checkout, the
-    commit is recorded too, along with whether the working tree was dirty at the time.
-
-    An installed wheel has no repository, and that is not an error: the answer is simply
-    ``{"kind": "installed"}``, which is itself informative - it means the version string is the
-    whole truth.
+    A version string such as "2.1.0" covers many trees between releases, including locally edited
+    ones (users are expected to edit module files). From a git checkout the commit, branch and
+    dirty state are recorded. An installed wheel returns ``{"kind": "installed"}``, meaning the
+    version string identifies the code.
     """
     package_dir = os.path.dirname(os.path.abspath(__file__))
     repo = os.path.dirname(os.path.dirname(package_dir))  # src/metawrap2 -> repo root
@@ -130,7 +125,7 @@ def source_revision() -> Dict[str, str]:
     if described:
         revision["describe"] = described
     status = git("status", "--porcelain")
-    # "dirty" is the part that matters: it says the commit alone does not reproduce this run.
+    # "dirty" means the commit alone does not reproduce this run.
     revision["dirty"] = "true" if status else "false"
     if status:
         revision["modified_files"] = str(len(status.splitlines()))
@@ -156,9 +151,8 @@ class RunRecorder:
     started: str = field(default_factory=_now)
     commands: List[str] = field(default_factory=list)
     environment: Dict[str, Any] = field(default_factory=dict)
-    #: The resolved resource budget, and what it was measured against. Worth recording for the
-    #: same reason the databases are: "why was this run slower than that one" is unanswerable if
-    #: nothing says how much of the machine each was allowed. See metawrap2.limits.
+    #: The resolved resource budget and what it was measured against, so run times can be
+    #: compared. See metawrap2.limits.
     budget: Dict[str, Any] = field(default_factory=dict)
     _t0: float = field(default_factory=time.time)
 
@@ -173,10 +167,8 @@ class RunRecorder:
     def record_environment(self, output_dir: str) -> None:
         """Write what this run is about to use, before any of it runs.
 
-        ``finalize`` records tool versions too, but only if the run reaches the end. A run that
-        dies in its first tool used to leave no record of *what* it was running - which is
-        exactly the run whose environment you want to inspect. This writes the environment
-        record up front and is overwritten with the same information plus outcomes at the end.
+        ``finalize`` also records tool versions, but only if the run reaches the end. Writing the
+        environment first leaves a record for runs that fail early.
         """
         self.environment = {
             "captured": "at start",
@@ -188,10 +180,8 @@ class RunRecorder:
             "metawrap2_version": self.version,
             "metawrap2_source": source_revision(),
             "databases": self.databases,
-            # Not just the paths: what was actually at those paths. A database updated in place
-            # leaves every earlier run's record naming a path whose contents have changed, with
-            # nothing to show that. The fingerprint is what makes "which runs used the old nt?"
-            # answerable. See metawrap2.dbcheck.
+            # A fingerprint of each database's contents, since a database updated in place keeps
+            # its path. See metawrap2.dbcheck.
             "database_contents": _dbcheck.describe_all(_Settings(databases=dict(self.databases))),
         }
         try:
@@ -345,11 +335,11 @@ def _parse_env_tool(recorded: str) -> Optional[Tuple[Optional[str], str]]:
 def capture_tool_versions(
     commands: List[str], env_manager: str = "mamba", timeout: int = 20
 ) -> Dict[str, str]:
-    """Best-effort: record the version of each distinct tool actually invoked.
+    """Best-effort: record the version of each distinct tool invoked.
 
-    Runs ``<tool> --version`` (falling back to ``-version``) inside the tool's conda env.
-    Silently skips anything that can't be probed (missing env, no version flag, no mamba),
-    so this never fails a run - it only enriches provenance when possible.
+    Runs ``<tool> --version`` (falling back to ``-version``) inside the tool's conda env. Tools
+    that cannot be probed (missing env, no version flag, no mamba) are skipped, so this never
+    fails a run.
     """
     versions: Dict[str, str] = {}
     seen = set()

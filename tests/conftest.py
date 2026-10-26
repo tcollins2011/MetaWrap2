@@ -11,10 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 def _conda_env_policy(request, tmp_path_factory, monkeypatch):
     """Pin ``use_conda_envs`` for every test instead of inheriting the machine's config.
 
-    Most tests fake the tool call and want no env wrapping at all; a handful are *about* how an
-    env is resolved or required, and mark themselves ``@pytest.mark.conda_envs``. Left to the
-    ambient config, both groups pass on one developer's machine and fail on another's: whichever
-    way ``~/.metawrap2/config.toml`` or ``$METAWRAP2_CONFIG`` happens to be set decides.
+    Most tests fake the tool call and want no env wrapping. Tests about env resolution mark
+    themselves ``@pytest.mark.conda_envs``. Without this, results would depend on the local
+    ``~/.metawrap2/config.toml`` or ``$METAWRAP2_CONFIG``.
     """
     wanted = request.node.get_closest_marker("conda_envs") is not None
     path = tmp_path_factory.mktemp("config") / "metawrap2.toml"
@@ -22,9 +21,8 @@ def _conda_env_policy(request, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("METAWRAP2_CONFIG", str(path))
 
 
-#: The machine every test runs on, whatever host it is actually on. 32 cores, 128 GB, no GPU, and
-#: 1.8 TB free of 2 TB. Chosen to be comfortably larger than any limit a test exercises, so a test
-#: about a thread cap or a disk ceiling sees the cap rather than the host.
+#: Fake machine seen by every test: 32 cores, 128 GB, no GPU, 1.8 TB free of 2 TB. It is larger
+#: than any limit a test exercises, so thread caps and disk ceilings are tested against the cap.
 TEST_MACHINE_CORES = 32
 TEST_MACHINE_MEMORY = 128 * 1024**3
 TEST_DISK = (2 * 1024**4, 200 * 1024**3, 2 * 1024**4 - 200 * 1024**3)  # total, used, free
@@ -32,17 +30,13 @@ TEST_DISK = (2 * 1024**4, 200 * 1024**3, 2 * 1024**4 - 200 * 1024**3)  # total, 
 
 @pytest.fixture(autouse=True)
 def _fixed_machine(request, monkeypatch):
-    """Every test sees the same cores, memory, GPUs and free disk, on a laptop or on a CI runner.
+    """Give every test the same cores, memory, GPUs and free disk, whatever the host.
 
-    Several modules clamp to what the machine has (threads to its cores, a download to its free
-    disk), so a test that passed on a 12-core laptop with a large disk failed on a 4-core CI runner
-    with a small one - after the pre-push gate, which runs on the laptop, had passed it. This
-    removes the host from the result: the suite now gives the same answer everywhere, so a green
-    pre-push means a green CI.
+    Several modules clamp to the machine (threads to cores, downloads to free disk), so without
+    this the results would differ between a workstation and a CI runner.
 
-    A test that measures the real host - limits.machine_cores() itself - marks itself
-    ``@pytest.mark.real_machine``. A test that needs a different machine (8 cores, a full disk)
-    monkeypatches on top of this, which wins because it is applied later.
+    Tests that measure the real host mark themselves ``@pytest.mark.real_machine``. Tests that need
+    a different machine monkeypatch on top of this, which takes precedence.
     """
     if request.node.get_closest_marker("real_machine") is not None:
         return

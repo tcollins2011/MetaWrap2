@@ -6,7 +6,7 @@ lineage) and traversed from the root: at each level the most-supported child is 
 if it holds more than 50% of the weight, otherwise traversal stops. The resulting lineage is
 the bin's consensus taxonomy.
 
-Ported faithfully from metaWRAP's ``classify_bins.py`` helper. ``.gz`` bins are supported via
+Ported from metaWRAP's ``classify_bins.py`` helper. ``.gz`` bins are supported via
 the shared sequence reader.
 """
 

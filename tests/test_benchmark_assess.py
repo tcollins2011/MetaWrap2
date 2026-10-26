@@ -1,10 +1,8 @@
-"""Assessing a variant's bins: the format conversions, and the rule that stops double counting.
+"""Tests for benchmark assessment: format conversions and the rule against double counting.
 
-The tests that matter most here are the ones about arithmetic that would otherwise be wrong in a
-plausible-looking way. A variant that ran three binners leaves three overlapping bin sets, and the
-ranker sums every row it finds for a variant - so recording all three as the variant's own numbers
-would report the same genome three times over, and an F1 score above 1. Nothing about the resulting
-table looks broken, which is precisely why it is worth a test.
+A variant that ran three binners leaves three overlapping bin sets, and the ranker sums every row
+for a variant. Recording all three under the variant's metric would count the same genome three
+times and could give an F1 above 1.
 """
 
 import os
@@ -34,7 +32,7 @@ def text_of(path):
 
 
 def stats_table(path, rows):
-    """A MetaWrap2 ``.stats.tsv`` - what either CheckM's output is normalised into."""
+    """Write a MetaWrap2 ``.stats.tsv``, the format both CheckM versions are converted to."""
     with open(path, "w") as fh:
         fh.write("bin\tcompleteness\tcontamination\tGC\tlineage\tN50\tsize\n")
         fh.writelines(
@@ -49,9 +47,8 @@ def stats_table(path, rows):
 def test_a_bin_directory_becomes_a_bioboxes_binning_file(tmp_path):
     """A contig id is cut at whitespace, and unbinned contigs are left out.
 
-    The gold standard names the contig alone; a bin's header carries the assembler's description.
-    Leaving the description on scores every contig as one the truth has never heard of, which AMBER
-    reports as a purity of zero rather than as an error - a wrong number that looks like a result.
+    The gold standard uses the bare contig id. If the header description were kept, AMBER would
+    match no contigs and report a purity of zero without an error.
     """
     root = str(tmp_path)
     bins = bin_set(root, "metabat2_bins", {"bin_001": ["c1", "c2"], "bin_002": ["c3"]})
@@ -69,12 +66,10 @@ def test_a_bin_directory_becomes_a_bioboxes_binning_file(tmp_path):
 def test_cami2s_anonymous_contig_ids_are_matched_to_the_names_its_assembly_uses(tmp_path):
     """A CAMI2 gold standard and its own gold assembly name the same contig differently.
 
-    The mapping leads with an anonymous ``PC0`` that appears nowhere in ``gsa.fa``, which names the
-    contig after the region it was cut from and keeps the pieces of that name in the mapping's
-    ``contig_id``/``start_position``/``end_position`` columns. On the gastrointestinal challenge not
-    one of 210,618 anonymous ids matched the 210,633-contig assembly, so every binning comparison
-    would have died with "yielded no contig-to-genome pairs" - the dataset appearing to disagree with
-    itself. The total is inclusive of both ends, so it is ``end - start + 1``.
+    The mapping's first column is an anonymous id (``PC0``) not found in ``gsa.fa``, which names
+    contigs from the mapping's ``contig_id``/``start_position``/``end_position`` columns. On the
+    gastrointestinal challenge none of 210,618 anonymous ids matched the 210,633-contig assembly.
+    The total length is inclusive of both ends: ``end - start + 1``.
     """
     gold = tmp_path / "mapping.tsv"
     gold.write_text(
@@ -99,13 +94,12 @@ def test_cami2s_anonymous_contig_ids_are_matched_to_the_names_its_assembly_uses(
 
 
 def test_two_bin_sets_with_the_same_directory_name_are_scored_as_two_queries(tmp_path, monkeypatch):
-    """Scoring two refinement arms gave two identical rows, because the queries were one file.
+    """Bin sets with the same directory name are converted to separate query files.
 
-    bin_refinement names its final directory for the thresholds it was cut at, so every arm refined at
-    ``-c 70 -x 10`` produces a ``metawrap_70_10_bins``. The converted query took that basename, so the
-    second conversion wrote over the first and AMBER was handed the same path twice under two labels -
-    reporting F1 0.3612 for a 74-bin set and a 60-bin set alike, with nothing to say they were the same
-    file. The label is what tells the rows apart, so it names the query too.
+    bin_refinement names its output by thresholds, so every arm at ``-c 70 -x 10`` produces
+    ``metawrap_70_10_bins``. Naming the query by that basename made the second conversion overwrite
+    the first, and AMBER scored one file twice (F1 0.3612 for a 74-bin and a 60-bin set). Queries
+    are now named by label.
     """
     gold = tmp_path / "gold.binning"
     gold.write_text("@Version:0.9.1\n@SampleID:tiny\n\n@@SEQUENCEID\tBINID\nc1\tgenome_A\n")
@@ -126,8 +120,8 @@ def test_two_bin_sets_with_the_same_directory_name_are_scored_as_two_queries(tmp
     assert len(set(queries)) == 2, queries
     # and each query holds its own arm's bins, not the other's
     assert "bin_001" in text_of(queries[0]) and "bin_002" in text_of(queries[1])
-    # AMBER pairs query to truth by sample id and exits on anything it cannot pair, so each query
-    # declares the gold standard's sample id, not its bin directory's name.
+    # AMBER pairs query and truth by sample id and exits if it cannot, so each query uses the gold
+    # standard's sample id.
     for query in queries:
         assert "@SampleID:tiny" in text_of(query)
 
@@ -136,10 +130,7 @@ def test_two_bin_sets_with_the_same_directory_name_are_scored_as_two_queries(tmp
 
 
 def test_three_binners_bins_are_not_summed_into_one_variants_count(tmp_path):
-    """The regression this whole rule exists for.
-
-    Each of three binners recovered the same two good genomes. The variant recovered two, not six.
-    """
+    """Three binners recovering the same two genomes count as two for the variant, not six."""
     root = str(tmp_path / "metabat2_maxbin2_concoct")
     for name in ("metabat2_bins", "maxbin2_bins", "concoct_bins"):
         bin_set(root, name, {"bin_001": ["c1"], "bin_002": ["c2"]})
@@ -169,7 +160,7 @@ def test_three_binners_bins_are_not_summed_into_one_variants_count(tmp_path):
     )
     assert ratios == [] or all(r.value == 0 for r in ratios)
 
-    # Once a consolidated set is present, it - and only it - carries the variant's metric.
+    # When a consolidated set is present, only it carries the variant's metric.
     bin_set(root, "metawrap_70_10_bins", {"bin_001": ["c1"], "bin_002": ["c2"], "bin_003": ["c3"]})
     stats_table(
         os.path.join(root, "metawrap_70_10_bins.stats.tsv"),

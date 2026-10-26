@@ -1,14 +1,10 @@
-"""BIOM output, and the orientation that must not be got wrong.
+"""BIOM output and its orientation.
 
-Everything MetaWrap2 writes is a TSV of its own design, which is fine to read and bad to analyse
-further: a user wanting QIIME 2, phyloseq or scikit-bio writes a converter first, slightly
-differently each time. BIOM is what all of those already read.
+MetaWrap2 writes its own TSVs; BIOM is read by QIIME 2, phyloseq and scikit-bio.
 
-The thing worth testing is the transpose. BIOM's convention is observations-as-features and
-samples-as-samples, which is the opposite of how these tables print, and a table loaded in the wrong
-orientation is not obviously wrong - it has the right numbers in the wrong places and gives nonsense
-answers quietly. The unit metadata matters for the same reason: a BIOM file of relative abundances
-and one of genome equivalents are the same shape and are not comparable.
+BIOM puts features as observations and samples as samples, the transpose of how these tables print.
+A table in the wrong orientation has the right numbers in the wrong places and is hard to spot. The
+unit metadata is checked because relative abundances and genome equivalents have the same shape.
 """
 
 from __future__ import annotations
@@ -21,7 +17,7 @@ from metawrap2 import biomout
 
 
 def test_features_become_observations_and_samples_stay_samples(tmp_path):
-    """The transpose, pinned. Getting it backwards gives right numbers in wrong places."""
+    """Features are BIOM observations and samples are BIOM samples."""
     path = str(tmp_path / "t.biom")
     written = biomout.write_biom({"s1": {"K1": 1.0, "K2": 2.0}, "s2": {"K1": 3.0}}, path)
     assert written == 2

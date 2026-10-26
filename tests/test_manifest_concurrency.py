@@ -1,17 +1,14 @@
-"""The manifest is written from a thread pool, and twice over it was not safe to be.
+"""Thread safety of manifest writes.
 
-`cohort` and `run -j N` start per-sample steps in a ThreadPoolExecutor, and every start and finish
-writes the manifest. A user running 36 water samples at `-j 8` lost a study after 33 finished
-assemblies:
+`cohort` and `run -j N` run per-sample steps in a ThreadPoolExecutor, and every step start and
+finish writes the manifest. A 36-sample run at `-j 8` failed with:
 
     File ".../metawrap2/manifest.py", line 191, in save
         os.replace(tmp, self.path)
     FileNotFoundError: .../.metawrap2/run_steps/manifest.json.tmp
 
-Two races, not one. The temp path was shared, so the first rename took the file and the second
-found nothing; and `data` was serialised while another thread was mutating it, which can raise or
-write a manifest missing a step that had already started. `--resume` recovered the run, so the cost
-was hours rather than results - but the manifest is what resume trusts.
+There were two races: the temp path was shared, so a second rename found no file; and `data` was
+serialised while another thread modified it, which can raise or drop a started step.
 """
 
 import json
@@ -27,7 +24,7 @@ def _manifest(tmp_path):
 
 
 def test_many_threads_recording_steps_all_survive(tmp_path):
-    """The reproducer, scaled down: short steps so the starts land on top of each other."""
+    """48 short steps on 16 threads are all recorded, without errors."""
     manifest = _manifest(tmp_path)
     names = ["assembly:sample_%d" % i for i in range(48)]
     errors = []
@@ -43,7 +40,7 @@ def test_many_threads_recording_steps_all_survive(tmp_path):
         list(pool.map(record, names))
 
     assert not errors, "manifest writes raced: %r" % errors[:3]
-    # Every step is in the file on disk, not just in memory: a resume reads the file.
+    # Check the file on disk, which is what --resume reads.
     with open(manifest.path) as handle:
         written = json.load(handle)
     assert sorted(written["steps"]) == sorted(names)
@@ -59,11 +56,7 @@ def test_no_temp_files_are_left_behind(tmp_path):
 
 
 def test_the_temp_path_is_unique_per_writer(tmp_path):
-    """Directly: two writers must not name the same temp file.
-
-    Asserted on the name rather than only through a race, because a race that happens to pass is
-    not evidence, and this is the property the fix relies on.
-    """
+    """Concurrent writers use distinct temp file names (checked directly, not via a race)."""
     manifest = _manifest(tmp_path)
     seen = set()
     real_replace = os.replace
@@ -89,7 +82,7 @@ def test_the_temp_path_is_unique_per_writer(tmp_path):
 
 
 def test_a_failed_write_leaves_the_previous_manifest_readable(tmp_path, monkeypatch):
-    """A full disk mid-save must not take the manifest with it - resume reads what was there."""
+    """A failed save raises and leaves the previous manifest intact, with no temp file."""
     manifest = _manifest(tmp_path)
     manifest.start("assembly:sample_0", ["mw2"], [])
     with open(manifest.path) as handle:

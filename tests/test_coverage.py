@@ -1,11 +1,9 @@
 """The cohort coverage stage: one catalogue, N alignments, one table, N slices.
 
-What these tests are really about is the demultiplexing. Every piece of the module exists to make a
-contig's sample of origin recoverable from the catalogue-wide depth table, and the failure mode if
-that is wrong is not a crash: a slice of plausible depths attributed to the wrong assembly is a
-well-formed depth table, and `binning --depth` would bin on it happily. So the label prefix, the
-separator check, the restored contig names and the refusal to write an empty slice are each pinned
-here.
+These tests cover demultiplexing: recovering each contig's sample of origin from the catalogue-wide
+depth table. A slice attributed to the wrong assembly is still a valid depth table that `binning
+--depth` would accept, so the label prefix, separator check, restored contig names and refusal to
+write an empty slice are each tested.
 """
 
 from __future__ import annotations
@@ -37,10 +35,9 @@ def _asm(tmp_path, name, contigs):
 
 
 def test_splitting_restores_the_original_contig_names(tmp_path):
-    """Each slice describes the assembly it will be binned against, not the catalogue.
+    """Each slice uses the contig names of its own assembly, without the catalogue prefix.
 
-    Prefixed names against an unprefixed assembly is exactly what `binning`'s own depth check
-    refuses, so leaving them in would turn a correct run into a hard stop one command later.
+    `binning`'s depth check rejects prefixed names against an unprefixed assembly.
     """
     table = tmp_path / "catalogue_depth.txt"
     table.write_text(CATALOGUE_DEPTH)
@@ -57,16 +54,15 @@ def test_splitting_restores_the_original_contig_names(tmp_path):
         "contigName\tcontigLen\ttotalAvgDepth\ts0\ts0-var\ts1\ts1-var\n"
         "c1\t4000\t2.0\t1.5\t95.5\t0.5\t96.6\n"
     )
-    # An empty slice is not an empty file to hand a binner: the catalogue is wrong.
+    # An empty slice means the catalogue is wrong, so no file is written.
     with pytest.raises(ValueError, match="no contig in"):
         coverage.split_depth_table(str(table), str(tmp_path / "d"), ["a", "missing"])
 
 
 # ─── through main() ───────────────────────────────────────────────────────────────────────
 
-#: jgi, emitting a two-sample table over whatever contigs the catalogue it was pointed at holds.
-#: Reading the catalogue is the point: a stub with a fixed contig list could not catch a module that
-#: never prefixed anything.
+#: Stub emitting a two-sample table over the contigs in the catalogue. Reading the catalogue lets
+#: the test catch a module that never adds prefixes.
 _STUBS = {
     "minimap2": (
         "import sys\n"
@@ -75,11 +71,9 @@ _STUBS = {
         "else:\n"
         "    sys.stdout.write('@HD\\tVN:1.6\\n')\n"
     ),
-    # The depth table is computed in-process now (metawrap2.depth) rather than shelled out to
-    # jgi_summarize_bam_contig_depths, so samtools has to answer what the header names and what the
-    # per-base depth is. The contigs come from the catalogue this module wrote, which is where the
-    # old jgi stub read them from too - a header that disagreed with the catalogue would be a BAM
-    # that was never aligned against it.
+    # The depth table is computed in-process (metawrap2.depth), so the samtools stub supplies the
+    # header and per-base depth. Contigs come from the catalogue this module wrote, matching a BAM
+    # aligned against it.
     "samtools": (
         "import os, sys\n"
         "a = sys.argv\n"
@@ -94,9 +88,8 @@ _STUBS = {
         "    sys.stdout.write('@HD\\tVN:1.6\\n')\n"
         "    for c in contigs(a[-1]):\n"
         "        sys.stdout.write('@SQ\\tSN:%s\\tLN:5000\\n' % c)\n"
-        # view -u names the contigs it is streaming and depth reads them back off stdin: the pileup
-        # is given "-" rather than a path, so this is the only way the two halves of the pipe agree
-        # on which contigs exist - which is also true of the real pair.
+        # view -u passes the contig names on stdout and depth reads them from stdin ("-"), as in
+        # the real pipe.
         "elif 'view' in a:\n"
         "    for c in contigs(a[-1]):\n"
         "        sys.stdout.write('%s\\n' % c)\n"
@@ -152,16 +145,16 @@ def test_a_cohort_run_maps_once_per_sample_and_writes_one_slice_per_assembly(tmp
     )  # fmt: skip
     assert rc == 0
 
-    # Two samples, two alignments - not two samples times two assemblies - and the BAMs the
-    # alignment left are swept once the one table is built.
+    # Two samples give two alignments (not samples x assemblies), and the BAMs are removed once
+    # the table is built.
     assert not list((out / "work_files").glob("*.bam"))
     slices = sorted(p.name for p in (out / coverage.DEPTH_DIR).glob("*.txt"))
     assert slices == ["a.txt", "b.txt"]
     assert (out / coverage.DEPTH_DIR / "a.txt").read_text().splitlines()[1].startswith("c1\t")
     assert len((out / coverage.DEPTH_DIR / "b.txt").read_text().splitlines()) == 2
-    # Both samples' columns are in both slices, which is the whole reason for the catalogue.
+    # Both samples' columns are in both slices.
     header = (out / coverage.DEPTH_DIR / "b.txt").read_text().splitlines()[0].split("\t")
     assert [header[i] for i in coverage.depth_means(header)] == ["s0", "s1"]
-    # And the catalogue itself is gone unless asked for.
+    # The catalogue is removed unless requested.
     assert not (out / coverage.CATALOGUE).exists()
     assert (out / coverage.ASSEMBLIES_TABLE).read_text().splitlines()[1].startswith("a\t")

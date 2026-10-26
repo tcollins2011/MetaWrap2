@@ -1,20 +1,20 @@
 """A golden end-to-end test of the whole pipeline's plumbing, with stub tools.
 
-This is the test that catches the mistakes unit tests structurally cannot see: a module that
-writes its outputs where the *next* module does not look for them, a renamed suffix that only
-half the codebase learned about, a manifest that records a path the run never produced.
+It checks what unit tests cannot: that each module writes outputs where the next one looks for
+them, that suffix renames are applied everywhere, and that manifests record paths the run
+produced.
 
-It deliberately does not test the science. The wrapped tools are tiny deterministic stubs on
-PATH, so what is being pinned is MetaWrap2's own contract:
+It does not test the science. The wrapped tools are small deterministic stubs on PATH, and the
+test checks MetaWrap2's own contract:
 
-* the **output tree** of each module - every file and directory it creates, by name;
-* the **``.stats.tsv`` contract** - exact header, column order, row order, and cell formatting;
+* the **output tree** of each module: every file and directory it creates, by name;
+* the **``.stats.tsv`` contract**: exact header, column order, row order and cell formatting;
 * that each module can **consume the previous module's output directory** unchanged.
 
-Golden values are literal in this file. When a change alters one, that shows up in review as a
-diff of the expected output, which is the point - the failure is the notification.
+Golden values are literal in this file, so a change to one shows in review as a diff of the
+expected output.
 
-This is a curated subset: one binning->refinement->consumer chain plus the .stats.tsv golden.
+Covers one binning->refinement->consumer chain plus the .stats.tsv golden.
 """
 
 from __future__ import annotations
@@ -30,12 +30,12 @@ from metawrap2.constants import BIN_EXTENSION, STATS_SUFFIX
 from metawrap2.modules import bin_refinement, binning
 
 #: Contigs are 300 kb because bin_refinement discards bins outside 50 kb - 20 Mb, and
-#: Binning_refiner discards refined bins under 0.5 Mb. Anything smaller makes this test pass by
-#: producing nothing, which is the opposite of what it is for.
+#: Binning_refiner discards refined bins under 0.5 Mb. Smaller contigs would let the test pass by
+#: producing nothing.
 CONTIG_LEN = 300_000
 
-#: Four contigs, named without any assembler-specific convention - nothing in the pipeline may
-#: parse a length or a bin number out of a contig header.
+#: Four contigs, with no assembler-specific naming, since nothing may parse a length or bin number
+#: from a contig header.
 CONTIGS = (1, 2, 3, 4)
 
 
@@ -48,8 +48,8 @@ ASSEMBLY = "".join(contig(i) for i in CONTIGS)
 # --- stub tools ---------------------------------------------------------------------------
 #
 # Each stub is the smallest program that produces what the real tool produces, keyed off the
-# same command-line flags MetaWrap2 passes - so a change to a COMMANDS template that moves an
-# output path makes the stub miss too, and the test fails.
+# flags MetaWrap2 passes, so a COMMANDS template change that moves an output path makes the test
+# fail.
 
 #: Preamble shared by the binner stubs, so the contigs they emit are identical to ASSEMBLY.
 _PREAMBLE = (
@@ -82,10 +82,9 @@ STUBS: Dict[str, str] = {
         "                         % (i, i))\n"
     ),
     # Drains stdin like the real sort: binning pipes the aligner into it, and a sort that exits
-    # early SIGPIPEs the aligner, which pipefail then reports as a failed run.
-    # samtools also supplies the pileup the depth table is computed from. There is no
-    # jgi_summarize_bam_contig_depths stub any more because there is no such call: the table is built
-    # by metawrap2.depth, so the fake data has to be alignments rather than a finished answer.
+    # early SIGPIPEs the aligner, which pipefail reports as a failed run.
+    # samtools also supplies the pileup for the depth table, which metawrap2.depth builds (there is
+    # no jgi_summarize_bam_contig_depths call), so the stub must emit alignments.
     "samtools": _PREAMBLE
     + (
         "a = sys.argv\n"
@@ -106,9 +105,8 @@ STUBS: Dict[str, str] = {
         "        for pos in range(1, CONTIG_LEN + 1):\n"
         "            sys.stdout.write('%s\\t%d\\t5\\n' % (c, pos))\n"
     ),
-    # The two binners agree that c1+c2 belong together and disagree about c3/c4. That gives
-    # bin_refinement one bin worth keeping and one worth arguing over - a set where every binner
-    # agrees, or none do, would not exercise consolidation at all.
+    # The two binners agree that c1+c2 belong together and disagree about c3/c4, giving
+    # bin_refinement one clear bin and one to resolve, so consolidation is exercised.
     "metabat2": _PREAMBLE
     + (
         "pre = sys.argv[sys.argv.index('-o') + 1]\n"
@@ -149,10 +147,10 @@ def config(tmp_path):
 
 @pytest.fixture
 def fake_checkm(monkeypatch):
-    """Deterministic scores, so the .stats.tsv contract can be pinned exactly.
+    """Deterministic scores, so the .stats.tsv contract can be checked literally.
 
-    Scores come from the number of contigs in the bin rather than a hash, because this test is
-    about file format and wiring; the hash-based stand-in belongs in the refinement golden test.
+    Scores come from the number of contigs in the bin, not a hash, since this test is about file
+    format and wiring; the hash-based stand-in is in the refinement golden test.
     """
 
     def scores(bin_path):
@@ -186,7 +184,7 @@ def fake_checkm(monkeypatch):
 
 
 def tree(root: str) -> List[str]:
-    """Every path under *root*, relative and sorted - the output layout as a comparable value."""
+    """Every path under *root*, relative and sorted, so the output layout can be compared."""
     found = []
     for base, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if not d.startswith(".")]  # scratch is not part of the tree
@@ -239,9 +237,9 @@ def test_binning_produces_the_expected_bin_sets(binned):
         "bin_002.fasta",
     ]
 
-    # Every binner's output carries the same convention, whatever the tool called its files:
-    # metaBAT2's "bin.1.fa" and MaxBin2's "bin.001.fasta" both become bin_001.fasta, counted
-    # from 1 and zero-padded so filename order and bin order are the same thing.
+    # Every binner's output is renamed to one convention: metaBAT2's "bin.1.fa" and MaxBin2's
+    # "bin.001.fasta" both become bin_001.fasta, counted from 1 and zero-padded so filename order
+    # matches bin order.
     assert sorted(os.listdir(os.path.join(binned, "maxbin2_bins"))) == [
         "bin_001.fasta",
         "bin_002.fasta",
@@ -253,7 +251,7 @@ def test_binning_produces_the_expected_bin_sets(binned):
 
 
 def test_the_stats_file_is_byte_for_byte_what_it_has_always_been(tmp_path, fake_checkm):
-    """The golden value. A change here is a change to a file users parse."""
+    """The golden value. A change here changes a file users parse."""
     bins = tmp_path / "bins"
     bins.mkdir()
     (bins / "bin_001.fasta").write_text(">c1\n" + "ACGT" * 10 + "\n")
@@ -273,7 +271,7 @@ def test_the_stats_file_is_byte_for_byte_what_it_has_always_been(tmp_path, fake_
 def test_refinement_consumes_binning_output_and_names_its_results(
     tmp_path, binned, config, fake_checkm
 ):
-    """The join between two modules: refinement must find bins where binning left them."""
+    """Refinement finds the bins where binning wrote them."""
     out = tmp_path / "BIN_REFINEMENT"
     rc = bin_refinement.main(
         [
@@ -285,8 +283,7 @@ def test_refinement_consumes_binning_output_and_names_its_results(
             "50",
             "-x",
             "10",
-            # GUNC needs a 6.7 GB reference database; what this test checks is the join between
-            # binning and refinement, which does not depend on it.
+            # GUNC needs a 6.7 GB reference database and is not part of the join under test.
             "--skip-gunc",
             "--config",
             config,
@@ -308,9 +305,8 @@ def test_refinement_consumes_binning_output_and_names_its_results(
 
 # --- refined bins -> annotate_bins --------------------------------------------------------
 #
-# annotate_bins is a consumer of a bin directory, so it is where a change to how bins are named
-# or laid out shows up. Its tool is stubbed the same way as the binners: prokka writes the .gff
-# and .faa the module goes looking for. Anything that moves an expected path breaks the stub.
+# annotate_bins consumes a bin directory, so changes to bin naming or layout show up here. prokka
+# is stubbed to write the .gff and .faa the module looks for.
 
 PROKKA_STUB = {
     "prokka": (
@@ -367,9 +363,8 @@ def refined(tmp_path, binned, config, fake_checkm):
 def test_annotation_covers_every_bin(tmp_path, refined, stubs, config):
     """One annotation per bin, in each of the three documented result folders.
 
-    A bin silently skipped is the failure worth catching, and the place to see it is the
-    reorganised output the module promises the user - not prokka's own working directory, where
-    each bin also keeps a full copy.
+    Checked in the reorganised output folders the module documents, not in prokka's working
+    directory, where each bin also has a full copy.
     """
     from metawrap2.modules import annotate_bins
 

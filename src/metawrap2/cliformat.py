@@ -1,15 +1,10 @@
-"""One help format for every ``metawrap2`` command, and argument types that state their own range.
+"""Shared help formatter for ``metawrap2`` commands, and argument types with declared ranges.
 
-There are two dozen entry points here and each one used to describe its own defaults by hand, which
-has the failure mode you would expect: a default changes in the code and the help string keeps
-quoting the old one. `MetaWrap2HelpFormatter` reads the default off the parser instead, so it cannot
-drift, and `bounded_int` / `bounded_float` do the same for the range of values an option will accept -
-the range is checked and printed from one declaration rather than written twice.
+`MetaWrap2HelpFormatter` reads each option's default from the parser, so help text cannot go out of
+date. `bounded_int` and `bounded_float` declare a range once; it is both checked and printed.
 
-A help string that already explains its default is left alone. That is deliberate: "default minimap2;
-see ALIGNERS for why" says more than "[default: minimap2]" and must not be followed by a second copy
-of the same fact. The rule is simple enough to keep in your head - mention the default yourself when
-there is a reason worth giving, and otherwise let it be filled in.
+A help string that already mentions its default is left unchanged, so authors can explain a default
+in their own words when there is a reason to.
 """
 
 from __future__ import annotations
@@ -21,9 +16,7 @@ from typing import Callable, Optional, Sequence
 class _Bounded:
     """An argparse ``type`` that knows its own limits, so the help can print them.
 
-    A plain ``type=float`` accepts -3 for a percentage and 400 for an ANI, and the tool then fails
-    somewhere downstream with a message about whatever it fed the number to. Checking at the parser
-    is both earlier and cheaper, and once the bounds are declared here the help text comes free.
+    Out-of-range values are rejected at parse time instead of failing later in a downstream tool.
     """
 
     def __init__(
@@ -85,7 +78,7 @@ def percent() -> _Bounded:
 class MetaWrap2HelpFormatter(argparse.HelpFormatter):
     """Appends the accepted range and the default to each option's help, when neither is stated.
 
-    Three annotations, in a fixed order so a reader learns where to look once:
+    Up to three annotations, in this order:
 
     * ``[0-100]`` - the range, from a `bounded_int` / `bounded_float` type.
     * ``[choices: a, b, c]`` - only when argparse is not already showing them in the option itself,
@@ -93,8 +86,7 @@ class MetaWrap2HelpFormatter(argparse.HelpFormatter):
     * ``[default: x]`` - skipped when the option is required, when there is no useful default
       (``None``, ``False``, an empty list), and when the help already contains the word "default".
 
-    Nothing is appended to a flag that is simply on or off: ``[default: False]`` on every
-    ``store_true`` is noise, and the absence of the flag already means "off".
+    Nothing is appended to ``store_true`` / ``store_false`` flags.
     """
 
     def _get_help_string(self, action: argparse.Action) -> str:
@@ -106,8 +98,7 @@ class MetaWrap2HelpFormatter(argparse.HelpFormatter):
         if isinstance(action.type, _Bounded):
             parts.append("[%s]" % action.type.describe())
 
-        # argparse renders choices into the option string only when no metavar overrides them, so
-        # listing them here as well would print them twice in the common case.
+        # argparse shows choices in the option string unless a metavar replaces them.
         if action.choices and action.metavar:
             parts.append("[choices: %s]" % ", ".join(str(c) for c in action.choices))
 
@@ -126,8 +117,7 @@ class MetaWrap2HelpFormatter(argparse.HelpFormatter):
             return False
         if isinstance(action, (argparse._HelpAction, argparse._VersionAction)):
             return False
-        # A positional with nargs="*" defaults to None or [], neither of which means anything to a
-        # reader; and `required` is not set on positionals, so this is the only place to catch them.
+        # Positionals have no `required` flag set and no meaningful default, so skip them here.
         if not action.option_strings:
             return False
         return action.default not in (None, False, [], (), "")
@@ -153,5 +143,5 @@ def add_choice_argument(
     help: str,
     **kwargs,
 ) -> None:
-    """Add a ``--flag {a,b,c}`` option. A thin wrapper, kept so every such option looks the same."""
+    """Add a ``--flag {a,b,c}`` option, so all such options are declared the same way."""
     parser.add_argument(*flags, choices=list(choices), default=default, help=help, **kwargs)

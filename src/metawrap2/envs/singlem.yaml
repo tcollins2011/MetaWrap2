@@ -1,20 +1,17 @@
 # SingleM, for `metawrap2 appraise`: what share of the community a bin set represents.
 #
-# Its own environment rather than a lodger in another one, for two reasons. It pins a narrow set of
-# dependencies of its own (smafa, diamond, hmmer, a pinned pandas/numpy pair) that has no overlap
-# with the tools in the bins or binqc envs. And it is the only thing here that needs the GTDB marker
-# metapackage - 2.2 GB to download, 9.7 GB on disk - so a user who never asks "what did my bins
-# miss" should not have the env, let alone the database, arrive with everything else.
+# A separate env for two reasons. SingleM pins its own narrow set of dependencies (smafa,
+# diamond, hmmer, a pinned pandas/numpy pair) with no overlap with the bins or binqc envs. And it
+# needs the GTDB marker metapackage (2.2 GB to download, 9.7 GB on disk), which users who do not
+# run appraise should not have to install.
 #
-# `singlem data` downloads the metapackage, and `metawrap2 install-db singlem` runs exactly that.
-# Nothing downloads it implicitly: the appraise module fails with the install command rather than
-# fetching 9.7 GB on a user's behalf.
+# `metawrap2 install-db singlem` runs `singlem data` to download the metapackage. Nothing
+# downloads it implicitly: the appraise module fails with the install command instead.
 name: metawrap2-singlem
 channels:
   - conda-forge
   - bioconda
 dependencies:
-  # 0.21 is the floor on purpose: this is the series whose `microbial_fraction` output
-  # metawrap2.funcabund parses, and whose read_fraction.py the percentage handling there was
-  # checked against.
+  # 0.21 is the floor because this series' `microbial_fraction` output is what metawrap2.funcabund
+  # parses, and its read_fraction.py is what the percentage handling there was checked against.
   - singlem >=0.21.4

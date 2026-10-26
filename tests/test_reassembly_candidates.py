@@ -1,16 +1,12 @@
-"""The third candidate: reassemble_bins choosing the *original* bin over both reassemblies.
+"""Tests for reassemble_bins choosing the original bin when it beats both reassemblies.
 
-The module exists to pick the best of three versions of every bin - the strict reassembly, the
-permissive reassembly, and the bin it started from. The original was copied in for scoring under a
-hardcoded ``.orig.fa`` while CheckM was invoked ``-x fasta``, so it was never scored, never a
-candidate, and never chosen: on a 26-bin run, 4 bins (15%) were replaced with a reassembly that
-scored *worse* than the original, and the module announced "0 bins were not improved by any
-reassembly" - the defect restating itself as a result.
+reassemble_bins picks the best of three versions of each bin: strict, permissive and original. The
+original was once staged as ``.orig.fa`` while CheckM ran with ``-x fasta``, so it was never scored.
+On a 26-bin run, 4 bins were replaced by worse reassemblies and the summary reported "0 bins were
+not improved by any reassembly".
 
-So the fixture these tests are built on (``tests/fixtures/reassembly``, see its SOURCE.md) is one
-where the original wins, which is the case that failed silently. The downstream crash it caused -
-an empty series in ``plot_reassembly``, which is where a user actually saw this - is pinned at the
-bottom of the file.
+The fixture (``tests/fixtures/reassembly``, see its SOURCE.md) includes bins where the original
+wins. The tests at the end cover the resulting empty-series crash in ``plot_reassembly``.
 """
 
 import os
@@ -28,11 +24,11 @@ CANDIDATES = os.path.join(FIXTURES, "candidates.stats.tsv")
 WINNERS = os.path.join(FIXTURES, "reassembled_bins.stats.tsv")
 HEADER_ONLY = os.path.join(FIXTURES, "original_bins.stats.tsv")
 
-#: The module's own defaults, which is what the fixture's margins are drawn around.
+#: The module's default thresholds, which the fixture is built around.
 MIN_COMPLETENESS, MAX_CONTAMINATION = 70, 10
 
-#: What the fixture's 18 candidate rows come to. ``bin_006`` is in the stats file but fails the
-#: thresholds in all three versions, so nothing is chosen for it.
+#: Expected winners from the fixture's 18 candidate rows. ``bin_006`` fails the thresholds in all
+#: three versions, so nothing is chosen for it.
 EXPECTED_WINNERS = [
     "bin_001.strict",
     "bin_002.orig",
@@ -55,13 +51,11 @@ def _chosen():
 
 
 def test_the_original_bin_wins_when_the_reassemblies_score_worse():
-    """The test the reporter asked for: "a fixture where the original bin is the best of the three".
+    """The original is chosen when it scores higher than both reassemblies.
 
-    ``bin_002``'s permissive reassembly is *more* complete than the original (93.0% against 91.5%)
-    and has twice its N50 (52 kb against 26 kb), and is still the wrong answer, because it is 3.4
-    points more contaminated and contamination is penalised five times completeness: 585.5 against
-    570.0. Choosing it is the measurable cost of the defect - a bin handed on as improved when the
-    input was better.
+    ``bin_002``'s permissive reassembly is more complete than the original (93.0% against 91.5%)
+    with twice the N50 (52 kb against 26 kb), but is 3.4 points more contaminated. With
+    contamination weighted five times, the original scores 585.5 against 570.0.
     """
     assert _chosen() == EXPECTED_WINNERS
 
@@ -71,16 +65,14 @@ def test_the_original_bin_wins_when_the_reassemblies_score_worse():
     for style in ("strict", "permissive"):
         loser = next(v for v in _versions() if v.bin_name == "bin_002" and v.style == style)
         assert winner.beats(loser), style
-        # and each loser has the longer contigs, so a selection that ranked on N50 - or one that
-        # could not see the original at all - would pick one of them
+        # each loser has the higher N50, so ranking on N50 or ignoring the original would pick it
         assert loser.n50 > winner.n50, style
 
 
 def test_a_bin_whose_reassemblies_both_fail_the_thresholds_keeps_its_original():
-    """``bin_005``: strict drops to 68.0% complete and permissive rises to 14.0% contaminated.
+    """``bin_005``: strict is 68.0% complete and permissive 14.0% contaminated, so both fail.
 
-    Neither is a candidate at all, so with the original excluded from scoring this bin had no
-    qualifying version and dropped out of the output entirely - a bin lost, not merely degraded.
+    Without the original as a candidate this bin would be dropped from the output.
     """
     chosen = _chosen()
     assert "bin_005.orig" in chosen
@@ -96,7 +88,7 @@ def test_a_bin_with_no_qualifying_version_is_not_chosen():
 
 
 def _bin_set(tmp_path, count=3):
-    """An ``original_bins``/``reassembled_bins`` pair in the layout the CheckM stage expects."""
+    """Create ``original_bins`` and ``reassembled_bins`` in the layout the CheckM stage expects."""
     original = tmp_path / "original_bins"
     reassembled = tmp_path / "reassembled_bins"
     original.mkdir()
@@ -110,11 +102,9 @@ def _bin_set(tmp_path, count=3):
 
 
 def test_every_candidate_staged_for_scoring_carries_the_bin_extension(tmp_path):
-    """One CheckM run scores the whole directory with ``-x fasta``, so a ``.fa`` copy is invisible.
+    """Staged originals use BIN_EXTENSION, since CheckM scores the directory with ``-x fasta``.
 
-    This is the root cause. The staged originals used to be ``bin_001.orig.fa``, which left the
-    reporter's directory holding 26 ``.fa`` files alongside 52 ``.fasta`` ones, and only the 52 in
-    the stats table that the choice was made from.
+    Originals staged as ``bin_001.orig.fa`` were not scored.
     """
     original, reassembled = _bin_set(tmp_path)
     assert reassemble_bins._stage_original_candidates(original, reassembled) == 3
@@ -126,16 +116,14 @@ def test_every_candidate_staged_for_scoring_carries_the_bin_extension(tmp_path):
         "bin_002.orig.fasta",
         "bin_003.orig.fasta",
     ]
-    # Compared against the constant the CheckM command is built from rather than against a spelled
-    # out ".fasta", so renaming the extension again cannot reintroduce this.
+    # Compared against the constant the CheckM command uses, not a literal ".fasta".
     assert all(name.endswith(BIN_EXTENSION) for name in staged), staged
 
 
 def test_the_name_choose_best_bin_returns_resolves_to_a_staged_file(tmp_path):
-    """The two halves have to agree: the winner is copied by ``name + BIN_EXTENSION``.
+    """Every selected name, plus BIN_EXTENSION, is a staged file.
 
-    A staged name the selection cannot produce, or a selected name that is not on disk, both end as
-    the same FileNotFoundError at the promote step - after every reassembly is done.
+    Otherwise the promote step fails with FileNotFoundError after all reassemblies have finished.
     """
     original, reassembled = _bin_set(tmp_path, count=5)
     reassemble_bins._stage_original_candidates(original, reassembled)
@@ -147,7 +135,7 @@ def test_the_name_choose_best_bin_returns_resolves_to_a_staged_file(tmp_path):
 
 
 def test_the_summary_counts_match_the_selection():
-    """Counted off the chosen names' style suffixes, and cross-checked against choose_best_bin."""
+    """Style counts from the chosen names match choose_best_bin's own tally."""
     counts = reassemble_bins._style_counts(EXPECTED_WINNERS)
     assert (counts["orig"], counts["strict"], counts["permissive"]) == (3, 1, 1)
     # the selection function's own tally over the same stats file, as (orig, strict, permissive)
@@ -156,13 +144,13 @@ def test_the_summary_counts_match_the_selection():
 
 
 def test_a_bin_named_for_a_style_is_not_counted_as_that_style():
-    """The counts were substring tests over filenames, so one bin could be counted three times."""
+    """Styles are read from the suffix only, not by substring search in the name."""
     counts = reassemble_bins._style_counts(["orig_strict_permissive_site.orig"])
     assert (counts["orig"], counts["strict"], counts["permissive"]) == (1, 0, 0)
 
 
 def test_the_summary_reports_the_bins_that_kept_their_original():
-    """It used to say "0 bins were not improved by any reassembly", which was the bug speaking."""
+    """The summary states how many bins kept their original."""
     message = reassemble_bins._summary_message(EXPECTED_WINNERS)
     assert "Of 5 bins" in message
     assert "1 were improved by the 'strict' reassembly" in message
@@ -172,18 +160,18 @@ def test_the_summary_reports_the_bins_that_kept_their_original():
 
 
 def test_the_summary_total_is_the_bins_chosen_not_the_bins_offered():
-    """``bin_006`` qualified in no version, so a total of 6 would claim a bin that is not there."""
+    """The total counts chosen bins (5), not every bin in the stats file (6)."""
     assert "Of 5 bins" in reassemble_bins._summary_message(_chosen())
 
 
-# --- the empty series that crashed the run ----------------------------------------------
+# --- plotting empty series --------------------------------------------------------------
 
 
 def _run_plot(out, *stats_paths):
     """Run plot_reassembly the way the module does: host interpreter, ``-m``, thresholds first.
 
-    A subprocess because the script is module-level code driven by ``sys.argv`` - importing it
-    would plot - and because that is exactly how reassemble_bins invokes it.
+    Run as a subprocess because the script runs at import time from ``sys.argv``, and
+    reassemble_bins invokes it the same way.
     """
     src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
     env = dict(os.environ, PYTHONPATH=src, MPLBACKEND="agg")
@@ -207,13 +195,11 @@ def _run_plot(out, *stats_paths):
     ],
 )
 def test_an_empty_series_does_not_crash_any_of_the_three_plots(tmp_path, stats):
-    """The visible symptom: IndexError in all three panels, 62m53s into an otherwise finished run.
+    """An empty series is skipped with a note in each panel instead of raising IndexError.
 
-    ``original_bins.stats.tsv`` is header-only whenever no ``.orig`` candidate was scored, and each
-    panel wrote its label at a fraction of the series' length - ``series[x_pos - 1]``, which is
-    ``series[-1]`` on an empty list, for the N50 panel, and ``series[x_pos]`` for the completion and
-    contamination ones. A header-only table is still legitimate once the extension is fixed (every
-    original can fail ``-c``/``-x``), so the guard has to hold rather than the file being prevented.
+    ``original_bins.stats.tsv`` is header-only when no ``.orig`` candidate passes ``-c``/``-x``.
+    Each panel places its label by indexing into the series (``series[x_pos - 1]`` for N50,
+    ``series[x_pos]`` for completion and contamination), which fails on an empty list.
     """
     done = _run_plot(tmp_path, *stats)
     assert done.returncode == 0, done.stderr
@@ -227,11 +213,10 @@ def test_an_empty_series_does_not_crash_any_of_the_three_plots(tmp_path, stats):
 
 
 def test_a_series_of_three_bins_is_labelled_without_wrapping(tmp_path):
-    """``len // 4 - 1`` is ``-1`` for a series of fewer than four bins.
+    """A three-bin series is plotted and labelled.
 
-    Not fatal - it wrapped to the end of the series - but the N50 panel then drew the label at x=0
-    carrying the *lowest* N50 in the set, which is the same off-by-one as the crash. Three bins is
-    the smallest realistic bin set, and the only way to reach the label code is to run the script.
+    ``len // 4 - 1`` is ``-1`` for fewer than four bins, which wrapped the N50 label position to
+    the end of the series.
     """
     with open(WINNERS) as fh:
         lines = fh.readlines()
@@ -240,5 +225,5 @@ def test_a_series_of_three_bins_is_labelled_without_wrapping(tmp_path):
 
     done = _run_plot(tmp_path, short)
     assert done.returncode == 0, done.stderr
-    assert "left out of the" not in done.stdout, done.stdout  # it has points; it is not skipped
+    assert "left out of the" not in done.stdout, done.stdout  # not skipped
     assert (tmp_path / "reassembly_results.png").is_file()

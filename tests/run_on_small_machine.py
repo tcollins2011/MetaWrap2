@@ -1,9 +1,8 @@
 """Run the test suite as if on a small, nearly full machine: 2 cores, 4 GB of RAM, 95% disk used.
 
-This is how both the pre-push hook and CI run pytest. The suite is meant to be independent of the
-host (tests/conftest.py pins a fixed test machine), and this is what checks that promise. A test
-that quietly reads the real core count or free disk passes on a big laptop and fails on a 4-core CI
-runner; under this script it fails on the laptop too, before the push, where it is cheap to fix.
+The pre-push hook and CI run pytest this way. tests/conftest.py pins a fixed test machine; running
+under these limits catches tests that read the real core count or free disk, which would otherwise
+pass on a large workstation and fail on a small CI runner.
 
     python tests/run_on_small_machine.py [pytest args...]
 """

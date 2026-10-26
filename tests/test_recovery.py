@@ -1,18 +1,11 @@
-"""How much of an assembly reached a bin, in the unit that answers the question.
+"""Tests for the fraction of an assembly that reached a bin.
 
-A bin set reports what it found and not what it missed. The number this adds is cheap and changes
-what a reader concludes: across 92,187 metagenomes only ~10% of assembled bp reach a medium- or
-high-quality MAG, and the unbinned remainder is biased rather than random.
+Across 92,187 metagenomes about 10% of assembled bp reach a medium- or high-quality MAG, and the
+unbinned remainder is not a random sample.
 
-Two things the tests are really about:
-
-* **Base pairs, not contigs.** Binners discard short contigs first and short contigs are numerous,
-  so the two numbers differ by a lot and only one of them answers "how much of the sample is this".
-  Measured on a real CAMI2 refined bin set: 17.8% of contigs, 58.7% of base pairs - reporting
-  contigs would understate recovery 3.3x.
-* **Not-measured is not zero.** With no quality-filtered set to compare, the clean fraction is
-  absent rather than 0.0%, because "I did not look" and "none of it is clean" read the same way at a
-  glance and are opposite findings.
+* The fraction is in base pairs, not contigs. Binners drop the many short contigs, so the two
+  differ: on a CAMI2 refined bin set, 17.8% of contigs and 58.7% of base pairs.
+* Without a quality-filtered set, the clean fraction is absent (None), not 0.0%.
 """
 
 from __future__ import annotations
@@ -35,7 +28,7 @@ SUMMARY = os.path.join(os.path.dirname(__file__), "fixtures", "appraise", "appra
 
 @pytest.fixture
 def assembly(tmp_path):
-    # One long contig and four short ones: the shape that makes bp and contig counts disagree.
+    # One long contig and four short ones, so bp and contig fractions differ.
     return _fasta(
         tmp_path / "assembly.fa",
         [("long", "A" * 10_000)] + [("short%d" % i, "C" * 250) for i in range(4)],
@@ -52,9 +45,8 @@ def test_the_fraction_is_of_base_pairs_not_contigs(assembly, tmp_path):
     assert result.assembly_contigs == 5
     assert result.binned_fraction == pytest.approx(10_000 / 11_000)
     assert result.binned_fraction > 0.9, "a contig count would have said 20%"
-    # Lengths come from the assembly, not the bins, so a binner that trimmed a contig cannot change
-    # the denominator; a contig in a bin that is not in the assembly is ignored; and a contig in
-    # two bins is still one contig of the assembly.
+    # Lengths come from the assembly, not the bins; contigs not in the assembly are ignored; and a
+    # contig in two bins is counted once.
     _fasta(bins / "bin.1.fa", [("long", "A" * 50), ("not_in_assembly", "T" * 99_999)])
     _fasta(bins / "bin.2.fa", [("long", "A" * 10_000)])
     result = recovery.measure(assembly, str(bins))
@@ -68,7 +60,7 @@ def test_the_fraction_is_of_base_pairs_not_contigs(assembly, tmp_path):
 
 
 def test_the_clean_fraction_is_absent_when_no_clean_set_was_given(assembly, tmp_path):
-    """ "I did not look" and "none of it is clean" read the same at a glance and are opposites."""
+    """The clean fraction is None without a clean set, and 0.0 with an empty one."""
     bins = tmp_path / "bins"
     bins.mkdir()
     _fasta(bins / "bin.1.fa", [("long", "A" * 10_000)])
@@ -79,7 +71,7 @@ def test_the_clean_fraction_is_absent_when_no_clean_set_was_given(assembly, tmp_
     row = recovery.recovery_row(result)
     assert row["clean_binned_fraction_bp"] == ""
 
-    # The other side of the distinction: looked, found none.
+    # An empty clean set gives zero.
     clean = tmp_path / "clean"
     clean.mkdir()
     result = recovery.measure(assembly, str(bins), str(clean))
@@ -87,9 +79,9 @@ def test_the_clean_fraction_is_absent_when_no_clean_set_was_given(assembly, tmp_
     assert result.clean_fraction == 0.0
     assert recovery.recovery_row(result)["clean_binned_fraction_bp"] == "0.0000"
 
-    # The same for SingleM's appraisal: `coverage_assembled` appears only when an assembly was
-    # appraised too, so a missing column is None (no assembly given), not zero (accounted for
-    # nothing). Its `total` and `average` rows are not samples; averaging them in double-counts.
+    # SingleM appraisal: `coverage_assembled` is present only when an assembly was appraised, so a
+    # missing column gives None, not zero. The `total` and `average` rows are not samples and are
+    # skipped.
     rows = recovery.parse_appraisal(SUMMARY)
     assert {row.sample for row in rows} == {"ERR011347_1"}
     bacteria = next(row for row in rows if row.domain == "d__Bacteria")

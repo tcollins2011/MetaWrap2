@@ -1,17 +1,16 @@
-"""AMRFinderPlus, RGI and argNorm: three tools, three spellings of the same resistance call.
+"""Tests for the AMRFinderPlus, RGI and argNorm output parsers.
 
-Complements ``tests/test_amr.py``, which pins the context ladder. These pin the formats the three
-tools write, which is where this module's silent failures live:
+``tests/test_amr.py`` covers the context ladder; these cover the tools' file formats, where a
+mismatch gives empty results without an error:
 
-* AMRFinderPlus renamed every column between 3.x and 4.x (``Gene symbol`` to ``Element symbol``,
-  ``Contig id`` keeping its lowercase ``id``). Read by the old names, every call parses with an
-  empty symbol and an empty drug class - a resistome of unnamed genes.
-* RGI writes the ARO as a bare number where CARD, hAMRonization and argNorm all write ``ARO:``-
-  prefixed. Joined raw, the two backends never agree on a single call.
-* argNorm's first line is a ``#`` comment, so a plain DictReader takes it as the header and returns
-  every column under the key ``# argNorm version: 1.1.0`` - an empty result, not an error.
+* AMRFinderPlus renamed columns between 3.x and 4.x (``Gene symbol`` to ``Element symbol``;
+  ``Contig id`` keeps its lowercase ``id``). Read by the old names, every call has an empty symbol
+  and drug class.
+* RGI writes the ARO as a bare number; CARD, hAMRonization and argNorm write it ``ARO:``-prefixed.
+  Without normalising, calls from the two backends never match.
+* argNorm's first line is a ``#`` comment, which a plain DictReader takes as the header.
 
-The RGI and argNorm fixtures are vendored real output; see ``tests/fixtures/amr/rgi/SOURCE.md``.
+The RGI and argNorm fixtures are real output; see ``tests/fixtures/amr/rgi/SOURCE.md``.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ CONTIG = "k141_57263_length_92857_cov_80.8395"
 
 
 def _amrfinder_report(path, rows):
-    """A report in AMRFinderPlus' own column order, built from the names the module reads by."""
+    """Write a report in AMRFinderPlus' column order, using the module's column names."""
     header = list(amr.AMRFINDER_COLUMNS.values())
     with open(path, "w") as fh:
         fh.write("\t".join(header) + "\n")
@@ -45,11 +44,10 @@ def _amrfinder_report(path, rows):
 
 
 def test_amrfinderplus_column_names_carry_their_spaces_and_percent_signs(tmp_path):
-    """``Contig id``, ``Element symbol``, ``% Identity to reference`` - as AMRFinderPlus 4.x writes them.
+    """Column names match AMRFinderPlus 4.x, including spaces and ``%`` signs.
 
-    The ``%`` and the spaces are the point: these are not identifiers anyone would guess, and the
-    4.x rename of ``Gene symbol`` to ``Element symbol`` is exactly the kind of upstream change that
-    parses as an absence. An absent symbol is a resistance call with no gene name on it.
+    A renamed column, such as 4.x's ``Gene symbol`` to ``Element symbol``, would parse as an empty
+    value.
     """
     assert amr.AMRFINDER_COLUMNS["contig"] == "Contig id"
     assert amr.AMRFINDER_COLUMNS["symbol"] == "Element symbol"
@@ -85,11 +83,10 @@ def test_amrfinderplus_column_names_carry_their_spaces_and_percent_signs(tmp_pat
 
 
 def test_a_renamed_amrfinder_contig_column_is_an_error_not_a_resistome_of_nothing(tmp_path):
-    """The contig column is checked by name, because every context claim is built on it.
+    """A missing contig column raises KeyError naming AMRFinderPlus.
 
-    Missed, the contig is empty, the contig length lookup misses, and every call reports distance 0
-    to the contig end - which the context ladder reads as "too close to the edge to say". A whole
-    resistome of unplaceable genes, with nothing logged.
+    Without the contig, the length lookup fails and every call gets distance 0 to the contig end,
+    which the context ladder reads as too close to the edge to place.
     """
     path = tmp_path / "report.tsv"
     header = [c.replace("Contig id", "Contig") for c in amr.AMRFINDER_COLUMNS.values()]
@@ -100,11 +97,10 @@ def test_a_renamed_amrfinder_contig_column_is_an_error_not_a_resistome_of_nothin
 
 
 def test_rgi_column_names_are_the_ones_rgi_writes():
-    """Checked against a real RGI table: ``Best_Hit_ARO`` underscored, ``Drug Class`` spaced.
+    """RGI column names match a real RGI table header.
 
-    RGI mixes both conventions in one header, so neither can be derived from the other. The pin is
-    on the real file's header rather than on CARD's documentation, which spells some of them
-    differently again.
+    RGI mixes underscores (``Best_Hit_ARO``) and spaces (``Drug Class``) in one header, and CARD's
+    documentation spells some names differently, so the check uses a real file.
     """
     with open(RGI, newline="") as fh:
         header = set(next(csv.reader(fh, delimiter="\t")))
@@ -116,11 +112,9 @@ def test_rgi_column_names_are_the_ones_rgi_writes():
 
 
 def test_rgi_writes_a_bare_aro_number_and_the_join_needs_the_prefix():
-    """RGI's ``ARO`` column holds ``3002647``; everything else in the ecosystem writes ``ARO:3002647``.
+    """RGI's bare ARO numbers (``3002647``) are prefixed to ``ARO:3002647`` for the join.
 
-    Joined raw against argNorm's output, no call from either backend ever matches one from the
-    other - which reads as two tools finding entirely different genes rather than as a key format
-    mismatch. Pinned in both directions so an already-prefixed value is not doubly prefixed.
+    Without the prefix, no RGI call matches argNorm output. An already-prefixed value is left as is.
     """
     with open(RGI, newline="") as fh:
         raw = {row["ARO"] for row in csv.DictReader(fh, delimiter="\t")}
@@ -132,16 +126,15 @@ def test_rgi_writes_a_bare_aro_number_and_the_join_needs_the_prefix():
     assert amr._aro_accession("ARO:3002647") == "ARO:3002647"
     assert amr._aro_accession("") == ""
 
-    # And the prefixed accessions are what make a call found by both backends one finding.
+    # With the prefix, a call found by both backends joins on the same accession.
     normalised = {row.aro for row in amr.parse_argnorm(ARGNORM)}
     assert "ARO:3002647" in normalised & {call.aro for call in calls}
 
 
 def test_a_gene_argnorm_could_not_place_comes_back_blank_not_as_a_placeholder(tmp_path):
-    """Absence from the ontology is not evidence a call is wrong - a new gene may just not be in it.
+    """A gene argNorm could not map keeps its row with an empty ARO, name and drug list.
 
-    An empty ARO is therefore a legitimate value, and must not become the string ``"nan"``, a zero,
-    or a row dropped from the table: the gene was still found, it just has no ontology term.
+    A new gene may not be in the ontology yet, so the row is kept, without ``"nan"`` or zero.
     """
     with open(ARGNORM) as src:
         text = src.read()
@@ -159,5 +152,5 @@ def test_a_gene_argnorm_could_not_place_comes_back_blank_not_as_a_placeholder(tm
     assert rows["newly_described_arg"].aro == ""
     assert rows["newly_described_arg"].aro_name == ""
     assert rows["newly_described_arg"].drugs == ()
-    # The comment line that precedes the header is still skipped rather than read as column names.
+    # The comment line before the header is skipped.
     assert "cepA" in rows

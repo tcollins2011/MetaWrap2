@@ -1,6 +1,6 @@
 # Run `pre-commit install && pre-commit install --hook-type pre-push` once. The commit hooks
-# format and lint what you touched; the pre-push hooks run the full gate (black, isort, ruff,
-# mypy, pytest) so nothing that fails them can reach the remote.
+# format and lint the changed files; the pre-push hooks run the full gate (black, isort, ruff,
+# mypy, pytest).
 repos:
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
@@ -13,15 +13,14 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.8
     hooks:
-      # ruff lints; black formats. ruff-format is deliberately not enabled - two formatters
-      # fight each other over the same files.
+      # ruff lints; black formats. ruff-format is not enabled, since two formatters would conflict
+      # over the same files.
       - id: ruff
         args: [--fix]
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
-      # Test fixtures and recorded benchmark inputs are verbatim tool output, whitespace included;
-      # rewriting them changes what the tests compare against.
+      # Test fixtures and recorded benchmark inputs are verbatim tool output, whitespace included.
       - id: end-of-file-fixer
         exclude: ^(tests/fixtures/|benchmarks/fixtures/)
       - id: trailing-whitespace
@@ -29,7 +28,7 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
         args: [--maxkb=512]
-        # The vendored KEGG definitions `pathways` reads at run time: package data, not an accident.
+        # The vendored KEGG definitions `pathways` reads at run time (package data).
         exclude: ^src/metawrap2/data/kegg/
       - id: check-merge-conflict
   - repo: local
@@ -41,8 +40,7 @@ repos:
         pass_filenames: false
 
       # --- the pre-push gate -------------------------------------------------------------
-      # These run once per push, not per commit, because they are slower and are about the
-      # state of the whole tree rather than the files in one commit.
+      # These run once per push, not per commit, because they are slower and check the whole tree.
       - id: black-check
         name: black (whole tree, check only)
         entry: black --check --diff .
@@ -69,8 +67,8 @@ repos:
         pass_filenames: false
       - id: pytest
         name: pytest
-        # Run as a 2-core, 4 GB, nearly-full-disk machine - the same way CI runs it - so a test
-        # that depends on this laptop's cores or disk fails here rather than after the push.
+        # Run as a 2-core, 4 GB, nearly-full-disk machine, as CI does, so a test that depends on the
+        # local machine's cores or disk fails before the push.
         entry: python tests/run_on_small_machine.py -q
         language: system
         stages: [pre-push]

@@ -1,8 +1,7 @@
 """Tests for the `metawrap2 run` pipeline driver.
 
-``plan_steps`` is deliberately pure - it touches no filesystem - so the wiring between steps
-(which directory feeds which module) can be asserted directly. That wiring is exactly the
-plumbing users previously did by hand out of the tutorial, so it is worth pinning down.
+``plan_steps`` does not touch the filesystem, so the wiring between steps (which directory feeds
+which module, previously done by hand from the tutorial) can be asserted directly.
 """
 
 from metawrap2.commands import run as driver
@@ -88,7 +87,7 @@ def test_resume_skips_a_step_whose_outputs_are_intact(tmp_path):
     state = driver.StepState(layout, resume=True)
     step, src, out = _finished_step(tmp_path, state)
     assert state.skip_reason(step) is not None
-    # Only a verified step is skipped: a changed input or a lost output means it runs again.
+    # Only a verified step is skipped; a changed input or missing output reruns it.
     src.write_text("@r\nACGTACGT\n+\nIIIIIIII\n")
     assert state.skip_reason(step) is None
     step, src, out = _finished_step(tmp_path, state, name="read_qc:B")
@@ -96,7 +95,7 @@ def test_resume_skips_a_step_whose_outputs_are_intact(tmp_path):
     assert state.skip_reason(step) is None
 
 
-# --- the driver divides the budget rather than handing it out whole -----------------------
+# --- the driver divides the resource budget between steps ---------------------------------
 
 
 def _run_main(tmp_path, monkeypatch, extra_argv=(), limits_toml=""):
@@ -119,8 +118,8 @@ def _run_main(tmp_path, monkeypatch, extra_argv=(), limits_toml=""):
 
 
 def test_the_driver_defaults_to_the_limits_budget(tmp_path, monkeypatch, capsys):
-    # Not to 1 thread and not to "let each module decide": a module left to decide resolves the
-    # whole machine, and N concurrent steps doing that overcommit it N times over.
+    # Each step gets a share of the budget. A module left to decide would take the whole
+    # machine, and N concurrent steps would overcommit it N times.
     from metawrap2 import limits
 
     monkeypatch.setattr(limits, "machine_cores", lambda: 64)
@@ -129,7 +128,7 @@ def test_the_driver_defaults_to_the_limits_budget(tmp_path, monkeypatch, capsys)
     seen = _run_main(tmp_path, monkeypatch)
     assert seen["threads"] == 32  # 50% of 64
     assert seen["memory_gb"] == 204  # 80% of 256
-    # An oversized request is capped to the same budget, and the cap names the knob that set it.
+    # An oversized request is capped to the budget, and the message names the setting.
     capsys.readouterr()
     seen = _run_main(tmp_path, monkeypatch, extra_argv=["-t", "512", "-m", "9999"])
     assert seen["threads"] == 32
@@ -138,7 +137,7 @@ def test_the_driver_defaults_to_the_limits_budget(tmp_path, monkeypatch, capsys)
     assert "max_thread_fraction" in out and "max_memory_fraction" in out
 
 
-# --- refinement must only be given the bin sets that binning produced --------------------
+# --- refinement inputs follow the binning outputs ----------------------------------------
 
 
 def _refinement_bin_sets(argv):
@@ -146,14 +145,13 @@ def _refinement_bin_sets(argv):
 
 
 def test_refinement_inputs_follow_the_selected_binners(tmp_path):
-    """A study selecting two binners used to fail: the second set pointed at a dir never created.
+    """Refinement gets the bin sets of the selected binners and no others.
 
-    SemiBin2's bins used to be dropped silently: selected_binners knew only the classical three.
-    The failure was quiet in one direction and loud in the other - ``--metabat2 --semibin2`` refined
-    metaBAT2 alone, and ``--semibin2`` by itself fell through to the default pair and asked
-    refinement for two directories that were never created.
+    selected_binners knew only the classical three, so ``--metabat2 --semibin2`` refined metaBAT2
+    alone, and ``--semibin2`` alone fell back to the default pair and asked for two directories
+    that were never created.
 
-    All six, because -A/-B/-C stopped at three and zipping against them dropped the rest.
+    Tested with all six, because zipping against -A/-B/-C dropped any beyond three.
     """
     for selection in (
         ("metabat2", "concoct"),
@@ -171,23 +169,22 @@ def test_refinement_inputs_follow_the_selected_binners(tmp_path):
             assert "maxbin2" not in " ".join(argv)
 
 
-# --- the default binner set is a measured decision, so it is pinned -----------------------
+# --- the default binner set --------------------------------------------------------------
 
 
 def test_the_default_binners_are_the_pair_the_benchmark_chose():
-    """metaBAT2+SemiBin2, chosen on cami2_gi 2026-10-09 end to end against metaWRAP 1.
+    """The default is metaBAT2+SemiBin2, chosen on cami2_gi 2026-10-09 against metaWRAP 1.
 
-    53 clean high-quality MAGs against metaWRAP 1's 48, for 43.8 cpu-hours against 52.5 - the first
-    configuration measured here that beats the baseline on both axes at once. The previous default,
-    metaBAT2+MaxBin2, returned 41 for 13.8 and was chosen on a quality-per-cost ratio.
+    53 clean high-quality MAGs against metaWRAP 1's 48, for 43.8 CPU-hours against 52.5, the first
+    configuration measured to beat the baseline on both. The previous default, metaBAT2+MaxBin2,
+    gave 41 for 13.8 CPU-hours and was chosen on quality per cost.
 
-    Pinned because a default nobody asserts can be widened back to three binners in a one-line
-    edit, which would quadruple what every `metawrap2 run` costs without anything failing.
+    Asserted because adding a third binner back is a one-line edit that would roughly quadruple
+    the cost of every `metawrap2 run`.
 
-    The code and `benchmarks/configurations.toml` have to name the same arm. They are two records
-    of one decision - what runs, and what the results table calls the incumbent - and when they
-    disagree the table ranks challengers against a row nobody runs. That has happened before, on
-    `refinement_completeness`, which is why this is asserted rather than left to the reviewer.
+    The code and `benchmarks/configurations.toml` must name the same default, or the results table
+    ranks challengers against a configuration that does not run (this happened with
+    `refinement_completeness`).
     """
     from metawrap2.benchmark import load_configurations
     from metawrap2.modules import binning

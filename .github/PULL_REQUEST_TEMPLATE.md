@@ -9,6 +9,6 @@
 - [ ] External tools are run via `metawrap2.command.run(...)` (not `subprocess` directly)
 - [ ] No `.sh`/`.pl`/`.R` files added (MetaWrap2 is Python-only)
 - [ ] Did not change scientific defaults / swap tools without discussion
-- [ ] Golden tests still pass, or their recorded values were updated deliberately in this PR
+- [ ] Golden tests still pass, or their recorded values were updated in this PR with the reason stated
 - [ ] Bin names/extensions go through `constants.bin_filename()` / `constants.BIN_EXTENSION`
 - [ ] Updated docs / CHANGELOG if user-facing

@@ -1,24 +1,22 @@
 """MetaWrap2 phylogeny: a tree from an alignment the pipeline already produced.
 
-Nothing here aligns anything. Two alignments exist by the time a tree is wanted, and this module's
-whole job is to turn either into a tree with support values that can be read:
+This module does no alignment. It builds a tree with support values from one of two alignments
+the pipeline already writes:
 
-* `classify_bins --gtdbtk` leaves a concatenated marker alignment - 120 bacterial or 53 archaeal
-  single-copy genes - which places a catalogue's genomes relative to each other.
-* `pangenome --msa` leaves one species group's core-gene alignment, which resolves strains within
+* `classify_bins --gtdbtk` writes a concatenated marker alignment (120 bacterial or 53 archaeal
+  single-copy genes), which places a catalogue's genomes relative to each other.
+* `pangenome --msa` writes one species group's core-gene alignment, which resolves strains within
   that species.
 
-They answer different questions and the module says which one it was given. A tree from universal
-markers cannot resolve strains; a tree from one species' core genes says nothing about where that
-species sits.
+The summary records which kind was given. Universal markers cannot resolve strains, and one
+species' core genes do not place that species.
 
-IQ-TREE by default, with ModelFinder choosing the substitution model and the ultrafast bootstrap
-giving support. `--fast` switches to FastTree, which is the right choice at a few hundred genomes
-where model selection dominates the cost.
+IQ-TREE is the default, with ModelFinder choosing the substitution model and ultrafast bootstrap
+for support. `--fast` switches to FastTree, suited to a few hundred genomes, where model
+selection dominates the cost.
 
-See :mod:`metawrap2.phylogeny` for what a support value does and does not mean on a MAG phylogeny -
-the short version is that it measures the alignment, and incompleteness, transfer and contamination
-are all invisible to it.
+See :mod:`metawrap2.phylogeny` on interpreting support values on a MAG phylogeny: they measure
+the alignment and do not reflect incompleteness, transfer or contamination.
 """
 
 from __future__ import annotations
@@ -52,34 +50,31 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["phylogeny"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# -m MFP is ModelFinder Plus: it picks the substitution model from the alignment rather than
-# assuming one, which on a marker concatenation changes branch lengths materially.
+# -m MFP is ModelFinder Plus: it picks the substitution model from the alignment, which on a marker
+# concatenation changes branch lengths materially.
 #
-# -B is the ultrafast bootstrap. 1000 is IQ-TREE's minimum and it refuses fewer. --alrt adds the
-# SH-like approximate likelihood ratio test, which is cheap and disagrees with UFBoot often enough
-# to be worth having both - a branch supported by one and not the other is a branch to doubt.
+# -B is the ultrafast bootstrap; 1000 is IQ-TREE's minimum. --alrt adds the SH-like approximate
+# likelihood ratio test, which is cheap and often disagrees with UFBoot; a branch supported by only
+# one of them is doubtful.
 #
-# -T AUTO rather than a thread count: IQ-TREE's own scaling test picks the number, and over-
-# threading a small alignment makes it slower, not faster. --threads-max caps what AUTO may take.
-# `iqtree`, not `iqtree2`: bioconda's IQ-TREE 3 installs `iqtree` and `iqtree3` and no `iqtree2`,
-# so a template naming the v2 binary fails with "not found" on a perfectly good environment - which
-# is what the first real run did. The flags used here are unchanged between 2 and 3.
+# -T AUTO lets IQ-TREE's scaling test pick the thread count, since over-threading a small alignment
+# slows it down. --threads-max caps it.
+# The binary is `iqtree`: bioconda's IQ-TREE 3 installs `iqtree` and `iqtree3` but no `iqtree2`.
+# The flags used here are the same in versions 2 and 3.
 IQTREE = (
     "iqtree -s {alignment} --prefix {prefix} -m MFP -B {replicates} --alrt 1000"
     " -T AUTO --threads-max {threads} --seed {seed} -redo"
 )
-# Two templates, because FastTree's data type is a flag and not a guess it makes for you. `-nt`
-# declares nucleotide; without it FastTree reads protein. Run the wrong way round the tool does not
-# complain - `-nt` over a protein alignment treats every residue that is not A, C, G or T as
-# ambiguous, which is most of them, and returns a tree built from almost nothing. Every aligner
-# upstream of this module (pangenome core genes, GTDB-Tk's MSA) writes protein, so the fixed `-nt`
-# this used to pass was wrong for its own documented inputs. :func:`metawrap2.phylogeny.read_alignment`
-# measures which it is, and the summary records the model that was used.
-# The SH-like supports FastTree reports are not bootstrap values; the summary says so by recording
-# which tool produced the tree.
+# Two templates, because FastTree's data type is set by a flag: `-nt` declares nucleotide, and
+# without it FastTree reads protein. `-nt` on a protein alignment treats every residue other than
+# A, C, G and T as ambiguous and returns a tree built from almost nothing, with no error. The
+# upstream alignments (pangenome core genes, GTDB-Tk's MSA) are protein.
+# :func:`metawrap2.phylogeny.read_alignment` detects the type, and the summary records the model.
+# FastTree's SH-like supports are not bootstrap values; the summary records which tool built the
+# tree.
 FASTTREE_NT = "fasttree -nt -gtr -log {log} {alignment}"
-#: -lg rather than FastTree's default JTT: LG is the better-fitting empirical matrix for
-#: concatenated single-copy markers, and FastTree has supported it since 2.1.5.
+#: -lg instead of FastTree's default JTT: LG fits concatenated single-copy markers better, and
+#: FastTree has supported it since 2.1.5.
 FASTTREE_AA = "fasttree -lg -log {log} {alignment}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 #: One row per tree.
@@ -87,7 +82,7 @@ SUMMARY_TABLE = "trees" + TSV_SUFFIX
 #: Where each tree's own files are kept.
 TREES_DIR = "trees"
 #: Fixed so two runs over one alignment give the same tree. IQ-TREE's search is stochastic, and an
-#: unseeded rerun that returns a different topology is indistinguishable from a real disagreement.
+#: unseeded rerun with a different topology would look like a real disagreement.
 SEED = 1337
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -96,7 +91,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p = make_parser(
         prog="metawrap2 phylogeny",
         usage="metawrap2 phylogeny [options] -o out (-a alignment.fasta | -d search_dir)",
-        description="A tree from a marker or core-gene alignment, with support values.",
+        description="Build a tree with support values from a marker or core-gene alignment.",
     )
     p.add_argument("-o", "--output", required=True, help="output directory")
     source = p.add_mutually_exclusive_group(required=True)
@@ -104,20 +99,20 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "-a",
         "--alignment",
         nargs="+",
-        help="one or more alignments in FASTA (gzip accepted). GTDB-Tk's `*.user_msa.fasta` or "
-        "`pangenome --msa`'s core-gene alignment",
+        help="one or more alignments in FASTA (gzip accepted), such as GTDB-Tk's "
+        "`*.user_msa.fasta` or the core-gene alignment from `pangenome --msa`",
     )
     source.add_argument(
         "-d",
         "--search",
-        help="a directory to find alignments under - a GTDB-Tk output tree or a `pangenome` output "
-        "directory, whichever you have",
+        help="a directory to search for alignments: a GTDB-Tk output tree or a `pangenome` output "
+        "directory",
     )
     p.add_argument(
         "--fast",
         action="store_true",
-        help="use FastTree instead of IQ-TREE. Orders of magnitude faster and the right choice at "
-        "a few hundred genomes; its SH-like values are not bootstrap support and the table says so",
+        help="use FastTree instead of IQ-TREE. Orders of magnitude faster, and suited to a few "
+        "hundred genomes. Its SH-like values are not bootstrap support; the table labels them",
     )
     p.add_argument(
         "--replicates",
@@ -148,8 +143,8 @@ def _alignments(args) -> List[str]:
     found = _phylo.find_alignments(args.search)
     if not found:
         error(
-            "no alignment found under %s. This module takes GTDB-Tk's `*.user_msa.fasta` or the "
-            "core-gene alignment `pangenome --msa` writes; neither is under that path" % args.search
+            "no alignment found under %s. This module reads GTDB-Tk's `*.user_msa.fasta` or the "
+            "core-gene alignment written by `pangenome --msa`" % args.search
         )
     comm("%d alignment(s) found under %s" % (len(found), args.search))
     return found
@@ -159,8 +154,7 @@ def _tree_name(path: str) -> str:
     """A short, unique-enough name for a tree, from the alignment's own path.
 
     The parent directory is included because every group's core-gene alignment has the same
-    filename, so the basename alone would collide across clusters and the second tree would
-    overwrite the first.
+    filename.
     """
     base = os.path.basename(path)
     for extension in (".gz", ".fasta", ".fa", ".aln", ".faa", ".fna"):
@@ -232,7 +226,7 @@ def main(argv: List[str]) -> int:
                 nucleotide = alignment.kind == "nucleotide"
                 template = FASTTREE_NT if nucleotide else FASTTREE_AA
                 comm(
-                    "%s looks like %s, so FastTree runs with %s"
+                    "%s appears to be %s, so FastTree runs with %s"
                     % (name, alignment.kind, "-nt -gtr" if nucleotide else "-lg")
                 )
                 rc = run(

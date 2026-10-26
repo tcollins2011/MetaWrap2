@@ -1,15 +1,10 @@
-"""Differential abundance, and the refusals that matter more than the test.
+"""Tests for differential abundance (the statistical test is scikit-bio's).
 
-The test itself is scikit-bio's. What this file pins is the reasoning around it:
-
-* **The data is compositional**, so the default is ANCOM-BC rather than a t-test. A relative
-  abundance table is sum-constrained - one feature rising forces others down - and an ordinary test
-  on it answers a question about the constraint.
-* **It refuses rather than producing a number.** Two samples, or one group, cannot support a
-  comparison, and a module that returned something anyway would be worse than one that errors: the
-  number looks like every other number in the output.
-* **Every setting that changes the answer is recorded.** An adjusted p-value without its correction
-  method, prevalence filter and pseudo-count cannot be compared with another one.
+* The data is compositional, so the default is ANCOM-BC instead of a t-test: in a relative
+  abundance table one feature rising forces others down.
+* Too few samples, or one group, raises an error instead of returning a result.
+* Every setting that changes the result (correction method, prevalence filter, pseudo-count) is
+  recorded.
 """
 
 from __future__ import annotations
@@ -23,7 +18,7 @@ from metawrap2 import diffabund
 
 
 def _dataset(n_per_group=3, n_features=12, planted="K0", effect=20.0, seed=0):
-    """Two groups with one feature genuinely different, at a size the test can see."""
+    """Two groups with one feature planted at a large difference."""
     rng = np.random.default_rng(seed)
     values = {}
     groups = {}
@@ -47,7 +42,7 @@ def test_a_planted_difference_is_the_top_hit():
     assert results[0].feature == "K0"
     assert results[0].significant
     assert results[0].log_fold_change > 0, "higher in B, which is where it was planted"
-    # Too few samples is refused rather than tested: a number would look like every other one.
+    # Too few samples raises instead of returning a result.
     with pytest.raises(ValueError, match="at least 3 samples"):
         diffabund.test_groups({"s1": {"K1": 1.0}, "s2": {"K1": 2.0}}, {"s1": "A", "s2": "B"})
 

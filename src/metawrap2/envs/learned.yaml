@@ -1,13 +1,13 @@
 # The three learned binners: SemiBin2, VAMB and COMEBin.
 #
-# One env rather than three. All three are pytorch applications and they solve together, so the
-# separate envs were three copies of the same 1.5 GB dependency graph. They are kept out of bins.yaml
-# for exactly the reason they belong together: pytorch is the heaviest dependency in this half of the
-# pipeline, and nobody who only wants metaBAT2 should wait for it.
+# One env instead of three. All three are pytorch applications and solve together; separate envs
+# held three copies of the same 1.5 GB dependency graph. They are kept out of bins.yaml because
+# pytorch is the heaviest dependency in this half of the pipeline, and metaBAT2-only users should
+# not need it.
 #
-# The solve pulls a CUDA-capable pytorch, so this one env serves both `--device cpu` and
-# `--device cuda`; there is no separate GPU install. The default is still the CPU - see DEFAULT_LEARNED_DEVICE in
-# modules/binning.py for why that is a reproducibility decision and not a capability one.
+# The solve pulls a CUDA-capable pytorch, so this env serves both `--device cpu` and
+# `--device cuda`. The default is the CPU; see DEFAULT_LEARNED_DEVICE in modules/binning.py for
+# why (reproducibility).
 name: metawrap2-learned
 channels:
   - conda-forge

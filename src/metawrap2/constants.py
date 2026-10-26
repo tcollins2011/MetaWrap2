@@ -1,8 +1,7 @@
 """Shared constants for MetaWrap2.
 
-Single source of truth for the magic numbers and literals that were previously
-duplicated (and occasionally inconsistent) across the individual scripts. Import from
-here rather than re-hardcoding a value in a module.
+Numbers and literals used by more than one module. Import them from here instead of
+hardcoding a value in a module.
 """
 
 from __future__ import annotations
@@ -27,47 +26,36 @@ MIN_BIN_SIZE = 50_000  # 50 kb
 MAX_BIN_SIZE = 20_000_000  # 20 Mb
 
 # --- Output file naming --------------------------------------------------------------
-# A file's final extension should say what format it is, so that editors, spreadsheets and
-# other tools recognise it and a reader can tell at a glance. These are defined once so every
-# module and helper agrees, rather than each hardcoding a suffix of its own.
+# Each output's final extension names its format. Defined once so all modules use the same suffix.
 STATS_SUFFIX = ".stats.tsv"  # per-bin completeness/contamination table (was ".stats")
 
-#: Columns :mod:`metawrap2.mimag` appends to a ``.stats.tsv``, after the frozen header and never
-#: reordered. Declared here so a reader of the table has one place to look for its full shape, and
-#: so the append order cannot drift between the writer and whatever consumes it.
+#: Columns :mod:`metawrap2.mimag` appends to a ``.stats.tsv``, after the fixed header and in this
+#: order. Shared by the writer and the readers.
 MIMAG_STATS_COLUMNS = ("mimag_tag", "mimag_rrna", "mimag_trnas")
 CONTIGS_SUFFIX = ".contigs.tsv"  # contig -> bin membership table (was ".contigs")
 TSV_SUFFIX = ".tsv"  # anything else tab-separated (was ".tab"/".tax")
 
 # --- Bin file naming -----------------------------------------------------------------
-# Bins are named ``bin_001.fasta``: one convention for every binner, zero-padded, counted
-# from 1.
-#
-# Every binner names its output differently - metaBAT2 counts from 1, MaxBin2 writes
-# zero-padded ``.001.fasta``, CONCOCT emits its own cluster ids - so without normalising, the
-# same number means a different thing in each folder and ``bin.0`` exists in some and not others.
-#
-# Unpadded numbers also sort wrongly: ``bin.1``, ``bin.10``, ``bin.2``. That is not cosmetic,
-# because bin sets are iterated in sorted filename order and refined bins are numbered in that
-# order - so with ten or more bins the numbering depended on a lexicographic accident. Padding
-# to a fixed width makes filename order and numeric order the same thing.
+# Bins from every binner are renamed ``bin_001.fasta``: zero-padded, counted from 1. The binners
+# name their output differently (metaBAT2 counts from 1, MaxBin2 writes ``.001.fasta``, CONCOCT
+# uses cluster ids). Bin sets are iterated in sorted filename order, so padding keeps that order
+# the same as numeric order (unpadded, ``bin.10`` sorts before ``bin.2``).
 BIN_PREFIX = "bin_"
 BIN_NUMBER_WIDTH = 3  # bin_001 .. bin_999; widens automatically past 999 (see bin_filename)
-BIN_EXTENSION = ".fasta"  # was ".fa": an extension should name the format in full
+BIN_EXTENSION = ".fasta"  # was ".fa"
 UNBINNED_NAME = "unbinned" + BIN_EXTENSION
 
 
 def bin_stem(number: int) -> str:
-    """The bin's name without its extension: ``bin_001``. This is what .stats.tsv rows hold."""
+    """Return the bin's name without extension (``bin_001``), as used in .stats.tsv rows."""
     return "%s%0*d" % (BIN_PREFIX, BIN_NUMBER_WIDTH, number)
 
 
 def bin_filename(number: int) -> str:
-    """The filename for bin *number*, counting from 1: ``bin_001.fasta``.
+    """Return the filename for bin *number*, counting from 1: ``bin_001.fasta``.
 
-    Numbers past the padding width are not truncated or wrapped - they simply get longer
-    (``bin_1000.fasta``), which keeps names unique at the cost of sort order in the rare
-    thousand-bin case.
+    Numbers wider than the padding are not truncated (``bin_1000.fasta``), so names stay unique
+    but sort order breaks past 999 bins.
     """
     return bin_stem(number) + BIN_EXTENSION
 
@@ -76,29 +64,20 @@ def bin_filename(number: int) -> str:
 FASTA_EXTENSIONS = (".fa", ".fasta", ".fna", ".fas")
 FASTQ_EXTENSIONS = (".fastq", ".fq")
 
-#: The same extensions plus their gzipped forms - a superset, so anything matching FASTA_EXTENSIONS
-#: matches this too.
+#: FASTA_EXTENSIONS plus their gzipped forms.
 #:
-#: Deliberately not folded into FASTA_EXTENSIONS, because whether a gzipped bin is acceptable is a
-#: question about the tool that will read it, not about the file. MetaWrap2's own readers
-#: (:func:`metawrap2.io.seqio.smart_open` and everything built on it) do not care about compression,
-#: and neither does CoverM - but prokka and CheckM1 do, so for the modules that hand a bin straight
-#: to one of those, accepting ``.fasta.gz`` at validation would only move the failure from the first
-#: second of the run into the middle of it. Modules opt in where compression is known to work.
+#: Kept separate because gzip support depends on the reading tool. MetaWrap2's readers
+#: (:func:`metawrap2.io.seqio.smart_open`) and CoverM accept it; prokka and CheckM1 do not. Modules
+#: use this set only where every tool they call reads gzipped input.
 FASTA_EXTENSIONS_WITH_GZ = FASTA_EXTENSIONS + tuple(e + ".gz" for e in FASTA_EXTENSIONS)
 
 
 def bin_label(filename: str) -> str:
-    """The name a bin goes by in a table: ``bin_001.fasta.gz`` -> ``bin_001``.
+    """Return the name of a bin in a table: ``bin_001.fasta.gz`` -> ``bin_001``.
 
-    One function because two tables have to agree. ``quant_bins`` can write its abundance table
-    from salmon or from CoverM, and the two tools name a genome differently once compression is
-    involved: stripping only the last dotted component leaves ``bin_001.fasta`` for a gzipped bin,
-    while CoverM (given ``-x fasta.gz``) calls the same bin ``bin_001``. Tables that key the same
-    bin two ways cannot be joined, compared, or read by the same script.
-
-    An unrecognised extension is left alone rather than guessed at: a bin called ``E.coli.fasta``
-    must not become ``E``.
+    ``quant_bins`` writes its abundance table from salmon or CoverM, and the two name gzipped bins
+    differently; this gives both the same key. An unrecognised extension is kept, so
+    ``E.coli.fasta`` becomes ``E.coli``, not ``E``.
     """
     base = os.path.basename(filename)
     stem = base.removesuffix(".gz")
@@ -107,17 +86,11 @@ def bin_label(filename: str) -> str:
 
 
 def is_unbinned_name(filename: str) -> bool:
-    """True if *filename* is the unbinned catch-all rather than a bin.
+    """Return True if *filename* is the unbinned catch-all file, not a bin.
 
-    A bin set may legitimately contain one: `binning` writes the contigs no CONCOCT cluster claimed to
-    ``concoct_bins/unbinned.fasta`` on purpose, so a user can see what was left over. Nothing that
-    treats a directory of FASTAs as a set of candidate genomes should pick it up - it is not a genome,
-    and every tool that scores, refines, annotates, classifies or reassembles one will do it anyway.
-
-    Compared on :func:`bin_label` rather than the filename, so it still holds once an extension has
-    been normalised (``unbinned.fa`` -> ``unbinned.fasta``) or a bin set has been gzipped
-    (``unbinned.fasta.gz``) - each of which is a point at which a check against the full name would
-    quietly start letting the file through.
+    `binning` writes contigs no CONCOCT cluster claimed to ``concoct_bins/unbinned.fasta``. Code
+    that treats a directory of FASTAs as genomes must skip it. Compared on :func:`bin_label`, so
+    renamed (``unbinned.fa``) and gzipped (``unbinned.fasta.gz``) forms also match.
     """
     return bin_label(filename) == bin_label(UNBINNED_NAME)
 
@@ -127,19 +100,15 @@ REFINER_SEPARATOR = "__"
 
 
 # --- The consolidated bin set --------------------------------------------------------
-# bin_refinement's answer is one directory, named for the thresholds it was cut at, so a result
-# carries the thresholds that produced it rather than relying on a note beside it.
-#
-# Written and recognised through the two functions below rather than by each caller spelling the
-# name out. The benchmark looked for a literal "metawrap2_bins", which bin_refinement has never
-# produced - so a refined run looked like three raw overlapping bin sets with nothing consolidated,
-# and the harness declined to rank the one answer that was sitting right there.
+# bin_refinement writes one directory named for its thresholds. Callers build and recognise the
+# name through the two functions below. (The benchmark once looked for a literal
+# "metawrap2_bins", which never exists, and treated refined runs as unconsolidated.)
 REFINED_BINS_PREFIX = "metawrap_"
 REFINED_BINS_SUFFIX = "_bins"
 
 
 def refined_bins_dirname(completeness: float, contamination: float) -> str:
-    """The directory bin_refinement leaves its consolidated bins in: ``metawrap_70_10_bins``."""
+    """Return the directory name for consolidated bins: ``metawrap_70_10_bins``."""
     return "%s%d_%d%s" % (
         REFINED_BINS_PREFIX,
         int(completeness),
@@ -149,11 +118,9 @@ def refined_bins_dirname(completeness: float, contamination: float) -> str:
 
 
 def is_refined_bins_dirname(name: str) -> bool:
-    """Is *name* a consolidated bin set, at whatever thresholds it was cut at?
+    """Return True if *name* is a consolidated bin set directory, at any thresholds.
 
-    Matched on shape rather than against a list, because the thresholds are the user's: -c 50 -x 5
-    is as valid as the defaults, and a rule that only knew the common ones would silently treat an
-    unusual run as unconsolidated.
+    Matched on the name pattern, since users can set any thresholds (for example -c 50 -x 5).
     """
     base = os.path.basename(name.rstrip("/"))
     if not (base.startswith(REFINED_BINS_PREFIX) and base.endswith(REFINED_BINS_SUFFIX)):

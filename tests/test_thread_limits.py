@@ -1,10 +1,8 @@
-"""Confining a tool to the parallelism it was asked for.
+"""Tests for limiting the threads of numerical libraries in tools that fork workers.
 
-A numerical library picks its thread count from the core count unless told otherwise, so a tool that
-forks N workers and does array maths in each gets N x cores threads contending. CONCOCT does exactly
-that, and it cost 30 CPU-hours per CAMI2 sample where 5.6 was enough - found by running the same
-CONCOCT version on the same assembly under a pipeline whose environment carried MKL rather than a
-pthreads OpenBLAS.
+Numerical libraries default to one thread per core, so a tool that forks N workers doing array maths
+runs N x cores threads. CONCOCT does this; it used 30 CPU-hours per CAMI2 sample where 5.6 were
+enough (same version and assembly, MKL in the environment instead of a pthreads OpenBLAS).
 """
 
 from __future__ import annotations
@@ -17,10 +15,10 @@ from metawrap2.modules import binning
 
 
 def test_concoct_is_run_with_the_limits_and_the_other_binners_are_not(tmp_path, monkeypatch):
-    """CONCOCT forks and does array maths; metaBAT2 and MaxBin2 do neither, so they are left alone.
+    """Only the concoct call gets THREAD_LIMITS.
 
-    The learned binners are deliberately excluded too: torch is internally threaded and does not fork
-    per worker, so capping it to one thread would make them slower rather than cheaper.
+    metaBAT2 and MaxBin2 do not fork array-maths workers. The learned binners are also excluded:
+    torch is threaded internally without forking, so a one-thread cap would only slow them down.
     """
     calls = []
 
@@ -46,14 +44,11 @@ def test_concoct_is_run_with_the_limits_and_the_other_binners_are_not(tmp_path, 
     binning._run_concoct(_Args(), "e", str(tmp_path), "asm.fa")
     limited = [env for cmd, env in calls if cmd.startswith("concoct ")]
     assert limited and limited[0] == THREAD_LIMITS, "concoct must be capped"
-    # The cut-up and merge helpers around it are I/O, not maths; they do not need capping and must not
-    # silently acquire it, or a future reader will think the cap is cargo cult.
+    # The cut-up and merge helpers are I/O-bound and run without the limits.
     others = [env for cmd, env in calls if not cmd.startswith("concoct ")]
     assert all(env is None for env in others), others
 
-    # The limits reach the child without dropping the rest of the environment: PYTHONNOUSERSITE
-    # still applied, and a child handed a five-variable environment would lose PATH and fail to
-    # find its own tools.
+    # The limits are added to the child environment, which keeps PYTHONNOUSERSITE and PATH.
     child = command.runner._child_env(True, THREAD_LIMITS)
     assert child["OMP_NUM_THREADS"] == "1"
     assert child["PYTHONNOUSERSITE"] == "1"

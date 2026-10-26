@@ -1,9 +1,8 @@
 """Tests for the two scripts rewritten out of their Python-2-era form.
 
-Both rewrites were validated against the originals on real data before these tests were
-written: ``choose_best_bin`` produced the same winners, and
-``filter_reads_for_bin_reassembly`` produced byte-for-byte identical FASTQ output for all 12
-files of a real bwa-mem stream. This file pins choose_best_bin; the read filter is pinned in
+Both rewrites were checked against the originals on real data: ``choose_best_bin`` chose the
+same winners, and ``filter_reads_for_bin_reassembly`` wrote byte-identical FASTQ for all 12 files
+of a real bwa-mem stream. This file tests choose_best_bin; the read filter is tested in
 test_reassembly_read_filters.py.
 """
 

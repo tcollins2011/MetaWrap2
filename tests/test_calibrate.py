@@ -1,8 +1,7 @@
-"""`metawrap2 calibrate` - the estimates and the budget, read against what runs really did.
+"""Tests for `metawrap2 calibrate`: comparing estimates and the budget with measured runs.
 
-The disk multipliers and the `[limits]` budget are both numbers someone chose. These tests cover
-the reading of them back: that a step's grant reaches the manifest, that calibrate compares the
-grant with the measured peak rather than with itself, and that it says so plainly enough to act on.
+Covers that a step's grant reaches the manifest, that calibrate compares the grant with the
+measured peak, and that the report says which setting to change.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from metawrap2.manifest import COMPLETED, MANIFEST_NAME, Manifest
 
 _STATE = os.path.join(".metawrap2", "run_steps")
 
-BIG = 200 * 1024 * 1024  # comfortably over MIN_INPUT_BYTES
+BIG = 200 * 1024 * 1024  # well over MIN_INPUT_BYTES
 
 
 def study(tmp_path, steps):
@@ -67,11 +66,9 @@ def step(
 
 
 def test_the_report_prints_the_budget_table(tmp_path, capsys):
-    """calibrate compares the grant with the measured peak, of the worst run, and never with zero.
+    """calibrate compares the grant with the highest measured peak across runs of a module.
 
-    Several runs of a module: the budget has to cover the worst of them, not the average. A study
-    from before the budget existed must produce no comparison at all, rather than a division by zero
-    or a fabricated 0 GB grant.
+    A step with no recorded grant produces no comparison (no division by zero, no 0 GB grant).
     """
     found = calibrate.observations(
         [

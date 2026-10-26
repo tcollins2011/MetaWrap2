@@ -10,7 +10,7 @@ def _write_read(path):
 
 
 def _fake_trimmer(tmp_path, monkeypatch, calls):
-    """Stand in for the real trimmer: record the command and write what it promises to write."""
+    """Fake trimmer: record the command and write its expected outputs."""
 
     def fake_run(cmd, env=None, tool=None, **kwargs):
         calls.append(cmd)
@@ -30,7 +30,7 @@ def _fake_trimmer(tmp_path, monkeypatch, calls):
 
 
 def test_fastp_writes_straight_to_the_final_names(tmp_path, monkeypatch):
-    """fastp takes output paths, so its result needs no rename - and none is attempted."""
+    """fastp writes to the given output paths, so no rename is attempted."""
     from metawrap2 import limits
 
     monkeypatch.setattr(limits, "machine_cores", lambda: 64)  # -t 32 must not be clamped first
@@ -62,7 +62,7 @@ def test_fastp_writes_straight_to_the_final_names(tmp_path, monkeypatch):
     assert rc == 0
     (cmd,) = calls
     assert cmd.startswith("fastp ")
-    # Capped at fastp's own useful ceiling rather than handed all 32 threads.
+    # Capped at fastp's useful thread ceiling instead of all 32 threads.
     assert "-w %d" % read_qc.FASTP_MAX_THREADS in cmd
     assert str(out / "trimmed_1.fastq") in cmd
     assert (out / "final_pure_reads_1.fastq").is_file()
@@ -105,6 +105,6 @@ def test_trim_galore_output_is_renamed_from_its_own_convention(tmp_path, monkeyp
     assert rc == 0
     (cmd,) = calls
     assert cmd.startswith("trim_galore ")
-    # Still capped at 4: cutadapt underneath stops scaling there whatever -t says.
+    # Capped at 4, where the underlying cutadapt stops scaling.
     assert "-j %d" % read_qc.TRIM_GALORE_MAX_THREADS in cmd
     assert (out / "final_pure_reads_1.fastq").is_file()

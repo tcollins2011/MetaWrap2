@@ -1,20 +1,17 @@
 # AMBER environment for the benchmark harness (metawrap2 benchmark score, on a binning comparison).
-# AMBER scores bins against a dataset's known contig-to-genome truth, so it says whether a bin is
-# right rather than whether CheckM thinks it is complete. Marker-gene independent, which is why it
-# is not redundant with CheckM: several modern binners use single-copy markers internally, and
-# scoring those with a marker-based tool asks them to grade their own homework.
+# AMBER scores bins against a dataset's known contig-to-genome truth. It does not use marker genes,
+# so it complements CheckM: several modern binners use single-copy markers internally, and a
+# marker-based score is not independent of them.
 #
-# Its own env, and not a module's: nothing a user runs needs AMBER. It is only ever reached by
-# `metawrap2 benchmark`, so a normal install should not have to solve for it.
+# A separate env, not a module's, because only `metawrap2 benchmark` uses AMBER.
 name: metawrap2-benchmark-amber
 channels:
   - conda-forge
   - bioconda
 dependencies:
   - cami-amber >=2.0.5
-  # AMBER draws its figures with `boxplot(labels=...)`, which matplotlib removed in 3.9 - so a fresh
-  # solve installs a matplotlib that kills AMBER with `Axes.boxplot() got an unexpected keyword
-  # argument 'labels'` once the metrics are computed but before it exits cleanly. The pin is on the
-  # plotting library rather than on AMBER because AMBER's numbers are correct; only its plots are
-  # written against the older API. cami-amber does not constrain matplotlib itself.
+  # AMBER draws its figures with `boxplot(labels=...)`, which matplotlib removed in 3.9, so a fresh
+  # solve gives `Axes.boxplot() got an unexpected keyword argument 'labels'` after the metrics are
+  # computed. The pin is on matplotlib, not AMBER, because only AMBER's plotting uses the old API.
+  # cami-amber does not constrain matplotlib itself.
   - matplotlib-base <3.9

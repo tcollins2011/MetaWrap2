@@ -1,34 +1,25 @@
-"""MetaWrap2 catalogue: a non-redundant gene catalogue, for the functional answers that need no bins.
+"""MetaWrap2 catalogue: a non-redundant gene catalogue for functional analysis without bins.
 
-Most assembled sequence never reaches a MAG - across 92,187 metagenomes about 10% of assembled bases
-end up in a medium- or high-quality one - so a pipeline that can only answer functional questions
-about bins is answering them about a tenth of the data, and a biased tenth. This is the other path:
-call genes on all the contigs, collapse them into one catalogue across however many samples, annotate
-the representatives once, and quantify by mapping reads back.
+Across 92,187 metagenomes only about 10% of assembled bases reach a medium- or high-quality MAG.
+This module covers the rest: call genes on all contigs, cluster them into one catalogue across
+samples, annotate the representatives once, and quantify by mapping reads back. Identifiers and
+tables match the binned path, so the two outputs can be joined (for example, to ask what share of
+the community's function the MAGs captured).
 
-It is a first-class path rather than a degraded mode, and deliberately joinable with the binned one:
-same identifiers, same tables, so "what fraction of the community's function did my MAGs capture" is
-a question the two outputs can answer together.
+Clustering reduces annotation work: 5 million genes from ten samples might contain 500,000
+distinct ones.
 
-Where the cost goes, and why clustering is worth it at all: annotating 5 million genes from ten
-samples is ten times the work of annotating the 500,000 distinct ones among them. The catalogue is
-the thing that makes the bin-free path affordable, not a tidying step afterwards.
+Gene ids are prefixed with their source first. :mod:`metawrap2.genecall` names genes
+``<contig>_<n>`` and assemblers number contigs from one, so gene ids collide between samples, and
+``mmseqs createdb`` merges genes with the same name before clustering (two identical inputs of
+1,772 genes each gave 1,772, not 3,544). Catalogue names are ``<source>~<gene_id>``, the convention
+:mod:`metawrap2.modules.coverage` uses for contigs, and ``members.tsv`` also records the original
+gene id and source for joins with per-sample tables.
 
-**Gene ids are prefixed with their source before anything else happens.** :mod:`metawrap2.genecall`
-names a gene ``<contig>_<n>``, and every assembler numbers contigs from one, so two samples routinely
-produce the same gene id. ``mmseqs createdb`` keys on the name, so without prefixing it merges those
-genes *before clustering runs* - two identical inputs of 1,772 genes each went in and 1,772 came out,
-not 3,544. That is not a tidying detail: it silently drops genes in exactly the multi-sample case
-this module exists for. The catalogue therefore carries ``<source>~<gene_id>`` names, the same
-convention and separator :mod:`metawrap2.modules.coverage` uses for its contig catalogue, and
-``members.tsv`` carries the original gene id and source beside the prefixed one so the join back to
-the per-sample tables still works.
-
-**Nucleotide clustering, with the proteins carried along.** The catalogue has two jobs: reads are
-mapped against it (which needs nucleotides) and it is annotated (which wants proteins). Clustering
-the nucleotide genes and then pulling out the representatives' proteins gives one catalogue that
-does both, with a single definition of what a cluster is. Clustering proteins instead would give a
-catalogue whose members differ in nucleotide sequence by more than the mapping step assumes.
+Clustering is on nucleotides, and the representatives' proteins are extracted afterwards. Reads are
+mapped to the nucleotides and the proteins are annotated, with one definition of a cluster.
+Protein clustering would allow members to differ in nucleotide sequence more than the mapping step
+assumes.
 """
 
 from __future__ import annotations
@@ -61,22 +52,18 @@ from ._common import (
     warning,
 )
 
-#: MMseqs2 comes with the annotate env already (Bakta pulls it in), so the bin-free path costs no
-#: extra install.
+#: MMseqs2 is already in the annotate env (a Bakta dependency).
 CONDA_ENV = MODULE_ENVS["annotate"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# linclust, not cluster: linear-time, which is what makes a ten-sample catalogue tractable. The
-# quality difference against `mmseqs cluster` is small at 95% identity, where the clusters are tight
-# enough that the greedy incremental algorithm has little room to differ.
+# linclust runs in linear time, and at 95% identity its clusters differ little from
+# `mmseqs cluster`.
 #
-# --cov-mode 1 is coverage of the *target*, which with --cluster-mode 2 (set-cover, longest first)
-# means "the member is covered by the representative". Mode 0, coverage of both, would refuse to
-# cluster a gene fragment with the full-length gene it is part of - and a metagenome is full of gene
-# fragments, so mode 0 produces a catalogue inflated with pieces of genes it already contains.
+# --cov-mode 1 is coverage of the target, which with --cluster-mode 2 means the member is covered by
+# the representative. Mode 0 (coverage of both) would not cluster gene fragments with their
+# full-length genes, and metagenomes contain many fragments.
 #
-# --cluster-mode 2 makes the longest sequence the representative, which is the convention the
-# published gene catalogues use and the right choice when members may be fragments.
+# --cluster-mode 2 makes the longest sequence the representative, as in published gene catalogues.
 MMSEQS_CREATEDB = "mmseqs createdb {inputs} {db}"
 MMSEQS_LINCLUST = (
     "mmseqs linclust {db} {clusters} {tmp} --min-seq-id {identity} -c {coverage} "
@@ -85,39 +72,32 @@ MMSEQS_LINCLUST = (
 MMSEQS_TSV = "mmseqs createtsv {db} {db} {clusters} {out}"
 MMSEQS_REPSEQ = "mmseqs createsubdb {clusters} {db} {rep_db}"
 MMSEQS_CONVERT = "mmseqs convert2fasta {rep_db} {out}"
-# Reads against the catalogue, which is what turns a gene list into gene abundance - and is the half
-# of the bin-free path that makes it comparable with the binned one.
+# Reads are mapped to the catalogue for gene abundance.
 #
-# --no-clip matters here and nowhere else in the pipeline. Salmon trims a trailing run of >=10 A's
-# from any reference, because in a transcriptome that is a poly-A tail; in a gene catalogue it is
-# sequence. A gene really ending in ten A's would otherwise be indexed shorter than it is, and
-# length is the denominator of every unit salmon reports.
+# --no-clip: salmon otherwise trims a trailing run of >=10 A's as a poly-A tail. In a gene catalogue
+# that is sequence, and gene length is the denominator of every unit salmon reports.
 SALMON_INDEX = "salmon index -p {threads} -t {catalogue} -i {index} --no-clip"
-# --libType A rather than IU: a catalogue is quantified against whatever reads a user has, including
-# single-end and stranded libraries, and salmon's auto-detection is better than our assumption.
-# --meta switches to plain EM with uniform initialisation, which is the setting for a reference that
-# is a mixture of organisms rather than one transcriptome.
+# --libType A (auto-detect), since reads may be single-end or stranded.
+# --meta uses plain EM with uniform initialisation, for a reference that mixes many organisms.
 SALMON_QUANT = (
     "salmon quant -i {index} --libType A {reads} -o {out} --meta -p {threads} --no-version-check"
 )
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
-#: The conventional thresholds for a metagenomic gene catalogue: 95% nucleotide identity over 90%
-#: of the shorter sequence. Stated rather than inherited so a gene count here means the same thing
-#: as one in a paper that used them.
+#: The usual thresholds for a metagenomic gene catalogue: 95% nucleotide identity over 90% of the
+#: shorter sequence.
 IDENTITY = 0.95
 COVERAGE = 0.90
-#: Separates a source's label from the original gene id in the catalogue. ``~`` for the same reasons
-#: coverage.SEPARATOR uses it: legal in a fasta header, meaningless to every aligner, and absent
-#: from the gene ids genecall produces. A gene id containing it would make the split cut in the wrong
-#: place, so the inputs are checked rather than trusted.
+#: Separates a source's label from the original gene id. ``~``, as in coverage.SEPARATOR, is legal
+#: in fasta headers, ignored by aligners, and absent from genecall's gene ids. Inputs are checked
+#: for it.
 SEPARATOR = "~"
 #: Representative genes, nucleotide and protein.
 CATALOGUE_FFN = "catalogue.ffn"
 CATALOGUE_FAA = "catalogue.faa"
-#: gene -> representative, which is what lets per-sample counts be aggregated onto the catalogue.
-#: Both the prefixed name and the original (source, gene id) are written, because the catalogue is
-#: keyed on the first and every per-sample table is keyed on the second.
+#: gene -> representative, for aggregating per-sample counts onto the catalogue. Both the prefixed
+#: name (the catalogue's key) and the original (source, gene id) (the per-sample tables' key) are
+#: written.
 MEMBERS_TABLE = "members" + TSV_SUFFIX
 MEMBERS_COLUMNS = (
     "representative",
@@ -126,14 +106,13 @@ MEMBERS_COLUMNS = (
     "member_gene_id",
     "is_representative",
 )
-#: Gene abundance per sample, long format - the shape `quantify_function`, `diff_abundance` and the
-#: BIOM writer all take.
+#: Gene abundance per sample, in the long format that `quantify_function`, `diff_abundance` and the
+#: BIOM writer read.
 ABUNDANCE_TABLE = "gene_abundance" + TSV_SUFFIX
-#: What fraction of each sample's reads the catalogue accounted for. Written beside the abundances
-#: because it is the denominator question: a catalogue built from three samples and quantified
-#: against a fourth can map very little of it, and the abundances alone do not say so.
+#: The fraction of each sample's reads that mapped to the catalogue. A sample not used to build the
+#: catalogue may map poorly, which the abundances alone do not show.
 MAPPING_TABLE = "gene_abundance_mapping" + TSV_SUFFIX
-#: One row per source, for the "was clustering worth it" question.
+#: One row per source: genes in and representatives kept.
 SUMMARY_TABLE = "catalogue_summary" + TSV_SUFFIX
 SUMMARY_COLUMNS = ("source", "genes_in", "representatives_from_this_source")
 # ───────────────────────────────────────────────────────────────────────────────────────────
@@ -181,8 +160,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--separator",
         default=SEPARATOR,
-        help="separates a source label from the gene id in the catalogue (default %s). Only worth "
-        "changing if a gene id contains it, which the run checks for" % SEPARATOR,
+        help="separates a source label from the gene id in the catalogue (default %s). Change it "
+        "only if a gene id contains it; the run checks for this" % SEPARATOR,
     )
     p.add_argument(
         "--quantify",
@@ -190,14 +169,14 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         metavar="SAMPLE=R1[,R2]",
         help="also map reads against the finished catalogue with salmon, one argument per sample: "
         "`gut1=gut1_1.fq,gut1_2.fq`, or `gut1=gut1.fq` for single-end. Writes gene abundance in "
-        "the long format quantify_function and diff_abundance read",
+        "the long format that quantify_function and diff_abundance read",
     )
     p.add_argument(
         "--unit",
         choices=("tpm", "reads"),
         default="tpm",
         help="which salmon column to report (default: %(default)s). tpm is length-normalised and "
-        "comparable between genes; reads is the raw count and is not",
+        "comparable between genes; reads is the raw count, not comparable between genes",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -232,8 +211,8 @@ def source_label(path: str) -> str:
 def write_prefixed(source: str, label: str, out_path: str, separator: str = SEPARATOR) -> int:
     """Copy *source* with every gene id prefixed ``<label><sep>``, returning the count.
 
-    Raises if a gene id already contains the separator, because then the prefix could not be split
-    off again unambiguously and every downstream join would be silently wrong for those genes.
+    Raises ValueError if a gene id already contains the separator, since the prefix could not then
+    be split off unambiguously.
     """
     written = 0
     with open(out_path, "w") as out:
@@ -252,8 +231,7 @@ def write_prefixed(source: str, label: str, out_path: str, separator: str = SEPA
 def split_prefixed(name: str, separator: str = SEPARATOR) -> Tuple[str, str]:
     """(source label, original gene id) from a prefixed catalogue name.
 
-    Splits on the *first* separator: a label cannot contain one (it is a filename stem) and a gene
-    id cannot either (write_prefixed refuses), so the first is the right one.
+    Splits on the first separator; neither labels nor gene ids contain one (write_prefixed checks).
     """
     label, found, gene = name.partition(separator)
     return (label, gene) if found else ("", name)
@@ -293,12 +271,9 @@ def _append_subset(sources: Iterable[str], keep: Set[str], out_path: str) -> int
 
 
 def _parse_quantify(specs: List[str]) -> List[Tuple[str, List[str]]]:
-    """``sample=r1[,r2]`` -> (sample, [reads]). Validated here so a typo fails before salmon runs.
+    """``sample=r1[,r2]`` -> (sample, [reads]), validated before salmon runs.
 
-    One argument per sample rather than a sample sheet, because a catalogue is usually quantified
-    against the same handful of read files it was built from, and a second file format for three
-    paths is a cost with no return. A sample name that repeats is refused: it would silently
-    overwrite a column of the abundance table.
+    A repeated sample name is an error, since it would overwrite a column of the abundance table.
     """
     out: List[Tuple[str, List[str]]] = []
     seen: Set[str] = set()
@@ -315,8 +290,8 @@ def _parse_quantify(specs: List[str]) -> List[Tuple[str, List[str]]]:
             )
         if sample in seen:
             error(
-                "sample %r is given twice to --quantify; each sample is one column of the "
-                "abundance table and two columns cannot share a name" % sample
+                "sample %r is given twice to --quantify; sample names must be unique, since "
+                "each is a column of the abundance table" % sample
             )
         seen.add(sample)
         for path in reads:
@@ -328,16 +303,13 @@ def _parse_quantify(specs: List[str]) -> List[Tuple[str, List[str]]]:
 def _quantify(args, settings, catalogue_ffn: str, samples: List[Tuple[str, List[str]]]) -> None:
     """Map each sample's reads against the catalogue and write gene abundance, long format.
 
-    This is the half of the bin-free path that makes it answer the same questions as the binned
-    one: `quantify_function` takes exactly this table, so a KO's abundance in the whole sample can
-    be computed without any bin existing.
+    `quantify_function` reads this table, so KO abundance can be computed for the whole sample
+    without bins.
 
-    salmon's mapping rate is written out per sample beside the abundances. It is the bin-free
-    equivalent of the binned fraction `bin_refinement` reports, and it is the number that says
-    whether the catalogue describes the sample it was quantified against or only part of it.
+    salmon's per-sample mapping rate is also written. It is the bin-free counterpart of the binned
+    fraction `bin_refinement` reports.
     """
-    # salmon lives with the binning tools, not with the annotate env this module otherwise uses -
-    # the same arrangement `viruses` has for skani, and it saves a second copy of the tool.
+    # salmon is in the quant_bins env, not the annotate env (as `viruses` does for skani).
     env = env_for("quant_bins", settings)
     work = os.path.join(args.output, "work_files", "salmon")
     ensure_dir(work)
@@ -366,7 +338,7 @@ def _quantify(args, settings, catalogue_ffn: str, samples: List[Tuple[str, List[
         quant = os.path.join(out_dir, "quant.sf")
         if rc != 0 or not os.path.isfile(quant):
             warning(
-                "salmon failed on %s; that sample is absent from %s rather than present as zeroes"
+                "salmon failed on %s; that sample is left out of %s (not written as zeroes)"
                 % (sample, ABUNDANCE_TABLE)
             )
             continue
@@ -396,8 +368,7 @@ def _quantify(args, settings, catalogue_ffn: str, samples: List[Tuple[str, List[
             writer.writerow(
                 [
                     sample,
-                    # Blank, not zero, when salmon did not report one: a missing mapping rate and a
-                    # rate of nothing mapping are different findings.
+                    # Blank when salmon did not report a rate, so it is not read as 0%.
                     "" if rate is None else "%.2f" % rate,
                     sum(1 for value in values[sample].values() if value),
                     len(values[sample]),
@@ -409,9 +380,8 @@ def _quantify(args, settings, catalogue_ffn: str, samples: List[Tuple[str, List[
         if rate is not None and rate < 50:
             warning(
                 "%s: only %.1f%% of its reads mapped to the catalogue, so these abundances "
-                "describe a minority of that sample. A catalogue describes the samples it was "
-                "built from; quantifying a different one against it measures the overlap"
-                % (sample, rate)
+                "describe less than half of that sample. For a sample the catalogue was not "
+                "built from, they measure only the overlap with the catalogue" % (sample, rate)
             )
 
 
@@ -431,9 +401,8 @@ def _read_quant(path: str, unit: str) -> Dict[str, float]:
 def _mapping_rate(out_dir: str) -> Optional[float]:
     """Percent of a sample's reads salmon mapped, from its meta_info.json. None if unavailable.
 
-    Read out of salmon's own record rather than computed from the table: a read mapping to several
-    genes contributes to several rows, so summing the table would count it more than once and give
-    a rate above 100.
+    Taken from salmon's record because a multi-mapping read appears in several rows of the table,
+    so summing the table can exceed 100%.
     """
     import json
 
@@ -482,8 +451,7 @@ def main(argv: List[str]) -> int:
         raw_members = os.path.join(work, "clusters" + TSV_SUFFIX)
         members_tsv = os.path.join(args.output, MEMBERS_TABLE)
 
-        # Prefix before anything touches mmseqs: gene ids collide across assemblies, and createdb
-        # keys on the name, so unprefixed inputs lose genes before clustering even starts.
+        # Prefix before mmseqs: gene ids collide across assemblies, and createdb merges equal names.
         prefixed_dir = os.path.join(work, "prefixed")
         ensure_dir(prefixed_dir)
         prefixed_genes: List[str] = []
@@ -592,12 +560,11 @@ def main(argv: List[str]) -> int:
             comm("%d representative protein(s) -> %s" % (n_proteins, faa))
         else:
             comm(
-                "no protein files given (-p, or -d which finds them): the catalogue has nucleotides "
-                "only, so annotating it means calling genes on it again"
+                "no protein files given (-p, or -d which finds them): the catalogue has "
+                "nucleotides only, and genes must be called again to annotate it"
             )
 
-        # From the prefix rather than by re-reading the inputs: the prefix is unambiguous, which is
-        # the whole reason it exists, so no gene can be credited to the wrong source.
+        # Sources are taken from the prefix, which is unambiguous.
         summary = os.path.join(args.output, SUMMARY_TABLE)
         per_source_in: Dict[str, int] = {}
         per_source_rep: Dict[str, int] = {}

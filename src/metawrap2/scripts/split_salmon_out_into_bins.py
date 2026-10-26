@@ -6,18 +6,17 @@ metagenomic assembly, this computes each bin's abundance in each sample as the
 length-weighted median contig coverage: every contig contributes its coverage once per
 kilobase of length, and the bin/sample value is the median of that weighted list.
 
-The weighted-median algorithm and its per-contig weighting are kept verbatim, including that a bin
-whose contigs are all shorter than 1 kb yields an empty weighted list and therefore a NaN cell.
-``.gz`` bins/assemblies are supported via the shared sequence reader.
+The weighted median and per-contig weighting are unchanged from the original, so a bin whose
+contigs are all shorter than 1 kb has an empty weighted list and a NaN cell. ``.gz`` bins and
+assemblies are read through the shared sequence reader.
 
-What is *not* kept is the accumulator reset, which was wrong: see :func:`build_table`. Coverage
-leaked from one sample into the next for all but one bin, and that one bin reported NaN throughout.
+Changes from the original:
 
-Three other departures, all about the table's shape rather than its numbers: row labels come from
-:func:`metawrap2.constants.bin_label` so that they match the ones the CoverM quantifier writes (a
-gzipped bin used to be labelled ``bin_001.fasta`` here and ``bin_001`` there); the count files are
-read in sorted order so the sample columns land in the same order on every run; and only the FASTA
-files in the bin folder are read, since a bin folder also holds tables and tool subdirectories.
+- the per-sample accumulator reset is fixed (see :func:`build_table`);
+- row labels come from :func:`metawrap2.constants.bin_label`, matching the CoverM quantifier (a
+  gzipped bin was labelled ``bin_001.fasta`` here and ``bin_001`` there);
+- count files are read in sorted order, so sample columns have the same order on every run;
+- only FASTA files in the bin folder are read, since it also holds tables and tool subdirectories.
 """
 
 from __future__ import annotations
@@ -45,12 +44,11 @@ def _median(values: List[float]) -> float:
 def load_bins(bin_folder: str) -> Dict[str, str]:
     """Map each contig id to the bin filename that contains it.
 
-    Keyed on :func:`contig_id` to match load_contig_lengths (and the assembly, and salmon's
-    transcript names). Keying on the full header made every metaBAT2 bin invisible here.
+    Keyed on :func:`contig_id` to match load_contig_lengths, the assembly and salmon's transcript
+    names. Keying on the full header missed every metaBAT2 bin.
 
-    Only the FASTA files in the folder are read (see :func:`fasta_files`): a bin folder that has
-    been through bin_refinement also holds tables and tool subdirectories, and a subdirectory here
-    used to raise a bare ``IsADirectoryError``.
+    Only FASTA files are read (see :func:`fasta_files`). A bin folder from bin_refinement also
+    holds tables and tool subdirectories, and a subdirectory raised ``IsADirectoryError``.
     """
     bins = {}
     for path in fasta_files(bin_folder):
@@ -70,15 +68,11 @@ def load_contig_lengths(assembly: str) -> Dict[str, int]:
 def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> None:
     """Write the ``Genomic bins`` abundance table to *out* (tab-separated).
 
-    Each cell is the length-weighted median contig coverage of that bin **in that sample alone**.
-    The weighted list is built fresh per sample, which is the fix for a bug carried in from the
-    original: the accumulators were reset through a bin name left over from the inner loop, so
-    exactly one bin - whichever contig happened to be last in the counts file - had its list
-    cleared, and cleared partway through the pass that reads it. Every other bin therefore kept
-    accumulating, making sample N's cell the median over samples 1..N, and the one bin that was
-    cleared reported NaN in every sample. On two bins and two disjoint samples the table came out
-    as ``bin_1  1000000  500000`` / ``bin_2  nan  nan`` where the counts said each bin belonged
-    entirely to one sample.
+    Each cell is the length-weighted median contig coverage of that bin in that sample only. The
+    weighted list is rebuilt per sample. The original reset the accumulators through a bin name
+    left over from the inner loop, so only the bin of the last contig in the counts file was
+    cleared. Every other bin kept accumulating (sample N's cell was the median over samples 1..N)
+    and the cleared bin was NaN in every sample.
     """
     bins = load_bins(bin_folder)
     contig_lengths = load_contig_lengths(assembly)
@@ -86,16 +80,11 @@ def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> 
     # bin -> sample -> abundance. Insertion-ordered by first appearance, as before.
     abundances: Dict[str, Dict[str, float]] = {}
     samples: List[str] = []
-    # Sorted, because the sample columns are written in the order the count files are read: an
-    # unsorted listdir means two runs over the same data can emit the same table with its columns
-    # in a different order. Labels travel with their values either way, so this is reproducibility
-    # rather than correctness - but a table that changes shape between identical runs is not one
-    # anybody can diff.
+    # Sorted so the sample columns have the same order on every run and tables can be diffed.
     for salmon_file in sorted(os.listdir(quant_dir)):
         sample = ".".join(salmon_file.split(".")[:-2])
         samples.append(sample)
-        # Per sample, and discarded at the end of it: a bin's coverage in this sample is not a
-        # function of the samples read before it.
+        # Rebuilt per sample so earlier samples do not leak into this one.
         weighted: Dict[str, List[float]] = {}
         ct = 0
         with open(os.path.join(quant_dir, salmon_file)) as fh:
@@ -109,20 +98,18 @@ def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> 
                 bin_name = bins[contig]
                 abun = float(line.strip().split("\t")[1])
                 abundances.setdefault(bin_name, {})
-                # Every contig contributes its coverage once per kilobase of its length, so that a
-                # 300 kb contig counts for more of the bin's median than a 2 kb one. Contigs under
-                # 1 kb weigh nothing, and a bin made only of those still yields NaN - that part is
-                # the original's behaviour and is kept.
+                # Each contig adds its coverage once per kilobase of length. Contigs under 1 kb
+                # add nothing, so a bin made only of those is NaN, as in the original.
                 weighted.setdefault(bin_name, []).extend([abun] * (contig_lengths[contig] // 1000))
 
         if ct == 0:
             sys.stderr.write(
                 "\nNone of the contigs/scaffolds in the -a metagenomic assembly file were "
-                "present in the bin files. Please make sure that the bins and total assembly "
-                "have the exact same bins. One cause for this could be that you reassembled "
-                "the bins, disrupting the contig naming. If you do not have the original total "
-                "metagenomic assembly file, then you could not provide the -a option at all "
-                "(but this is not ideal for abundance estimation).\n"
+                "present in the bin files. Check that the bins were made from this assembly "
+                "and use the same contig names. Reassembling the bins changes the contig "
+                "names. If you do not have the original metagenomic assembly file, omit "
+                "the -a option, though abundance estimates are less accurate without "
+                "it.\n"
             )
             sys.exit(1)
 
@@ -131,10 +118,8 @@ def build_table(quant_dir: str, bin_folder: str, assembly: str, out: TextIO) -> 
 
     out.write("Genomic bins\t%s\n" % "\t".join(samples))
     for bin_name, by_sample in abundances.items():
-        # bin_label rather than a strip of the last dotted component: on a gzipped bin the latter
-        # leaves "bin_001.fasta", which is not what the CoverM path calls the same bin.
-        # Columns are written against the sample list, not against this bin's own keys, so a bin
-        # missing from one sample's counts file shifts nothing - it gets a NaN in that column.
+        # bin_label, because stripping the last suffix leaves "bin_001.fasta" on a gzipped bin.
+        # Columns follow the sample list, so a bin missing from one sample gets NaN there.
         row = [str(by_sample.get(sample, float("nan"))) for sample in samples]
         out.write("%s\t%s\n" % (bin_label(bin_name), "\t".join(row)))
 

@@ -3,9 +3,8 @@
 - ``config init``     writes a starter ``~/.metawrap2/config.toml`` you can edit.
 - ``config show``     prints the resolved settings (which file is in effect, database paths,
   thread default, whether conda envs are used).
-- ``config migrate``  converts an older shell-style configuration - a file of
-  ``KEY=/path`` lines meant to be ``source``d - into the TOML MetaWrap2 reads, keeping the paths
-  and saying what happened to anything that no longer applies.
+- ``config migrate``  converts an older shell-style config (``KEY=/path`` lines meant to be
+  ``source``d) into TOML, keeping the paths and reporting keys that no longer apply.
 """
 
 from __future__ import annotations
@@ -16,33 +15,33 @@ from typing import Dict, List, Optional, Tuple
 from ..cliformat import make_parser
 from ..config import RETIRED_DB_KEYS, check_databases, find_config, load_settings
 
-#: The starter config. This is the single source of truth: ``metawrap2.toml.example`` at the
-#: repository root is generated from it, and a test asserts the two have not drifted apart -
-#: they were previously two hand-maintained copies, and the example had fallen behind.
+#: The starter config. ``metawrap2.toml.example`` at the repository root is generated from it,
+#: and a test checks that the two match.
 DEFAULT_CONFIG = """\
 # MetaWrap2 configuration. Copy to ~/.metawrap2/config.toml (or pass with --config).
 # `metawrap2 install-db` writes the [databases] paths here for you.
 # Anything you don't set falls back to the in-code defaults documented in each module.
 
 [settings]
-# Default thread count when a module isn't given -t. Leave it unset and modules use the
-# [limits] budget below, which is usually what you want: it follows the machine instead of
-# pinning every run to one number. Set it to override that for every module.
+# Default thread count when a module isn't given -t. If unset, modules use the [limits]
+# budget below, which scales with the machine. Set it to use one number for every module.
 # threads = 8
 # Set false to run tools directly off your PATH instead of per-module conda envs.
 use_conda_envs = true
 
 [limits]
-# How much of this machine one MetaWrap2 run may take. The defaults below are the ones in
-# effect if you delete this whole section, and they are fractions on purpose: a fraction
-# travels between a laptop and a large node, an absolute number does not. Whatever you set
-# here is divided between concurrent steps, never multiplied - `metawrap2 run -j 4` gives each
-# of four samples a quarter of it, so four samples never ask for four machines' worth of RAM.
+# How much of this machine one MetaWrap2 run may take. The defaults below apply if this section
+# is deleted. Fractions carry over between a laptop and a large node; absolute numbers do not.
+# The budget is divided between concurrent steps: `metawrap2 run -j 4` gives each of four samples
+# a quarter of it.
 #
 # max_thread_fraction = 0.5   # half the cores (cgroup- and affinity-aware, not just nproc)
 # max_memory_fraction = 0.8   # 80% of RAM, what an unset -m resolves to
 # max_disk_fraction = 0.7     # stop the run if a filesystem it writes to passes 70% full
 # max_gpus = 0                # unset means every GPU this machine has; 0 means use none
+# gpu_strict = false          # refuse a GPU step when another process already holds the card.
+#                             # Use for benchmarks: a shared card inflates the step's wall time,
+#                             # and its GPU cost cannot be separated from the other job's.
 #
 # Absolutes win over fractions when you give them, and are still clamped to the machine:
 # max_threads = 32
@@ -50,15 +49,14 @@ use_conda_envs = true
 #
 # Every one of these has a command-line equivalent for a single run: --max-threads,
 # --max-memory-gb, --max-disk-fraction, --max-gpus, and so on. See `metawrap2 --help`.
-# `metawrap2 calibrate` compares what runs were granted against what they really used.
+# `metawrap2 calibrate` compares what runs were granted with what they used.
 
 [databases]
 # Point these at your own databases, or let `metawrap2 install-db` fill them in. Every line is
-# commented out on purpose: an uncommented placeholder is a *configured* path that does not
-# exist, which `metawrap2 config show` and `doctor` then report as a missing database rather
-# than as one you have not set up yet - two different states needing two different fixes. It
-# also leaves `install-db` deciding whether to replace a key or add a second one. Uncomment a
-# line only when the path next to it is real.
+# commented out. An uncommented placeholder is a configured path that does not exist:
+# `metawrap2 config show` and `doctor` report it as a missing database (not as one not yet set
+# up), and `install-db` cannot tell whether to replace the key or add a second one.
+# Uncomment a line only when its path exists.
 # kraken2 module:
 # KRAKEN2_DB = "/path/to/my/kraken2_database"
 # read_qc host removal (the directory holding <host>.bitmask and <host>.srprism*):
@@ -68,8 +66,10 @@ use_conda_envs = true
 # The database's name inside BLASTDB. Only needed if it is not called "nt" (e.g. "core_nt").
 # BLASTDB_NAME = "nt"
 # TAXDUMP = "/path/to/my/NCBI_tax"
-# CheckM1 reference data, used by bin_refinement / reassemble_bins / binning --run-checkm.
-# CheckM stores this path itself; `metawrap2 install-db checkm` runs `checkm data setRoot`.
+# CheckM2's DIAMOND database, for bin_refinement / reassemble_bins / binning --run-checkm, which
+# score bins with CheckM2. `metawrap2 install-db checkm2` installs it and writes this.
+# CHECKM2DB = "/path/to/my/CheckM2_database/uniref100.KO.1.dmnd"
+# CheckM1 reference data, for the same modules with --checkm1 (`metawrap2 install-db checkm`).
 # CHECKM_DB = "/path/to/my/checkm_data"
 
 # Only needed for the opt-in modern tools:
@@ -84,8 +84,7 @@ use_conda_envs = true
 """
 
 
-#: Keys an older shell-style config could set, mapped to the key MetaWrap2 reads. Most are
-#: unchanged; the point of the table is that it is explicit about which ones are not.
+#: Keys an older shell-style config could set, mapped to the key MetaWrap2 reads.
 SHELL_CONFIG_KEYS = {
     "KRAKEN2_DB": "KRAKEN2_DB",
     "BMTAGGER_DB": "BMTAGGER_DB",
@@ -96,18 +95,16 @@ SHELL_CONFIG_KEYS = {
     "GTDBTK_DATA_PATH": "GTDBTK_DATA_PATH",
 }
 
-#: Variables such a file may contain that are not database paths at all - they located the
-#: installation's own scripts, which MetaWrap2 resolves from the installed package instead.
+#: Variables in such a file that are not database paths. They located the installation's
+#: scripts, which MetaWrap2 finds from the installed package.
 SHELL_CONFIG_IGNORED = {"SOFT", "PIPES", "mw_path", "bin_path"}
 
 
 def parse_shell_config(text: str) -> Tuple[Dict[str, str], List[str], List[str]]:
     """Read ``KEY=value`` lines. Returns ``(translated, retired, unrecognised)``.
 
-    Deliberately a line scanner rather than anything that executes the file: the input is a shell
-    script, and running a file to read its settings is how a config becomes an attack surface.
-    Only plain assignments are understood, which is all such a file ever held; anything with
-    command substitution in it is reported as unrecognised rather than guessed at.
+    The file is scanned line by line and never executed. Only plain assignments are read; values
+    with ``$`` or backticks are reported as unrecognised.
     """
     translated: Dict[str, str] = {}
     retired: List[str] = []
@@ -222,21 +219,15 @@ def _show(args) -> int:
     print("  use_conda_envs: %s" % settings.use_conda_envs)
     print("  databases:")
     if settings.databases:
-        # Ask check_databases, which is what `check` and `quickstart` ask, instead of testing each
-        # value here. This printed its own `os.path.exists(val)` and so reported a correctly set
-        # BLASTDB_NAME - the database's *name* inside BLASTDB, not a path - as missing: there is no
-        # file called "nt" to find, and config.NON_PATH_DB_KEYS is where that is already known.
-        # Two answers to one question is how they came to disagree; now there is one.
+        # Use check_databases, as `check` and `quickstart` do. A plain os.path.exists reported
+        # BLASTDB_NAME (a name inside BLASTDB, see config.NON_PATH_DB_KEYS) as missing.
         present_of = {key: present for key, _value, present, _used_by in check_databases(settings)}
         for key, val in settings.databases.items():
-            # A key present with an empty value is "not set", not "missing": nothing was pointed
-            # at, so there is nothing that could have gone missing, and telling the user to go and
-            # find a file they never named is a dead end.
+            # An empty value is reported as not set, not as missing.
             if not val:
                 print("    %-12s %-34s [not set]" % (key, "-"))
                 continue
-            # A key check_databases does not know - something a user added by hand - can only be
-            # checked as a path, which is what it is most likely to be.
+            # Keys unknown to check_databases (added by hand) are checked as paths.
             present = present_of.get(key, os.path.exists(val))
             print("    %-12s %-34s [%s]" % (key, val, "ok" if present else "missing"))
     else:

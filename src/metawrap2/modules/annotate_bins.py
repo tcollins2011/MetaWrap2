@@ -5,9 +5,8 @@ and the results are reorganized into three per-run folders: the product-carrying
 (``bin_funct_annotations``), translated genes (``bin_translated_genes``, .faa) and
 untranslated genes (``bin_untranslated_genes``, .ffn).
 
-This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
-block below, and the tunable numbers in the CONSTANTS block. Change a flag there and it
-takes effect — no need to follow the orchestration logic underneath.
+Tool commands are in the COMMANDS block below and tunable numbers in the CONSTANTS block;
+edit a flag there to change it.
 """
 
 from __future__ import annotations
@@ -113,7 +112,7 @@ def _grep_product(gff_in: str, gff_out: str) -> None:
 def main(argv: List[str]) -> int:
     args = _parse_args(argv)
     if not os.path.isdir(args.bins):
-        error("%s does not exist! Exiting." % args.bins)
+        error("Bin folder %s does not exist." % args.bins)
 
     settings = load_settings(args.config)
     resolve_threads(args, settings)
@@ -137,11 +136,11 @@ def main(argv: List[str]) -> int:
     ckpt = make_checkpoint(args.output)
     try:
 
-        announcement("BEGIN ANNNOTAION PIPELINE!")
+        announcement("BEGIN ANNOTATION PIPELINE!")
         comm("setting up output folder and copying over bins...")
         ensure_dir(args.output)
-        # Output folder keeps the historical "prokka_out" name whichever annotator ran, so
-        # downstream paths and users' scripts do not change when --bakta is used.
+        # The folder is named "prokka_out" for either annotator, so downstream paths do not
+        # change with --bakta.
         prokka_out = os.path.join(args.output, "prokka_out")
 
         if ckpt.todo("prokka"):
@@ -152,10 +151,7 @@ def main(argv: List[str]) -> int:
             tmp_bin = os.path.join(args.output, "tmp_bin.fa")
             bin_files = list_bins(args.bins)
             if not bin_files:
-                error(
-                    "No fasta bins (%s) found in %s. Exiting."
-                    % ("/".join(FASTA_EXTENSIONS), args.bins)
-                )
+                error("No fasta bins (%s) found in %s." % ("/".join(FASTA_EXTENSIONS), args.bins))
             for i in bar(bin_files, desc="annotating bins", unit=" bin", total=len(bin_files)):
                 bin_name = os.path.splitext(i)[0]
                 if not dry_run():
@@ -166,18 +162,18 @@ def main(argv: List[str]) -> int:
                 )
                 if rc != 0:
                     warning(
-                        "Something possibly went wrong with annotating %s. Proceeding anyways"
+                        "Annotation of %s exited with an error; continuing with the next bin."
                         % bin_name
                     )
                 gff = os.path.join(prokka_out, bin_name, bin_name + gff_ext)
                 if not dry_run():
                     if not (os.path.isfile(gff) and os.path.getsize(gff)):
-                        error("Something went wrong with annotating %s. Exiting..." % bin_name)
+                        error("Annotation of %s wrote no GFF file." % bin_name)
                     os.remove(tmp_bin)
 
             if not dry_run() and not os.listdir(prokka_out):
-                error("Something went wrong with running %s on all the bins! Exiting..." % tool)
-            comm("%s finished annotating all the bins!" % tool.upper())
+                error("%s produced no output for any of the bins." % tool)
+            comm("%s finished annotating all the bins." % tool.upper())
             ckpt.done("prokka")
         else:
             comm("skipping %s annotation (already done; --resume)" % tool.upper())
@@ -199,9 +195,8 @@ def main(argv: List[str]) -> int:
 
             comm("You will find the bin annotation gff files in %s." % funct)
             warning(
-                "Your contigs may be truncated in the annotation because they are too long for "
-                "%s to take as input! Check the final annotation files to see what the contig "
-                "naming convention is." % tool.upper()
+                "Contig names may be shortened in the annotation because %s limits their "
+                "length. Check the final annotation files for the contig names used." % tool.upper()
             )
             ckpt.done("format")
         else:

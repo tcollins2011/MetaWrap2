@@ -1,20 +1,17 @@
-"""Viral contigs: the tier, and the three ways a completeness number can mean less than it looks.
+"""Viral contigs: quality tier and interpretation of CheckV completeness.
 
-The fixtures are real output, five contigs' worth, from running geNomad 1.12.0 and CheckV 1.1.1 over
-a CAMI2 assembly. Real rather than invented because both schemas were guessed wrong the first time:
-the confidence CheckV reports is inside a parenthesis in ``completeness_method``, and CheckV's
-``provirus`` column is a literal Yes/No that has nothing to do with geNomad's ``topology``. Parsing
-against invented fixtures would have agreed with the guesses.
+The fixtures are five contigs of output from geNomad 1.12.0 and CheckV 1.1.1 on a CAMI2 assembly.
+Real output is used because both schemas were initially misread: CheckV's confidence is in
+parentheses in ``completeness_method``, and CheckV's ``provirus`` column is a literal Yes/No
+unrelated to geNomad's ``topology``.
 
-What the tests are about:
+Covered:
 
-* **A lower bound is not an estimate.** ``HMM-based (lower-bound)`` means "at least this complete".
-  35 of 161 contigs on a real assembly land there, and treating those as estimates under-reports
-  completeness for precisely the viruses with no close relative - the novel ones.
-* **CheckV's tier is CheckV's.** It applies MIUViG including the terminal-repeat evidence that makes
-  a genome Complete rather than merely 100% estimated, so re-deriving a tier from the number could
-  only disagree with the tool that produced it.
-* **A contig CheckV never scored is undetermined, not low quality.** 16 of the 161 are like that.
+* ``HMM-based (lower-bound)`` means "at least this complete", not an estimate. 35 of 161 contigs
+  on a real assembly have it, mostly viruses with no close relative.
+* The tier is taken from CheckV, which applies MIUViG including terminal-repeat evidence for
+  Complete genomes, and is not re-derived from the number.
+* A contig CheckV did not score is undetermined, not low quality (16 of the 161).
 """
 
 from __future__ import annotations
@@ -39,7 +36,7 @@ def merged():
 
 
 def test_a_lower_bound_is_not_treated_as_an_estimate(merged):
-    """The one that matters: an HMM-based figure is a floor, not a measurement."""
+    """An HMM-based completeness figure is treated as a lower bound."""
     assert len(merged) == 5
     bounded = [c for c in merged if c.completeness_confidence == viruses.LOWER_BOUND]
     assert bounded, "the fixture has to contain one for this to test anything"
@@ -59,8 +56,8 @@ def test_a_lower_bound_is_not_treated_as_an_estimate(merged):
 
 
 def test_the_provirus_flag_comes_from_checkv_not_from_topology():
-    """CheckV's ``provirus`` is a literal Yes/No. geNomad's ``topology`` describes terminal repeats,
-    and reading it as a provirus marker labelled every linear contig one."""
+    """The provirus flag is CheckV's Yes/No column. geNomad's ``topology`` describes terminal
+    repeats; reading it as a provirus marker labelled every linear contig a provirus."""
     genomad = {"c1": {"seq_name": "c1", "length": "5000", "topology": "No terminal repeats"}}
     not_provirus = viruses.merge("g", genomad, {})[0]
     assert not not_provirus.provirus
@@ -81,8 +78,8 @@ def _edge(ref, query, ani, af):
 
 
 def test_the_viral_coverage_threshold_keeps_a_shared_region_from_merging():
-    """95% ANI over 50% of the sequence is a shared gene, not the same population. The genome
-    thresholds (95/10) would merge these; the viral ones (95/85) must not."""
+    """95% ANI over 50% of the sequence is a shared region, not one population. Genome
+    thresholds (95/10) would merge these; viral thresholds (95/85) do not."""
     lengths = {"A": 40000, "B": 38000}
     assert len(viruses.build_votus(["A", "B"], [_edge("A", "B", 97.0, 50.0)], lengths)) == 2
     assert len(viruses.build_votus(["A", "B"], [_edge("A", "B", 97.0, 90.0)], lengths)) == 1

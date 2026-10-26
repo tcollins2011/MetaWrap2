@@ -1,30 +1,22 @@
-"""Viral contigs: what they are, how much of a genome each one is, and which populations they form.
+"""Viral contigs: classification, completeness, and clustering into populations.
 
-MetaWrap2 bins prokaryotes and discards the phage, in datasets where phage is usually the most
-abundant thing present. This is the viral counterpart of ``binning`` plus ``bin_refinement``, and it
-needs both halves for the output to mean anything: geNomad says "this contig is a virus", CheckV says
-"and it is 40% of one".
+The viral counterpart of ``binning`` plus ``bin_refinement``: geNomad identifies viral contigs and
+CheckV estimates how complete each one is.
 
-Four things this file owns, in the order a result depends on them:
+**Provirus trimming.** An integrated prophage sits inside a bacterial contig, and untrimmed it is a
+chimera whose completeness has no meaning. CheckV trims the host flanks; the trimmed coordinates
+are carried through.
 
-**Provirus trimming is not optional.** An integrated prophage sits inside a bacterial contig. Reported
-untrimmed it is one chimeric sequence that is neither a virus nor a chromosome, and its completeness
-is meaningless. CheckV trims the host flanks; the trimmed coordinates are carried so a reader can see
-how much was cut and from where.
+**Completeness is estimated against a reference**, so a contig with no close relative in the
+database is reported as a fragment whether or not it is one. CheckV's confidence level is on every
+row, and :attr:`ViralContig.completeness_is_reliable` separates estimates from lower bounds.
 
-**Completeness is estimated against a reference, so novelty looks like fragmentation.** CheckV's
-confidence in its own estimate is part of the answer, not a detail: a contig with no close relative
-in the database is reported as a fragment whether or not it is one. The confidence level is on every
-row and :attr:`ViralContig.completeness_is_reliable` exists so a caller cannot silently treat a
-low-confidence estimate as a measurement.
+**Quality tiers follow MIUViG**: high-quality is >=90% complete; a genome fragment is under 50%.
+This makes counts comparable with published ones.
 
-**Quality tiers follow MIUViG, which is a real standard**, unlike the 70/10 threshold this project
-reports prokaryotic bins at. High-quality is >=90% complete; a genome fragment is anything under 50%.
-Naming them after the standard means a count here is comparable with a count in a paper.
-
-**A vOTU is the unit, not a contig.** Two contigs of the same viral population are one finding.
-Clustering at 95% ANI over 85% of the shorter sequence is the convention the viral catalogues use -
-the same shape of work ``dereplicate`` does for genomes, with different thresholds.
+**The unit is the vOTU.** Contigs are clustered at 95% ANI over 85% of the shorter sequence, the
+convention of the viral catalogues; ``dereplicate`` does the same for genomes with different
+thresholds.
 """
 
 from __future__ import annotations
@@ -38,28 +30,23 @@ from typing import TYPE_CHECKING, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from .io.seqio import iter_fasta
 
-if TYPE_CHECKING:  # the runtime import is local, to keep a library from importing a module
+if TYPE_CHECKING:  # imported locally at runtime; see build_votus
     from .modules.dereplicate import Edge
 
-#: vOTU clustering thresholds, the convention the viral genome catalogues are built on (MIUViG;
-#: Roux et al.). Stated rather than inherited from a tool's defaults so a population count here
-#: means the same thing as one in a paper.
+#: vOTU clustering thresholds, the convention viral genome catalogues use (MIUViG; Roux et al.).
 VOTU_ANI = 95.0
 VOTU_COVERAGE = 85.0
 
-#: Minimum length geNomad is worth asking about. Below this a "virus" call is a fragment of one and
-#: CheckV cannot place it; the number is the floor the viral literature generally applies rather than
-#: a measurement of ours, which is why it is a parameter on the module.
+#: Minimum contig length sent to geNomad. Shorter "virus" calls are fragments CheckV cannot place.
+#: The value is the floor commonly used in the viral literature, not a local measurement.
 MIN_VIRAL_LENGTH = 2_000
 
 
 class Tier(Enum):
     """MIUViG quality tiers for an uncultivated viral genome.
 
-    The thresholds are the standard's, and unlike the prokaryotic 70/10 tier this project reports,
-    they are not ours to choose. ``complete`` is CheckV's own determination from direct terminal
-    repeat evidence rather than a completeness cutoff - a circular genome is complete because its
-    ends join, not because an estimate crossed 100%.
+    The thresholds are the standard's. ``complete`` is CheckV's determination from direct terminal
+    repeat evidence, not a completeness cutoff.
     """
 
     COMPLETE = "complete"
@@ -73,19 +60,15 @@ class Tier(Enum):
 #: ``completeness_method``: ``AAI-based (high-confidence)``, ``AAI-based (medium-confidence)``,
 #: ``HMM-based (lower-bound)``, or ``NA``.
 #:
-#: ``lower-bound`` is the one that matters and the reason this is parsed rather than ignored. An
-#: HMM-based figure is not a weak estimate of completeness, it is a *floor*: the genome is at least
-#: this complete and may be much more. On a real assembly 35 of 161 viral contigs land there, so
-#: treating those numbers as estimates would systematically under-report completeness for exactly
-#: the viruses with no close relative in the database - the novel ones.
+#: ``lower-bound`` (HMM-based) is a floor: the genome is at least this complete and may be more.
+#: On a real assembly 35 of 161 viral contigs had one. Treating these as estimates under-reports
+#: completeness for viruses with no close database relative.
 RELIABLE_CONFIDENCE: Tuple[str, ...] = ("high-confidence", "medium-confidence")
 LOWER_BOUND = "lower-bound"
 NO_ESTIMATE = "none"
 
-#: CheckV's own ``checkv_quality``, which is its MIUViG determination. Read rather than re-derived
-#: from the completeness number: CheckV applies the standard's rules including the terminal-repeat
-#: evidence that makes a genome "Complete", and a second implementation of those rules here could
-#: only disagree with it.
+#: CheckV's ``checkv_quality``, its MIUViG determination. Read directly because CheckV applies the
+#: standard's rules, including the terminal-repeat evidence for "Complete".
 CHECKV_TIERS: Mapping[str, Tier] = {}  # populated below, once Tier exists
 
 
@@ -96,9 +79,8 @@ class ViralContig:
     genome: str
     contig: str
     length: int
-    #: geNomad's call: virus, plasmid or chromosome. Only the first reaches this table, but the
-    #: field is kept because a plasmid call on the same run is what the `amr` module's mobility
-    #: work consumes, and the two should not need two passes over the same contigs.
+    #: geNomad's call: virus, plasmid or chromosome. Only viruses reach this table; the field is
+    #: kept because the `amr` module's mobility work uses the plasmid calls from the same run.
     topology: str
     taxonomy: str
     #: geNomad's virus score, 0-1.
@@ -110,8 +92,8 @@ class ViralContig:
     completeness: Optional[float]
     completeness_confidence: str
     contamination: Optional[float]
-    #: True when CheckV found terminal repeats or a circular topology, which is direct evidence of a
-    #: complete genome rather than an estimate.
+    #: True when CheckV found terminal repeats or a circular topology, which is direct evidence of
+    #: a complete genome.
     is_complete_genome: bool
     #: Set when the contig was a provirus and CheckV trimmed host sequence off it.
     provirus: bool
@@ -122,12 +104,10 @@ class ViralContig:
 
     @property
     def completeness_is_reliable(self) -> bool:
-        """Whether the completeness estimate is an estimate at all, rather than a floor.
+        """Whether the completeness figure is an estimate rather than a lower bound.
 
-        Exists so that treating a lower bound as a measurement is a decision rather than an
-        oversight. An HMM-based figure says "at least this complete"; a novel virus with no close
-        relative gets one, and reporting it as a fragment is a statement about the database rather
-        than about the virus.
+        HMM-based figures are lower bounds ("at least this complete"), which novel viruses with no
+        close relative typically get.
         """
         return self.completeness_confidence in RELIABLE_CONFIDENCE
 
@@ -135,9 +115,8 @@ class ViralContig:
     def host_gene_fraction(self) -> Optional[float]:
         """Share of this contig's genes that look bacterial, as a chimerism signal.
 
-        A high value on something called a virus usually means an untrimmed provirus or a
-        misclassified chromosomal region, which is the viral equivalent of what GUNC catches in a
-        prokaryotic bin.
+        A high value on a viral contig usually means an untrimmed provirus or a misclassified
+        chromosomal region, as GUNC detects in a prokaryotic bin.
         """
         if not self.n_genes:
             return None
@@ -145,12 +124,10 @@ class ViralContig:
 
 
 def tier_of(contig: ViralContig) -> Tier:
-    """MIUViG tier for one contig: CheckV's determination where there is one, ours otherwise.
+    """MIUViG tier for one contig: CheckV's where it has one, derived here otherwise.
 
-    CheckV already applies the standard, including the terminal-repeat evidence that makes a genome
-    "Complete" rather than merely 100% estimated, so re-deriving the tier from the completeness
-    number could only disagree with the tool that produced it. The fallback is for a contig CheckV
-    never scored - which happens, and must not silently become low quality.
+    CheckV's determination includes terminal-repeat evidence, so it is used as is. The fallback
+    covers contigs CheckV did not score, which are not treated as low quality.
     """
     if contig.checkv_tier is not None:
         return contig.checkv_tier
@@ -178,8 +155,8 @@ def parse_confidence(completeness_method: str) -> str:
     """The confidence CheckV reports inside ``completeness_method``.
 
     ``AAI-based (high-confidence)`` -> ``high-confidence``; ``HMM-based (lower-bound)`` ->
-    ``lower-bound``; ``NA`` or empty -> ``none``. Parsed from the parenthesis rather than matched
-    against whole strings, so a new method name with a known confidence still works.
+    ``lower-bound``; ``NA`` or empty -> ``none``. Parsed from the parentheses, so a new method name
+    with a known confidence still works.
     """
     found = re.search(r"\(([^)]+)\)", completeness_method or "")
     if found:
@@ -204,9 +181,9 @@ def _as_float(value: str) -> Optional[float]:
 def parse_genomad(path: str) -> Dict[str, Dict[str, str]]:
     """geNomad's ``*_virus_summary.tsv``, keyed by its ``seq_name``.
 
-    Note that geNomad renames a provirus ``<contig>|provirus_<start>_<end>``, so the key here is not
-    always a contig id from the assembly. :func:`merge` keeps both the geNomad name and the original
-    contig, because the first is what CheckV will echo and the second is what the assembly knows.
+    geNomad names a provirus ``<contig>|provirus_<start>_<end>``, so the key is not always an
+    assembly contig id. :func:`merge` keeps both the geNomad name (which CheckV echoes) and the
+    original contig.
     """
     rows: Dict[str, Dict[str, str]] = {}
     with open(path) as fh:
@@ -242,10 +219,8 @@ def merge(
 ) -> List[ViralContig]:
     """Join geNomad's calls to CheckV's quality, one row per viral sequence.
 
-    A sequence geNomad called and CheckV did not score still appears, with no completeness and
-    ``undetermined`` quality. Dropping it would silently shrink the viral set to whatever CheckV
-    managed, and "CheckV had nothing to compare this to" is a finding about a novel virus rather
-    than a reason to discard it.
+    A sequence geNomad called and CheckV did not score is kept, with no completeness and
+    ``undetermined`` quality, since it may be a novel virus.
     """
     out: List[ViralContig] = []
     for seq_name, grow in genomad_rows.items():
@@ -268,8 +243,8 @@ def merge(
                 completeness_confidence=parse_confidence(crow.get("completeness_method", "")),
                 contamination=_as_float(crow.get("contamination", "")),
                 is_complete_genome=checkv_quality == "complete",
-                # CheckV writes a literal "Yes"/"No" here; geNomad's topology is a different thing
-                # (terminal repeats) and conflating them marked every linear contig a provirus.
+                # CheckV writes "Yes"/"No" here. geNomad's topology (terminal repeats) is a
+                # different field; using it marked every linear contig a provirus.
                 provirus=provirus == "yes",
                 trimmed_length=_as_int(crow.get("proviral_length", ""), 0) or None,
                 checkv_tier=CHECKV_TIERS.get(checkv_quality),
@@ -339,9 +314,8 @@ def summarise(contigs: Sequence[ViralContig]) -> Dict[str, int]:
     return out
 
 
-#: Minimum spacer length to use for host linking. A CRISPR spacer is 25-40 bp; anything much
-#: shorter is either a mis-called array or short enough to occur by chance in a viral genome, and an
-#: exact match of it is not evidence of anything.
+#: Minimum spacer length for host linking. CRISPR spacers are 25-40 bp; much shorter ones are
+#: mis-called arrays or short enough to match a viral genome by chance.
 MIN_SPACER_LENGTH = 20
 
 
@@ -357,8 +331,8 @@ class CrisprArray:
     repeats: int
     #: cctyper's own verdict on the array. False means it kept the array but does not trust it.
     trusted: bool
-    #: The subtype its repeat classifier predicted, which is informative about the host, not the
-    #: virus - carried through so a host link can be read beside the system that recorded it.
+    #: The subtype predicted by its repeat classifier. Describes the host's system, and is carried
+    #: so a host link can be read alongside it.
     subtype: str
     subtype_probability: Optional[float]
 
@@ -366,10 +340,9 @@ class CrisprArray:
 def read_crispr_arrays(outdir: str, host: str) -> List[CrisprArray]:
     """Parse cctyper's ``crisprs_all.tab``. Returns [] when it found nothing, which is common.
 
-    ``crisprs_all.tab`` rather than the per-category files: it holds every array *and* a ``Trusted``
-    column, so one parse gives both the full set and cctyper's own judgement of each. Reading
-    ``crisprs_near_cas.tab`` and ``crisprs_orphan.tab`` instead would reconstruct that column from
-    which file a row came from, with more code and one more thing to get wrong.
+    ``crisprs_all.tab`` holds every array plus a ``Trusted`` column, so one parse gives the full
+    set and cctyper's judgement of each, without combining ``crisprs_near_cas.tab`` and
+    ``crisprs_orphan.tab``.
     """
     path = os.path.join(outdir, "crisprs_all.tab")
     if not os.path.isfile(path):
@@ -397,10 +370,9 @@ def read_crispr_arrays(outdir: str, host: str) -> List[CrisprArray]:
 def read_spacers(outdir: str, trusted_only: bool = True) -> Dict[str, List[str]]:
     """array id -> its spacer sequences, from cctyper's ``spacers/<array>.fa``.
 
-    Untrusted arrays are excluded by default. They are cctyper's own low-confidence calls, and a
-    spurious array contributes spacers that are really just genomic sequence - which then match
-    whatever they came from and produce host links for nothing. Reachable with
-    ``trusted_only=False`` for anyone who would rather filter later.
+    Untrusted arrays (cctyper's low-confidence calls) are excluded by default: a spurious array's
+    spacers are genomic sequence that matches its source and produces false host links. Pass
+    ``trusted_only=False`` to keep them.
     """
     spacer_dir = os.path.join(outdir, "spacers")
     if not os.path.isdir(spacer_dir):
@@ -425,9 +397,8 @@ def read_spacers(outdir: str, trusted_only: bool = True) -> Dict[str, List[str]]
 class HostLink:
     """One piece of evidence that a host was infected by a virus.
 
-    A spacer is a record of a past infection, so this is direct evidence rather than a prediction
-    from composition - which is the reason to prefer it over the alternatives even though it only
-    ever covers a fraction of the viruses found.
+    A spacer records a past infection, so this is direct evidence rather than a compositional
+    prediction, though it covers only a fraction of the viruses found.
     """
 
     host: str
@@ -435,8 +406,7 @@ class HostLink:
     subtype: str
     viral_contig: str
     spacer: str
-    #: Whether the match was to the reverse complement. Recorded because it says nothing about the
-    #: biology and everything about whether a match is a duplicate of another one.
+    #: Whether the match was to the reverse complement. Used to identify duplicate matches.
     reverse: bool
 
     @property
@@ -452,10 +422,8 @@ def host_links(
 ) -> List[HostLink]:
     """Every exact spacer match between a host's CRISPR arrays and a viral sequence.
 
-    Exact matching only, in both orientations. A spacer is 25-40 bp and approximate matching at
-    that length needs a model of how many mismatches still count as the same protospacer - which is
-    a measurement nobody here has made, and guessing at it would turn direct evidence into a
-    prediction while keeping the language of evidence.
+    Exact matching only, in both orientations. Approximate matching of 25-40 bp spacers would need
+    a validated mismatch tolerance, which has not been measured.
     """
     subtypes = subtypes or {}
     links: List[HostLink] = []
@@ -512,11 +480,9 @@ def crispr_host_links(
 ) -> Iterator[Tuple[str, str, str]]:
     """(host genome, viral contig, spacer) for every exact spacer match in a viral sequence.
 
-    Host prediction for free. The prokaryotic bins are already in hand and ``cctyper`` reads CRISPR
-    arrays off them; a spacer is a record of a past infection, so a spacer from bin X found in vOTU
-    Y is direct evidence that X is a host of Y. Exact matching only - a spacer is 25-40 bp and
-    approximate matching at that length needs a model of what counts as a match, which is a
-    measurement nobody here has made.
+    ``cctyper`` reads CRISPR arrays off the prokaryotic bins. A spacer from bin X found in vOTU Y is
+    direct evidence that X is a host of Y. Exact matching only; approximate matching of 25-40 bp
+    spacers would need a mismatch tolerance that has not been measured.
     """
     for host, host_spacers in spacers.items():
         for spacer in host_spacers:
@@ -539,7 +505,7 @@ def _reverse_complement(sequence: str) -> str:
 
 @dataclass(frozen=True)
 class Votu:
-    """One viral operational taxonomic unit: a population, not a contig."""
+    """One viral operational taxonomic unit: a population of contigs."""
 
     name: str
     representative: str
@@ -552,12 +518,11 @@ class Votu:
 
 
 def choose_representative(members: Sequence[str], lengths: Mapping[str, int]) -> str:
-    """The longest member, which is the viral convention.
+    """The longest member, as is conventional for viruses.
 
-    Not the highest-quality one, as ``dereplicate`` picks for genomes: CheckV's completeness is an
-    estimate against a reference database, so on a cluster of equally novel contigs it is nearly
-    uninformative, while length is observed. Ties go to the lexicographically first name so two runs
-    over the same contigs give the same catalogue.
+    ``dereplicate`` picks the highest-quality genome, but CheckV completeness is a reference-based
+    estimate and says little within a cluster of equally novel contigs, while length is observed.
+    Ties go to the lexicographically first name, so the result is deterministic.
     """
     return min(members, key=lambda name: (-lengths.get(name, 0), name))
 
@@ -572,13 +537,11 @@ def build_votus(
 ) -> List[Votu]:
     """Cluster viral contigs into vOTUs at *ani* identity over *min_aligned_fraction* of the shorter.
 
-    The clustering itself is :func:`metawrap2.modules.dereplicate.cluster_genomes` - single linkage
-    over the pairs that clear both thresholds - because it is the same operation with different
-    numbers, and a second implementation would be a second set of bugs. What differs is the
-    thresholds (95/85 rather than 95/10) and how the representative is chosen.
+    The clustering is :func:`metawrap2.modules.dereplicate.cluster_genomes` (single linkage over
+    pairs that pass both thresholds). The thresholds differ (95/85 instead of 95/10), as does the
+    choice of representative.
     """
-    # Imported here rather than at module scope: this is a library and dereplicate is a module, so
-    # a top-level import would have the layering backwards even though nothing is circular today.
+    # Imported here because this library should not depend on a module at import time.
     from .modules.dereplicate import cluster_genomes
 
     clusters = cluster_genomes(names, edges, ani=ani, min_aligned_fraction=min_aligned_fraction)

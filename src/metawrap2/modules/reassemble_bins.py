@@ -2,11 +2,10 @@
 
 All reads are aligned to the combined bins; each read pair is routed to the bin it maps to
 (at a strict and a permissive mismatch cutoff), and every bin is reassembled from its own
-reads with SPAdes. CheckM then picks, per bin, whichever of the original / strict / permissive
-version is best.
+reads with SPAdes. CheckM2 then scores every version, and the best of the original / strict /
+permissive versions of each bin is kept.
 
-CheckM runs in the bin_refinement conda env (that is where CheckM lives); everything else
-runs in this module's env. This file is meant to be read and edited: the tool commands live
+CheckM2 runs in its own env; everything else runs in this module's env. This file is meant to be read and edited: the tool commands live
 in the COMMANDS block and the tunable numbers in the CONSTANTS block.
 """
 
@@ -27,6 +26,7 @@ from ..progress import bar
 from ..pyrun import PY
 from ._common import (
     absolutize_paths,
+    add_checkm2_only_args,
     announcement,
     check_disk_space,
     check_fastq,
@@ -46,6 +46,7 @@ from ._common import (
     resolve_memory_gb,
     resolve_threads,
     run,
+    scorer_preflight,
     scratch_dir,
     start_run,
     threads_arg,
@@ -57,14 +58,12 @@ CONDA_ENV = MODULE_ENVS["reassemble_bins"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 BWA_INDEX = "bwa index {assembly}"
-# reads are streamed straight into the read-splitter (avoids writing a huge intermediate SAM)
-# The right-hand side of these pipes is a MetaWrap2 helper, so it runs in the host
-# interpreter (PY) - the module env has bwa/minimap2/spades, not python+metawrap2.
+# Reads are streamed into the read splitter, so no large intermediate SAM is written.
+# The right-hand side of these pipes is a MetaWrap2 helper and runs in the host interpreter
+# (PY); the module env has bwa/minimap2/spades but not python+metawrap2.
 #
-# pipefail, because bash otherwise reports only the last command's status: the filter reads
-# whatever arrives on stdin and exits 0 on a truncated stream, so an aligner that died partway
-# would look like a clean run that happened to select fewer reads, and the bins would be
-# reassembled from a silently truncated subset.
+# pipefail, because bash otherwise reports only the last command's status. The filter exits 0
+# on a truncated stream, so an aligner that died partway would otherwise look like a clean run.
 _PIPEFAIL = "set -o pipefail; "
 BWA_MEM_FILTER = (
     _PIPEFAIL
@@ -90,7 +89,6 @@ SPADES_NANOPORE = (
 )
 RM_SHORT_CONTIGS = PY + " -m metawrap2.scripts.rm_short_contigs {min_len} {scaffolds}"
 CHOOSE_BEST_BIN = PY + " -m metawrap2.scripts.choose_best_bin {stats} {comp} {cont}"
-CHECKM_QA_PLOT = "checkm bin_qa_plot -x " + BIN_EXTENSION.lstrip(".") + " {checkm} {bins} {plot}"
 PLOT_REASSEMBLY = (
     PY + " -m metawrap2.scripts.plot_reassembly {out} {comp} {cont} {stats} {orig_stats}"
 )
@@ -99,30 +97,25 @@ DEFAULT_MIN_LEN = 500  # -l; contigs shorter than this are dropped from reassemb
 DEFAULT_STRICT = 2  # --strict-cut-off; max SNPs for "strict" read recruitment
 DEFAULT_PERMISSIVE = 5  # --permissive-cut-off; max SNPs for "permissive" read recruitment
 OPEN_FILE_LIMIT = 10000  # raise NOFILE so many per-bin fastq handles can stay open at once
-#: Depth of coverage each bin's recruited reads are thinned to before SPAdes sees them, as a multiple
-#: of the bin's own assembled size. ``--max-coverage 0`` turns the thinning off.
+#: Depth of coverage each bin's recruited reads are thinned to before SPAdes, as a multiple of the
+#: bin's assembled length. ``--max-coverage 0`` turns thinning off.
 #:
-#: This is the one knob in the module that is about cost rather than correctness. Read recruitment is
-#: per bin, so an abundant organism hands SPAdes hundreds of times the coverage it can use, and SPAdes
-#: time grows with reads, not with genome size - so a handful of high-abundance outliers decide how
-#: long the whole step takes. 50x is comfortably above where short-read assembly of a prokaryotic
-#: genome stops improving, which is why thinning to it is close to free in assembly quality and not
-#: close to free in time.
+#: This setting affects run time. An abundant organism can recruit hundreds of times the coverage
+#: SPAdes needs, and SPAdes time grows with read count, so a few abundant bins set the step's run
+#: time. 50x is above the depth where short-read assembly of a prokaryotic genome stops improving.
 #:
-#: Expressed against the bin's assembled length rather than an assumed genome size: the bin is the
-#: thing being reassembled, and a 1.2 Mbp bin and a 6 Mbp bin want very different numbers of reads
-#: for the same depth.
+#: Measured against the bin's assembled length, not an assumed genome size, since a 1.2 Mbp bin
+#: and a 6 Mbp bin need different read counts for the same depth.
 DEFAULT_MAX_COVERAGE = 50.0
-#: Seed for the thinning. Fixed, so a re-run recruits and keeps the same reads: a subsample that
-#: changed between runs would make reassembly irreproducible for the same reason an unseeded binner is.
+#: Seed for the thinning. Fixed, so a re-run keeps the same reads and reassembly is reproducible.
 SUBSAMPLE_SEED = 1337
-#: Marks the third candidate: the original bin, copied in beside its two reassemblies so that one
-#: CheckM pass scores all three. ``choose_best_bin`` reads this suffix back off the stats row as the
-#: candidate's style, and the summary counts it, so the three places agree on one spelling.
+#: Marks the third candidate: the original bin, copied beside its two reassemblies so one CheckM
+#: pass scores all three. ``choose_best_bin`` reads this suffix off the stats row as the
+#: candidate's style, and the summary counts it.
 ORIG_SUFFIX = ".orig"
 #: The two read-recruitment cut-offs every bin is reassembled at.
 REASSEMBLY_STYLES = ("strict", "permissive")
-#: Every candidate style, so the summary can report a zero rather than omit a style nothing won.
+#: Every candidate style, so the summary reports zero for a style that won no bins.
 STYLES = REASSEMBLY_STYLES + (ORIG_SUFFIX.lstrip("."),)
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -190,6 +183,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_false",
         help="don't run CheckM to assess bins",
     )
+    add_checkm2_only_args(p, "reassemble_bins")
     p.add_argument(
         "--parallel",
         action="store_true",
@@ -203,7 +197,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 
 
 def _bin_lengths(bins_dir: str) -> dict:
-    """Assembled length of every bin in *bins_dir*, keyed by the bin's name without its extension."""
+    """Assembled length of every bin in *bins_dir*, keyed by bin name without extension."""
     lengths = {}
     for name in listdir(bins_dir):
         if not name.endswith(FASTA_EXTENSIONS):
@@ -217,9 +211,9 @@ def _bin_lengths(bins_dir: str) -> dict:
 def _estimate_bases(path: str, records: int = 2000) -> float:
     """Roughly how many sequence bases *path* holds, from the first *records* of it.
 
-    Reads a sample, measures what fraction of those bytes were sequence, and scales by the file size.
-    Exact for a file of uniform read length and header width, which recruited reads are, and close
-    enough otherwise for a decision whose threshold is a round number.
+    Measures the fraction of bytes that are sequence in the first records and scales by the file
+    size. Exact for uniform read length and header width (as recruited reads are), approximate
+    otherwise.
     """
     size = os.path.getsize(path)
     if not size:
@@ -240,12 +234,11 @@ def _estimate_bases(path: str, records: int = 2000) -> float:
 def _thin_pair(r1: str, r2: str, keep: float, rng) -> int:
     """Keep *keep* of the read pairs in *r1*/*r2* in place. Returns how many pairs were kept.
 
-    Pairs, not reads: SPAdes is being handed a paired library and a file where one mate survived and
-    the other did not is worse input than a smaller library. Both files are walked in lockstep and the
-    same coin decides both, which is what keeps them paired.
+    Pairs, not reads: both files are read in lockstep and one random draw decides both mates, so
+    SPAdes still gets a paired library.
 
-    Written to ``.thinned`` siblings and moved over the originals, so an interruption leaves the
-    untouched originals rather than a half-written library that looks complete.
+    Written to ``.thinned`` files and moved over the originals, so an interruption leaves the
+    originals intact.
     """
     kept = 0
     out1, out2 = r1 + ".thinned", r2 + ".thinned"
@@ -267,9 +260,8 @@ def _thin_pair(r1: str, r2: str, keep: float, rng) -> int:
 def _cap_recruited_reads(args, reads_out: str, original_bins: str) -> None:
     """Thin each bin's recruited reads down to ``--max-coverage``, leaving thin bins alone.
 
-    Runs after recruitment and before SPAdes, over the per-bin fastqs the filter wrote. A bin whose
-    recruited reads already sit below the target is not touched at all, which is the common case -
-    the thinning exists for the few abundant organisms that otherwise set the pace of the whole step.
+    Runs after recruitment and before SPAdes, over the per-bin fastqs the filter wrote. Bins
+    already below the target (most of them) are not touched.
     """
     if not args.max_coverage:
         comm("--max-coverage 0: every recruited read is kept")
@@ -293,13 +285,9 @@ def _cap_recruited_reads(args, reads_out: str, original_bins: str) -> None:
         length = lengths.get(bin_name)
         if not length:
             continue
-        # Estimated rather than counted: deciding *whether* to thin does not need an exact base
-        # count, and counting would mean reading every recruited read twice. The estimate is measured
-        # instead of assumed - the ratio of sequence bytes to total bytes is read off the first
-        # records of the file and applied to its size - because the obvious assumption is wrong. A
-        # FASTQ record is a header, a sequence, a "+" and a quality string of the same length as the
-        # sequence, so sequence is about *half* the bytes, less header overhead, and how much less
-        # depends entirely on how long the read names are.
+        # Estimated, not counted, to avoid reading every recruited read twice. The ratio of
+        # sequence bytes to total bytes is measured on the first records, because in FASTQ the
+        # sequence is under half the bytes and the rest depends on read-name length.
         bases = _estimate_bases(r1) + _estimate_bases(r2)
         coverage = bases / float(length)
         if coverage <= args.max_coverage:
@@ -334,7 +322,7 @@ def _raise_open_file_limit() -> None:
 
 
 def _prepare_original_bins(args, original_bins: str) -> None:
-    """Populate *original_bins* with clean bin files, named BIN_EXTENSION (MDMcleaner layout too)."""
+    """Fill *original_bins* with clean bin files named BIN_EXTENSION (MDMcleaner layout too)."""
     if dry_run():
         return
     shutil.rmtree(original_bins, ignore_errors=True)
@@ -361,12 +349,10 @@ def _prepare_original_bins(args, original_bins: str) -> None:
 def _combine_bins(original_bins: str, assembly: str) -> None:
     """Concatenate the bins into the reference the reads get recruited against.
 
-    Only the bins. A bin set may carry the unbinned catch-all, and this is the one place where
-    including it would look defensible - unbinned contigs in the reference would hold on to reads that
-    would otherwise be recruited to a bin they do not belong in. It still must not be here: the read
-    filter assigns each pair to the bin of the contig it mapped to, so those reads would be recruited
-    to a bin called "unbinned" and then reassembled as a genome, which is the opposite of leaving them
-    out. Precision against misrecruitment is what the mate-agreement filter is for.
+    Only the bins, not the unbinned catch-all. The read filter assigns each pair to the bin of
+    the contig it mapped to, so including unbinned contigs would recruit reads to a bin called
+    "unbinned" and reassemble it as a genome. Misrecruitment is handled by the mate-agreement
+    filter.
     """
     ensure_dir(os.path.dirname(assembly))
     if dry_run():
@@ -425,9 +411,8 @@ def _assemble(
         comm("%s was reassembled successfully!" % bin_name)
         shutil.rmtree(tmp_dir, ignore_errors=True)
     else:
-        # A per-bin SPAdes failure is tolerated (check=False) because one bad bin should not
-        # kill the run - but the reason is in that bin's spades.log, and reporting a guess
-        # ("not enough reads") sent users looking in the wrong place. Show what SPAdes said.
+        # A per-bin SPAdes failure is tolerated (check=False) so one bin does not stop the run.
+        # Show the errors from that bin's spades.log.
         warning("Something went wrong with reassembling %s.%s" % (bin_name, _spades_error(asm_dir)))
 
 
@@ -435,7 +420,7 @@ def _spades_error(asm_dir: str, lines: int = 6) -> str:
     """The ERROR lines from a failed SPAdes run, for inclusion in our own message."""
     log = os.path.join(asm_dir, "spades.log")
     if not os.path.isfile(log):
-        return " (no spades.log was written - SPAdes may not have started)"
+        return " (no spades.log was written; SPAdes may not have started)"
     try:
         with open(log, errors="replace") as fh:
             interesting = [
@@ -448,8 +433,8 @@ def _spades_error(asm_dir: str, lines: int = 6) -> str:
     return "\nSPAdes reported:\n  %s\nFull log: %s" % ("\n  ".join(interesting[-lines:]), log)
 
 
-#: What the finished layout keeps out of the way: everything the chosen bins were chosen from. Named
-#: here because both the shuffle that creates it and the --force clean that clears it need the list.
+#: Intermediates moved into ``work_files`` in the finished layout. Used by both the move and the
+#: --force clean.
 INTERMEDIATES = (
     "reassembled_bins",
     "reassembled_bins.checkm",
@@ -461,16 +446,15 @@ INTERMEDIATES = (
 
 
 def _shuffle_intermediates(out: str, best_dir: str, reassembled: str) -> None:
-    """Move the candidates into ``work_files`` and promote the chosen bins to ``reassembled_bins``."""
+    """Move the candidates into ``work_files``; promote the chosen bins to ``reassembled_bins``."""
     work = os.path.join(out, "work_files")
     ensure_dir(work)
     for item in INTERMEDIATES:
         src = os.path.join(out, item)
         if not os.path.exists(src):
             continue
-        # Destination-safe: on a second reassembly into the same folder the destination is the first
-        # run's copy of the same intermediate. Unguarded, this raised at the end of the most expensive
-        # module in the suite - after every reassembly was done - and left the rest half-moved.
+        # Replaces an existing destination, which a second reassembly into the same folder has
+        # from the first run. Without this, the move failed after every reassembly was done.
         fs_replace_dir(src, os.path.join(work, item))
     os.replace(best_dir, reassembled)
 
@@ -478,14 +462,10 @@ def _shuffle_intermediates(out: str, best_dir: str, reassembled: str) -> None:
 def _clean_previous_run(out: str) -> None:
     """Clear a finished reassembly out of *out* so this run is not measured against it.
 
-    The finished layout puts the chosen bins in ``reassembled_bins`` and everything they were chosen
-    from in ``work_files``, and the reassembly step adds to ``reassembled_bins`` rather than replacing
-    it. So without this, a second run's candidate pool contained the first run's promoted winners -
-    including its ``.orig`` copies of bins that may since have changed - and "the best version of
-    each bin" was chosen across two runs. Nothing about the output would have said so.
+    The reassembly step adds to ``reassembled_bins`` instead of replacing it, so without this a
+    second run's candidates would include the first run's chosen bins and ``.orig`` copies.
 
-    Callers gate this on ``--force``: ``--resume`` reaches the same already-existing folder and means
-    the opposite thing.
+    Callers run this only under ``--force``; ``--resume`` keeps the existing folder.
     """
     for item in INTERMEDIATES + ("reassembled_best_bins", "work_files"):
         shutil.rmtree(os.path.join(out, item), ignore_errors=True)
@@ -499,15 +479,12 @@ def _clean_previous_run(out: str) -> None:
 
 
 def _stage_original_candidates(original_bins: str, reassembled: str) -> int:
-    """Copy every original bin in beside its reassemblies as the ``.orig`` candidate. Returns how many.
+    """Copy each original bin beside its reassemblies as the ``.orig`` candidate. Returns the count.
 
-    The candidate name has to end in :data:`BIN_EXTENSION`, because one CheckM run scores the whole
-    directory and it is invoked ``-x fasta`` (see :func:`metawrap2.checkm.run_checkm`). This copied to
-    a hardcoded ``.orig.fa`` - a leftover from the project's ``.fa`` -> ``.fasta`` rename - so CheckM
-    never saw the originals, ``choose_best_bin`` could only ever return a reassembly, and
-    ``original_bins.stats.tsv`` came out header-only. On a 26-bin run that put 26 ``.fa`` files in a
-    directory of 52 ``.fasta`` ones, replaced 4 bins (15%) with a reassembly worse than the original,
-    and reported it as "0 bins were not improved by any reassembly".
+    The candidate name must end in :data:`BIN_EXTENSION`, because one CheckM run scores the
+    directory with ``-x fasta`` (see :func:`metawrap2.checkm.run_checkm`). A hardcoded ``.orig.fa``
+    left the originals unscored, so ``choose_best_bin`` could only pick a reassembly; on a 26-bin
+    run, 4 bins (15%) were replaced by a worse reassembly.
     """
     count = 0
     for base in list_bins(original_bins, (BIN_EXTENSION,)):
@@ -522,9 +499,8 @@ def _stage_original_candidates(original_bins: str, reassembled: str) -> int:
 def _style_counts(names: Iterable[str]) -> Dict[str, int]:
     """How many of the chosen ``<bin>.<style>`` names each style won, keyed by style.
 
-    Read off the style suffix rather than by asking whether "orig" appears anywhere in the filename:
-    a bin called ``bin_orig_site2`` matched all three substring tests at once, so the three reported
-    counts could add up to more than the number of bins chosen.
+    Read from the style suffix, not by substring match: a bin called ``bin_orig_site2`` matched all
+    three substring tests.
     """
     counts: Dict[str, int] = {style: 0 for style in STYLES}
     for name in names:
@@ -536,34 +512,38 @@ def _style_counts(names: Iterable[str]) -> Dict[str, int]:
 def _summary_message(names: Sequence[str]) -> str:
     """The closing summary: how the chosen bins split across the three candidates.
 
-    *names* is what ``choose_best_bin`` selected, so the counts are the selection rather than a
-    separate recount of the directory. The total is the number of bins chosen, which can be fewer
-    than the number of input bins - a bin whose every version fails ``-c``/``-x`` is not selected at
-    all and so is in none of the three counts.
-
-    Worded to report the "kept its original" count as the measured outcome it now is. While the
-    original was not a candidate the old wording ("%d bins were not improved by any reassembly")
-    printed a 0 that only restated the defect that excluded it.
+    *names* is what ``choose_best_bin`` selected. The total can be smaller than the number of input
+    bins: a bin whose every version fails ``-c``/``-x`` is not selected and is in none of the
+    counts.
     """
     counts = _style_counts(names)
     return (
-        "Reassembly results are in! Of %d bins, %d were improved by the 'strict' reassembly and %d "
+        "Reassembly finished. Of %d bins, %d were improved by the 'strict' reassembly and %d "
         "by the 'permissive' reassembly; %d kept their original bin, which scored better than "
-        "either of its reassemblies."
-        % (len(names), counts["strict"], counts["permissive"], counts["orig"])
+        "either reassembly." % (len(names), counts["strict"], counts["permissive"], counts["orig"])
     )
 
 
-def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
+def _score(args, bins_dir: str, checkm2_env: Optional[str]) -> str:
+    """Score *bins_dir* with CheckM2 and return its ``.stats`` path."""
+    return _checkm.run_checkm(
+        bins_dir,
+        threads=args.threads,
+        mem_gb=args.memory,
+        env=None,
+        checkm2=True,
+        checkm2_env=checkm2_env,
+    )
+
+
+def _run_checkm_stage(args, out: str, checkm2_env: Optional[str] = None) -> None:
     announcement("RUN CHECKM ON REASSEMBLED BINS")
     reassembled = os.path.join(out, "reassembled_bins")
     original_bins = os.path.join(out, "original_bins")
 
     if dry_run():
         ensure_dir(reassembled)
-        stats = _checkm.run_checkm(
-            reassembled, threads=args.threads, mem_gb=args.memory, env=checkm_env, quick=False
-        )
+        stats = _score(args, reassembled, checkm2_env)
         run(
             CHOOSE_BEST_BIN.format(
                 stats=stats, comp=int(args.completeness), cont=int(args.contamination)
@@ -571,14 +551,6 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
             env=None,
             tool="choose_best_bin",
             stdout_path=os.path.join(out, "chosen_bins.txt"),
-        )
-        run(
-            CHECKM_QA_PLOT.format(
-                checkm=reassembled + ".checkm", bins=reassembled, plot=reassembled + ".plot"
-            ),
-            env=checkm_env,
-            tool="checkm bin_qa_plot",
-            check=False,
         )
         run(
             PLOT_REASSEMBLY.format(
@@ -597,10 +569,8 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
     staged = _stage_original_candidates(original_bins, reassembled)
     comm("staged %d original bin(s) for scoring as the '%s' candidate" % (staged, ORIG_SUFFIX))
 
-    comm("Running CheckM on best bins (reassembled and original)")
-    stats = _checkm.run_checkm(
-        reassembled, threads=args.threads, mem_gb=args.memory, env=checkm_env, quick=False
-    )
+    comm("Running CheckM2 on the original and reassembled bins")
+    stats = _score(args, reassembled, checkm2_env)
 
     announcement("FINDING THE BEST VERSION OF EACH BIN")
     best_dir = os.path.join(out, "reassembled_best_bins")
@@ -626,32 +596,15 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
     best = os.listdir(best_dir)
     if not best:
         error(
-            "there are no good bins found in %s - something went wrong with choosing the best "
-            "bins between the reassemblies." % best_dir
+            "no good bins found in %s; choosing the best version of each bin "
+            "from the reassemblies failed." % best_dir
         )
 
     _shuffle_intermediates(out, best_dir, reassembled)
 
     comm("Re-running CheckM on the best reassembled bins.")
     shutil.rmtree(reassembled + ".checkm", ignore_errors=True)
-    stats = _checkm.run_checkm(
-        reassembled, threads=args.threads, mem_gb=args.memory, env=checkm_env, quick=False
-    )
-
-    comm("Making CheckM plot of %s bins" % reassembled)
-    plot_dir = reassembled + ".plot"
-    run(
-        CHECKM_QA_PLOT.format(checkm=reassembled + ".checkm", bins=reassembled, plot=plot_dir),
-        env=checkm_env,
-        tool="checkm bin_qa_plot",
-        check=False,
-    )
-    qa_png = os.path.join(plot_dir, "bin_qa_plot.png")
-    if os.path.isfile(qa_png):
-        os.replace(qa_png, reassembled + ".png")
-        shutil.rmtree(plot_dir, ignore_errors=True)
-    else:
-        warning("Something went wrong with making the CheckM plot.")
+    stats = _score(args, reassembled, checkm2_env)
 
     comm("making reassembly N50, completion, and contamination summary plots.")
     orig_stats = os.path.join(out, "original_bins" + STATS_SUFFIX)
@@ -661,15 +614,12 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
         if lines:
             out_fh.write(lines[0])
         for line in lines[1:]:
-            # Matched on the row's own style suffix rather than on "orig" appearing anywhere in the
-            # line: the lineage column is free text and a bin can be named for its site, either of
-            # which would put a reassembly's row into the originals' table.
+            # Matched on the bin name's style suffix, not on "orig" anywhere in the line, since the
+            # lineage column and bin names are free text.
             if line.split("\t", 1)[0].endswith(ORIG_SUFFIX):
                 out_fh.write(line)
-    # check=False, like the CheckM QA plot above: this is the last thing the step does, and by here
-    # the chosen bins, both .stats.tsv tables and the CheckM output are all written and complete. A
-    # figure that cannot be drawn must not throw away an hour of finished reassembly - the crash it
-    # used to cause came 62m53s into a run.
+    # check=False: the bins, both .stats.tsv tables and the CheckM output are complete by now, so a
+    # plotting failure only warns.
     run(
         PLOT_REASSEMBLY.format(
             out=out,
@@ -684,8 +634,8 @@ def _run_checkm_stage(args, out: str, checkm_env: Optional[str]) -> None:
     )
     if not os.path.isfile(os.path.join(out, "reassembly_results.png")):
         warning(
-            "Something went wrong with making the reassembly summary plots. The bins in %s and "
-            "the stats tables beside them are complete - only the figure is missing." % reassembled
+            "Could not make the reassembly summary plots. The bins in %s and "
+            "the stats tables beside them are complete; only the figure is missing." % reassembled
         )
 
 
@@ -709,7 +659,8 @@ def main(argv: List[str]) -> int:
         ],
     )
     env = env_for("reassemble_bins", settings)
-    checkm_env = env_for("bin_refinement", settings)  # CheckM lives in the bin_refinement env
+    # CheckM2's env and database are checked now, before hours of SPAdes.
+    checkm2_env = scorer_preflight(args, settings) if args.run_checkm else None
     rec = start_run(
         "reassemble_bins",
         args,
@@ -733,7 +684,7 @@ def main(argv: List[str]) -> int:
         comm("setting up output folder and copying over bins...")
         if os.path.isdir(out):
             warning("Warning: %s already exists!" % out)
-            # Under --force only; --resume arrives here with the same folder and means the opposite.
+            # Under --force only; --resume keeps the existing folder.
             if force():
                 comm("--force: clearing the previous reassembly out of %s" % out)
                 _clean_previous_run(out)
@@ -755,8 +706,8 @@ def main(argv: List[str]) -> int:
                 shutil.rmtree(reads_out, ignore_errors=True)
                 ensure_dir(reads_out)
                 comm(
-                    "Aligning all reads back to entire assembly and splitting reads into individual "
-                    "fastq files based on their bin membership"
+                    "Aligning all reads to the assembly and splitting them into one "
+                    "fastq file per bin"
                 )
                 if args.nanopore:
                     run(
@@ -794,9 +745,9 @@ def main(argv: List[str]) -> int:
                 )
             else:
                 comm(
-                    "WARNING: Looks like the assembly was already indexed. Skipping indexing and read "
-                    "splitting, and proceeding directly to assembly. If this is not intended, re-run "
-                    "with a new/empty output folder."
+                    "WARNING: the assembly was already indexed. Skipping indexing and read "
+                    "splitting and going straight to assembly. To redo them, re-run "
+                    "with a new or empty output folder."
                 )
             if not dry_run():
                 _cap_recruited_reads(args, reads_out, original_bins)
@@ -811,11 +762,8 @@ def main(argv: List[str]) -> int:
             to_assemble = sorted(f for f in listdir(reads_out) if f.endswith("_1.fastq"))
             if not to_assemble and dry_run():
                 # No reads were recruited (nothing ran), so show the per-bin SPAdes calls for
-                # the bins the user actually passed in.
-                # FASTA_EXTENSIONS, not a (".fa", ".fasta") pair of its own: a bin folder of
-                # ``.fna`` or ``.fas`` files is accepted by this module's own input validation, and
-                # the narrower pair listed none of them, so --dry-run printed no SPAdes call at all
-                # for the bins the user had.
+                # the input bins. FASTA_EXTENSIONS matches the input validation, so ``.fna`` and
+                # ``.fas`` bins are listed too.
                 to_assemble = [
                     "%s.%s_1.fastq" % (os.path.splitext(b)[0], style)
                     for b in list_bins(args.bins, FASTA_EXTENSIONS)
@@ -869,15 +817,15 @@ def main(argv: List[str]) -> int:
                     os.replace(long_scaffolds, os.path.join(reassembled, name + BIN_EXTENSION))
                 else:
                     comm(
-                        "%s was reassembled, but did not yield contigs %d bp. It is possible there were "
-                        "not enough reads." % (name, args.min_len)
+                        "%s was reassembled but gave no contigs of at least %d bp, possibly "
+                        "because there were too few reads." % (name, args.min_len)
                     )
 
             if _count_fa(reassembled) < 1 and not dry_run():
                 error(
                     "None of the bins were successfully reassembled, so %s is empty.\n"
-                    "Every per-bin SPAdes run failed - look at the 'SPAdes reported' lines "
-                    "above, or at %s/<bin>/spades.log. A single shared cause is likely; "
+                    "Every per-bin SPAdes run failed; see the 'SPAdes reported' lines "
+                    "above, or %s/<bin>/spades.log. A shared cause is likely; "
                     "common ones are too few recruited reads per bin, and read files SPAdes "
                     "cannot read (for example uniform quality strings, which make it fail "
                     "with 'Failed to determine offset')."
@@ -892,7 +840,7 @@ def main(argv: List[str]) -> int:
             comm("skipping bin reassembly (already done; --resume)")
 
         if args.run_checkm and ckpt.todo("checkm"):
-            _run_checkm_stage(args, out, checkm_env)
+            _run_checkm_stage(args, out, checkm2_env)
             ckpt.done("checkm")
         elif args.run_checkm:
             comm("skipping CheckM on reassembled bins (already done; --resume)")

@@ -1,36 +1,28 @@
 # MetaWrap2 benchmark datasets.
 #
-# This file is data, not code, so that adding a dataset is a change a reviewer can read in one
-# sitting: the URL, the checksum, the exact size on the wire, and where the gold standard lives,
-# all next to each other.
+# Each dataset lists its URL, checksum, exact download size and gold-standard location together.
 #
-# Every `bytes` value here was measured with a HEAD request against the host, not estimated.
-# That is the point of recording it: `metawrap2 benchmark fetch` compares the total against the
-# [limits] disk ceiling and refuses to start when there is no room, instead of filling the
-# filesystem and finding out at 80 GB. Sizes are also the cheap half of verification - a
-# truncated download is caught by its length before anything spends minutes hashing it.
+# Every `bytes` value was measured with a HEAD request against the host. `metawrap2 benchmark
+# fetch` compares the total against the [limits] disk ceiling and refuses to start when there is
+# no room. Sizes also catch a truncated download before it is hashed.
 #
-# `md5` values are copied from the publisher's own `md5sums.tsv`, which is itself fetchable at
-# `<base_url><checksum_manifest>`. They are pinned here rather than read from that file at fetch
-# time on purpose: pinned, a re-fetch in two years verifies against the bytes this benchmark was
-# actually built on, and a silent re-publication upstream shows up as a checksum failure rather
-# than as quietly different results.
+# `md5` values are copied from the publisher's `md5sums.tsv` (fetchable at
+# `<base_url><checksum_manifest>`). They are pinned here instead of read at fetch time, so a later
+# re-fetch is verified against the bytes this benchmark was built on, and a re-publication
+# upstream shows up as a checksum failure.
 
 schema = 1
 
-# Known gap, recorded here because this is the file that would close it. Every arm in
-# benchmarks/configurations.toml runs on simulated CAMI2 reads, which are uniformly high quality -
-# and the one place fastp and trim-galore diverge is low-quality data. On 2010-era 75 bp reads
-# (MetaHIT ERR011347-9) fastp's defaults discarded 58.5% of one library whole while trim-galore
-# trimmed and kept 95%, which moved nonpareil's effort projection five-fold. So the trimmer default
-# is measured, but not in the regime where the choice matters. A low-quality dataset registered here
-# would let `benchmark run <dataset> trimmer` answer it; until then `read_qc` reports retention and
-# warns below 70%, which is a signal rather than an answer.
+# Known gap. Every arm in benchmarks/configurations.toml runs on simulated CAMI2 reads, which are
+# uniformly high quality, while fastp and trim-galore differ mainly on low-quality data. On 75 bp
+# reads from around 2010 (MetaHIT ERR011347-9), fastp's defaults discarded 58.5% of one library
+# while trim-galore trimmed and kept 95%, which changed nonpareil's effort projection five-fold.
+# Registering a low-quality dataset here would let `benchmark run <dataset> trimmer` measure this;
+# until then `read_qc` reports retention and warns below 70%.
 
 # --------------------------------------------------------------------------------------------
-# The real benchmark: CAMI2's human gastrointestinal body site. Ten samples of simulated short
-# reads with a known ground truth, which is the only way to measure binning *correctness* rather
-# than CheckM's opinion of it.
+# CAMI2's human gastrointestinal body site: ten samples of simulated short reads with a known
+# ground truth, for measuring binning correctness independently of CheckM.
 # --------------------------------------------------------------------------------------------
 [cami2_gi]
 title = "CAMI2 human microbiome challenge - gastrointestinal, short read"
@@ -46,14 +38,14 @@ checksum = "md5"
 checksum_manifest = "md5sums.tsv"
 
 # The published dataset interleaves gastrointestinal and oral samples in one directory; these ten
-# are the gastrointestinal ones, per the dataset's own README. Taking a subset of body sites is
-# deliberate - one body site is a benchmark, all of them is a cluster job.
+# are the gastrointestinal ones, per the dataset's README. One body site keeps the benchmark to a
+# manageable size.
 samples = [0, 1, 2, 3, 4, 5, 9, 10, 11, 12]
 
-# Roughly 95% of each 10 GB archive is per-OTU BAM alignments that a binning benchmark never
-# reads. Keeping only these members does not shrink the download - the archive is a single gzip
-# stream, so there is no way to fetch part of it - but it keeps the extracted footprint to the
-# reads and contigs, which is the difference between 100 GB on disk and a few GB.
+# About 95% of each 10 GB archive is per-OTU BAM alignments that a binning benchmark does not
+# read. Keeping only these members does not shrink the download (the archive is a single gzip
+# stream), but it keeps the extracted footprint to the reads and contigs: a few GB instead of
+# 100 GB.
 keep = [
     "*/reads/*",
     "*/contigs/*",
@@ -62,27 +54,25 @@ keep = [
     "*/*.yaml",
 ]
 
-# The reads are interleaved pairs in one FASTQ per sample. read_qc needs them split, so the
-# harness deinterleaves on the way in; declaring the shape here is what tells it to.
+# The reads are interleaved pairs, one FASTQ per sample. read_qc needs them split, so the harness
+# deinterleaves them; this declares the layout.
 #
-# The glob names the file rather than the directory because reads/ also contains a 3 MB
-# subsample_0.fq debugging extract, which sits under the same sample_N directory and therefore
-# carries the same sample label. A directory-wide match finds both, and the small one wins - a
-# trimmer benchmarked on 3 MB of a 10 GB sample. The archives ship it uncompressed, so the
-# trailing wildcard is there only to keep a re-published .fq.gz matching.
+# The glob names the file, not the directory, because reads/ also contains a 3 MB subsample_0.fq
+# debugging extract under the same sample_N directory, with the same sample label. A
+# directory-wide match would find both. The archives ship it uncompressed; the trailing wildcard
+# keeps a re-published .fq.gz matching.
 reads_glob = "*/reads/anonymous_reads.fq*"
 reads_layout = "interleaved"
 
-# Which genome every read came from, one file per sample, which is the only truth that can say how
-# much of a sample an organism actually was. The gold_standard binning file cannot: it maps contigs
-# to genomes, and a contig carries no abundance. Quantifier comparisons score against this; the
-# keep list above already retains it.
+# Which genome every read came from, one file per sample: the truth for how abundant each
+# organism was. The gold_standard binning file maps contigs to genomes and carries no abundance.
+# Quantifier comparisons score against this; the keep list above retains it.
 abundance_truth_glob = "*/reads/reads_mapping.tsv.gz"
 
-# Peak disk is bounded by the download itself: each archive is deleted once extracted, so what
-# lands can never exceed what arrived. Deinterleaving into mate files happens later, under the
-# benchmark's own work directory, and roughly doubles the reads - budget for that separately. No
-# multiplier is applied here because a measured upper bound beats an invented one.
+# Peak disk is bounded by the download: each archive is deleted once extracted. Deinterleaving
+# into mate files happens later, under the benchmark's work directory, and roughly doubles the
+# reads; budget for that separately. No multiplier is applied here, since the measured size is an
+# upper bound.
 disk_note = "peak disk is bounded by the download; archives are removed as they are extracted"
 
 [[cami2_gi.files]]
@@ -145,8 +135,8 @@ path = "gastrooral/sample_12.tar.gz"
 md5 = "fd67f3823b6d7ede682c02f1586c372d"
 bytes = 10146112667
 
-# The gold standard. Three files out of the 505 in the published directory - the other 502 are
-# per-OTU assemblies and BAMs that answer a different question.
+# The gold standard: three of the 505 files in the published directory. The other 502 are per-OTU
+# assemblies and BAMs.
 [[cami2_gi.gold_standard]]
 role = "assembly"
 path = "per_bodysite/gastro_bam/gsa.fa"
@@ -170,14 +160,12 @@ note = "the unfixed mapping, pinned only so a run can show the two agree where i
 
 
 # --------------------------------------------------------------------------------------------
-# The second body site, for the same reason the first one exists: every default in this project
-# was measured on gastrointestinal samples, and a default that only holds there is a
-# gastrointestinal fact rather than a metagenomics one. Same deposit, same licence, same truth
-# format as cami2_gi - only the community differs, which is what makes the comparison readable.
+# The second body site (oral). Every default in this project was measured on gastrointestinal
+# samples; this checks whether it holds on a different community. Same deposit, licence and truth
+# format as cami2_gi.
 #
-# Three samples, not ten, because the metaWRAP 1 comparison this is meant to extend used three
-# (gastrointestinal samples 0, 1 and 10). Matching that design is the point; ten samples here
-# would be a different experiment wearing the same figure.
+# Three samples, not ten, to match the metaWRAP 1 comparison this extends (gastrointestinal
+# samples 0, 1 and 10).
 # --------------------------------------------------------------------------------------------
 [cami2_oral]
 title = "CAMI2 human microbiome challenge - oral, short read"
@@ -193,8 +181,8 @@ checksum = "md5"
 checksum_manifest = "md5sums.tsv"
 
 # The deposit numbers all twenty gastrooral samples in one sequence; ten are gastrointestinal
-# (listed under cami2_gi) and these are three of the ten that are not. Each archive carries its
-# own metadata, so the body site is verified after extraction rather than trusted from this list.
+# (listed under cami2_gi) and these are three of the other ten. Each archive carries its own
+# metadata, so the body site is verified after extraction.
 samples = [6, 7, 13]
 
 keep = [
@@ -250,16 +238,26 @@ bytes = 155585543
 note = "the unfixed mapping, pinned only so a run can show the two agree where it matters"
 
 # --------------------------------------------------------------------------------------------
-# The third body site. Same deposit, same truth format, and the one that answers a question the
-# first two cannot: gastrointestinal and oral are both high-diversity gut-and-mouth communities,
-# while skin is low-diversity and dominated by a few genera - so a default that holds on all three
-# is holding across community *shape*, not just across two body sites.
+# The third body site (skin). Same deposit and truth format. Gastrointestinal and oral are both
+# high-diversity communities, while skin is low-diversity and dominated by a few genera, so this
+# tests defaults across community structure.
 #
-# Which of the deposit's 29 airskinurogenital samples are skin is not written down anywhere in it.
-# It was established by overlap with the published per-body-site gold standards: of each sample's
+# The deposit does not say which of its 29 airskinurogenital samples are skin. This was
+# established by overlap with the published per-body-site gold standards: of each sample's
 # genomes, 88 of 90, 50 of 52 and 238 of 240 are in skin's, against roughly half that in airways'
-# and almost none in urogenital's. Probing samples 4, 9 and 24 showed the deposit is ordered
-# airways, then skin, then urogenital.
+# and almost none in urogenital's.
+#
+# The three sites are interleaved in the deposit, not in blocks. Each sample was assigned by overlap
+# with the three per-site gold standards and checked against the deposit's setup.tar.gz abundance
+# files:
+#
+#   skin (10):        1, 13, 14, 15, 16, 17, 18, 19, 20, 28
+#   airways (10):     4, 7, 8, 9, 10, 11, 12, 23, 26, 27
+#   urogenital (9):   0, 2, 3, 5, 6, 21, 22, 24, 25
+#
+# These match CAMI2's nominal 10/10/9, and each group's union reproduces its pooled gold standard
+# (airways 828 of 828, skin 609 of 609, urogenital 246 of 248). Samples 10-12 look like skin by
+# position but are airways.
 # --------------------------------------------------------------------------------------------
 [cami2_skin]
 title = "CAMI2 human microbiome challenge - skin, short read"
@@ -274,7 +272,7 @@ base_url = "https://frl.publisso.de/data/frl:6425518/"
 checksum = "md5"
 checksum_manifest = "md5sums.tsv"
 
-# Verified after extraction, not trusted from the numbering - see the comment above.
+# Verified after extraction, not taken from the numbering; see the comment above.
 samples = [17, 18, 19]
 
 keep = [
@@ -330,10 +328,9 @@ bytes = 90477267
 note = "the unfixed mapping, pinned only so a run can show the two agree where it matters"
 
 # --------------------------------------------------------------------------------------------
-# The fixture: a few hundred contigs from three synthetic genomes, committed to the repository.
-# It exists so the harness itself - the fetch plan, the scorers, the TSV schema, the
-# time-to-performance arithmetic - is testable without a 100 GB download, which is the only way
-# any of that gets exercised in CI.
+# The fixture: a few hundred contigs from three synthetic genomes, committed to the repository,
+# so the harness (fetch plan, scorers, TSV schema, time-to-performance arithmetic) can be tested
+# in CI without a 100 GB download.
 # --------------------------------------------------------------------------------------------
 [tiny]
 title = "Tiny synthetic fixture (committed, no download)"

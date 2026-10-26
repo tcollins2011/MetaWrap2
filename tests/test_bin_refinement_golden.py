@@ -1,24 +1,24 @@
 """Golden tests pinning bin_refinement's behaviour for 2 and 3 bin sets.
 
-bin_refinement was generalised from "exactly 2 or 3 bin sets" to "any number up to
-:data:`metawrap2.modules.bin_refinement.MAX_BIN_SETS`". The requirement for that change was
-that 2- and 3-set runs keep producing *exactly* what they produced before, because those are
-the cases every existing analysis used.
+bin_refinement now accepts any number of bin sets up to
+:data:`metawrap2.modules.bin_refinement.MAX_BIN_SETS`. 2- and 3-set runs must give the same output
+as before the change.
 
-These tests run the real algorithm - the real Binning_refiner (it is pure Python), the real
-consolidation and dereplication - with only CheckM replaced by a deterministic stand-in, and
-compare the output against values recorded from the implementation before the rewrite.
+The tests run the real Binning_refiner (pure Python), consolidation and dereplication, with only
+CheckM replaced by a deterministic stand-in, and compare against values recorded from the earlier
+implementation.
 
-The fake CheckM derives a bin's completeness and contamination from a hash of its contig set,
-so scores are arbitrary but stable, vary between bins, and change when a bin's membership
-changes. That is what makes consolidation actually do work rather than trivially keep binsA.
+The fake CheckM derives completeness and contamination from a hash of a bin's contig set, so
+scores are stable, vary between bins and change with membership, and consolidation has real
+choices to make.
 
-This is a curated subset: enough to prove the 2-set and 3-set bin-set math, the refinement
-plan (including argument order), and the command form, without every size/flag permutation.
+The subset covers the 2- and 3-set bin-set combinations, the refinement plan (including argument
+order) and the command form, not every size/flag permutation.
 """
 
 import hashlib
 import os
+import re
 
 import pytest
 
@@ -42,7 +42,7 @@ def _fake_scores(bin_path):
 
 
 def _fake_run_checkm(bins_dir, **kwargs):
-    """Write a .stats file for *bins_dir* exactly as the real run_checkm would."""
+    """Write a .stats file for *bins_dir* in the format the real run_checkm writes."""
     rows = []
     for name in sorted(os.listdir(bins_dir)):
         if not name.endswith(BIN_EXTENSION):
@@ -69,8 +69,8 @@ def _fake_run_checkm(bins_dir, **kwargs):
 def fake_checkm(monkeypatch):
     monkeypatch.setattr(bin_refinement._checkm, "run_checkm", _fake_run_checkm)
     monkeypatch.setattr(checkm_mod, "run_checkm", _fake_run_checkm)
-    # CheckM is faked, so nothing enters a conda env - but env_for checks that the env manager is
-    # findable before the module does any work, and mamba is not on PATH in a non-login shell.
+    # CheckM is faked, so no conda env is used, but env_for checks that the env manager is on PATH
+    # first, and mamba is not on PATH in a non-login shell.
     monkeypatch.setattr(_common, "_require_env_manager", lambda env: None)
 
 
@@ -78,9 +78,8 @@ def fake_checkm(monkeypatch):
 # Three binners over the same 12 contigs, disagreeing the way real binners do: they mostly
 # agree on two genomes and split the third differently.
 
-# Contigs have to be big enough that a refined bin clears Binning_refiner's 0.5 Mbp minimum
-# bin size and MetaWrap2's own 50 kb floor, or every refined set comes out empty and is
-# discarded - which is not the behaviour under test.
+# Contigs must be large enough that refined bins pass Binning_refiner's 0.5 Mbp minimum bin
+# size and MetaWrap2's 50 kb floor; otherwise every refined set is empty and discarded.
 CONTIGS = {"c%02d" % i: ("ACGT" * (50000 + i * 2500)) for i in range(1, 13)}
 
 BIN_SETS = {
@@ -121,8 +120,7 @@ def _write_bin_sets(tmp_path, which):
 def _run(tmp_path, letters, extra=()):
     dirs = _write_bin_sets(tmp_path, letters)
     out = tmp_path / "refined"
-    # --skip-gunc: this test pins refinement's own output, and GUNC needs a 6.7 GB reference
-    # database that has nothing to say about whether the layout is stable.
+    # --skip-gunc: GUNC needs a 6.7 GB reference database and is not part of what is tested.
     argv = ["-o", str(out), "-t", "1", "-m", "8", "-c", "50", "-x", "10", "--skip-gunc"]
     for flag, letter in zip(("-A", "-B", "-C", "-D", "-E", "-F"), letters):
         argv += [flag, dirs[letter]]
@@ -147,15 +145,15 @@ def _snapshot(out):
 
 
 # --- the golden expectations ---------------------------------------------------------------
-# Recorded from the pre-generalisation implementation. If a change to the algorithm makes one
-# of these fail, that change altered results for a case users already rely on.
+# Recorded from the implementation before generalisation. A failure means 2- or 3-set results
+# changed.
 
 
 def test_three_set_refinement_combinations_and_argument_order(tmp_path):
     """The historical 2- and 3-set plans, including that binsBC is built as (C, B), not (B, C).
 
-    Binning_refiner numbers its output bins by the order the input folders are given, so the
-    orientation of each pair is part of the result, not an implementation detail.
+    Binning_refiner numbers its output bins by the order of the input folders, so the order of
+    each pair affects the result.
     """
     assert bin_refinement.refinement_plan(["binsA", "binsB"]) == [
         (("binsA", "binsB"), "binsAB"),
@@ -169,7 +167,7 @@ def test_three_set_refinement_combinations_and_argument_order(tmp_path):
 
 
 def test_two_set_output_is_stable(tmp_path):
-    """Full output snapshot for 2 sets - the contents, not just the shape."""
+    """Full output snapshot for 2 sets, including bin contents."""
     snapshot = _snapshot(_run(tmp_path, "AB"))
     final = {k: v for k, v in snapshot.items() if k.startswith("metawrap_50_10_bins/")}
     assert final == {
@@ -180,8 +178,8 @@ def test_two_set_output_is_stable(tmp_path):
 
 
 def test_three_set_output_is_stable(tmp_path):
-    """Note this differs from the 2-set result: consolidation really is choosing between
-    versions of each bin rather than trivially keeping binsA."""
+    """Full output snapshot for 3 sets. It differs from the 2-set result, so consolidation
+    chooses between versions of each bin instead of keeping binsA."""
     snapshot = _snapshot(_run(tmp_path, "ABC"))
     final = {k: v for k, v in snapshot.items() if k.startswith("metawrap_50_10_bins/")}
     assert final == {
@@ -191,15 +189,14 @@ def test_three_set_output_is_stable(tmp_path):
     }
 
 
-# --- proof that the commands run for 2 and 3 sets are byte-identical to the old ones -------
+# --- the commands run for 2 and 3 sets are byte-identical to the old ones -----------------
 
 
 def test_refiner_command_for_two_and_three_sets_is_unchanged():
     """The 2/3-set cases must still call Binning_refiner through -1/-2/-3, not the new -i.
 
-    Together with test_three_set_refinement_combinations_and_argument_order (which pins the
-    plan), this establishes that a 2- or 3-binner run issues exactly the commands it always
-    did, so its results cannot have changed.
+    With test_three_set_refinement_combinations_and_argument_order (which checks the plan), this
+    shows a 2- or 3-binner run issues the same commands as before.
     """
     recorded = []
 
@@ -224,3 +221,94 @@ def test_refiner_command_for_two_and_three_sets_is_unchanged():
     assert recorded[1].endswith("-1 binsA -2 binsB -3 binsC -o Refined_ABC")
     # only beyond three does it switch to the repeatable flag
     assert recorded[2].endswith("-i binsA -i binsB -i binsC -i binsD -o Refined_ABCD")
+
+
+# --- the scorer: CheckM2 by default, CheckM1 with --checkm1 ---------------------------------
+# The stand-in replaces run_checkm for both scorers, so the recorded outputs above hold for either.
+
+
+def _record_scorer(monkeypatch):
+    """Wrap the stand-in so each call's ``checkm2`` keyword is recorded."""
+    seen = []
+
+    def recording(bins_dir, **kwargs):
+        seen.append(kwargs.get("checkm2"))
+        return _fake_run_checkm(bins_dir, **kwargs)
+
+    monkeypatch.setattr(checkm_mod, "run_checkm", recording)
+    return seen
+
+
+def _config_with(tmp_path, monkeypatch, **databases):
+    cfg = tmp_path / "metawrap2.toml"
+    lines = ["[settings]", "use_conda_envs = false", "[databases]"]
+    lines += ['%s = "%s"' % (key, value) for key, value in databases.items()]
+    cfg.write_text("\n".join(lines) + "\n")
+    monkeypatch.setenv("METAWRAP2_CONFIG", str(cfg))
+
+
+def test_bins_are_scored_with_checkm2_by_default(tmp_path, monkeypatch):
+    seen = _record_scorer(monkeypatch)
+    out = _run(tmp_path, "ABC")
+    assert seen and all(flag is True for flag in seen), seen
+    work = os.path.join(out, "work_files")
+    assert os.path.isfile(os.path.join(work, bin_refinement.SCORE_CACHE % "checkm2"))
+    with open(os.path.join(work, bin_refinement.SCORER_FILE)) as fh:
+        assert fh.read().strip() == "checkm2"
+
+
+def test_checkm1_selects_checkm1_and_gives_the_recorded_output(tmp_path, monkeypatch):
+    checkm_data = tmp_path / "checkm_data"
+    checkm_data.mkdir()
+    _config_with(tmp_path, monkeypatch, CHECKM_DB=str(checkm_data))
+    seen = _record_scorer(monkeypatch)
+    snapshot = _snapshot(_run(tmp_path, "ABC", extra=["--checkm1"]))
+    assert seen and all(flag is False for flag in seen), seen
+    final = {k: v for k, v in snapshot.items() if k.startswith("metawrap_50_10_bins/")}
+    assert final == {
+        "metawrap_50_10_bins/bin_001.fasta": ["c01", "c02", "c03", "c04"],
+        "metawrap_50_10_bins/bin_002.fasta": ["c05", "c06", "c07"],
+        "metawrap_50_10_bins/bin_003.fasta": ["c11", "c12"],
+    }
+
+
+def test_checkm1_without_its_database_stops_before_any_work(tmp_path, monkeypatch, capsys):
+    """CheckM1's data is opt-in, so --checkm1 names the install command up front."""
+    seen = _record_scorer(monkeypatch)
+    with pytest.raises(SystemExit):
+        _run(tmp_path, "AB", extra=["--checkm1"])
+    assert seen == []
+    err = capsys.readouterr()
+    assert re.search(r"install-db checkm(?!2)", err.out + err.err)
+
+
+def test_a_resume_with_the_other_scorer_is_refused(tmp_path, monkeypatch, capsys):
+    """A run scored with CheckM2 cannot be resumed under --checkm1, which would mix scores."""
+    from metawrap2.command import runner
+
+    out = _run(tmp_path, "AB")
+    checkm_data = tmp_path / "checkm_data"
+    checkm_data.mkdir()
+    _config_with(tmp_path, monkeypatch, CHECKM_DB=str(checkm_data))
+    monkeypatch.setattr(runner, "resume", True)
+    argv = ["-o", out, "-t", "1", "-m", "8", "-c", "50", "-x", "10", "--skip-gunc", "--checkm1"]
+    argv += ["-A", str(tmp_path / "binner_A"), "-B", str(tmp_path / "binner_B")]
+    with pytest.raises(SystemExit):
+        bin_refinement.main(argv)
+    err = capsys.readouterr()
+    assert "was scored with CheckM2" in err.out + err.err
+
+
+def test_a_run_from_before_the_scorer_file_is_judged_by_its_stats(tmp_path, monkeypatch, capsys):
+    """A 2.1.3 run has no scorer file; CheckM1 rows carry a lineage, so CheckM2 is refused."""
+    from metawrap2.command import runner
+
+    out = _run(tmp_path, "AB")  # the stand-in writes CheckM1-style rows (lineage "Bacteria")
+    os.remove(os.path.join(out, "work_files", bin_refinement.SCORER_FILE))
+    monkeypatch.setattr(runner, "resume", True)
+    argv = ["-o", out, "-t", "1", "-m", "8", "-c", "50", "-x", "10", "--skip-gunc"]
+    argv += ["-A", str(tmp_path / "binner_A"), "-B", str(tmp_path / "binner_B")]
+    with pytest.raises(SystemExit):
+        bin_refinement.main(argv)
+    err = capsys.readouterr()
+    assert "was scored with CheckM1" in err.out + err.err

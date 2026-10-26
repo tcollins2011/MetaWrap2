@@ -1,21 +1,17 @@
 """One writer per output directory.
 
-Two MetaWrap2 runs writing the same ``-o`` directory interleave: they overwrite each other's
-intermediates, append to the same logs, and race on the manifest. The result is not a crash but
-something worse - a plausible-looking output directory whose contents came from two runs with
-different parameters. It happens easily: a resubmitted cluster job, a forgotten background run,
-a `--resume` started while the original is still going.
+Two runs writing the same ``-o`` directory overwrite each other's intermediates, append to the
+same logs and race on the manifest, leaving output from two runs with different parameters
+without an error. Common causes are a resubmitted cluster job, a forgotten background run, or a
+`--resume` started while the original is still running.
 
-:class:`RunLock` makes that fail immediately and legibly instead. It writes a small JSON file
-holding the PID, host, user, command and start time, created with ``O_EXCL`` so the creation is
-atomic. A second run finds it and reports who holds it.
+:class:`RunLock` writes a small JSON file (PID, host, user, command, start time) created with
+``O_EXCL``, so creation is atomic. A second run finds it, reports the holder and stops.
 
-**Stale locks are detected, not waited on.** A lock whose process is gone (same host, PID no
-longer alive) is stale and is taken over silently - that is the normal state after a machine is
-rebooted mid-run, and making the user delete a file by hand at that point is pointless
-ceremony. A lock held on a *different* host cannot be checked, so it is believed; ``--force``
-overrides. This is not a distributed lock and does not try to be: it is a guard against the
-accident, on one filesystem, and says so when it cannot be sure.
+A lock whose process is gone (same host, PID not alive) is stale and is taken over, which is the
+usual case after a reboot mid-run. A lock from a different host cannot be checked and is honoured;
+``--force`` overrides it. This guards one filesystem against accidental concurrent runs; it is not
+a distributed lock.
 """
 
 from __future__ import annotations
@@ -85,9 +81,8 @@ def _process_alive(pid: int) -> bool:
 def is_stale(record: Dict[str, Any]) -> bool:
     """True if the holding process is definitely gone.
 
-    Only decidable when the lock was taken on this host: a PID on another machine says nothing
-    about a process here. When in doubt this returns False, because wrongly declaring a live run
-    stale is the expensive mistake.
+    Only decidable for a lock taken on this host. Returns False when unsure, since treating a live
+    run as stale is the costlier error.
     """
     try:
         host = socket.gethostname()
@@ -114,8 +109,8 @@ class RunLock:
     """Hold the lock on an output directory for the duration of a run.
 
     Used as a context manager. ``acquire()`` raises :class:`LockHeld` when another live run holds
-    it; ``force=True`` takes it regardless, which is what the global ``--force`` means. Releasing
-    only removes a lock this object created, so a forced second run cannot delete a third run's.
+    it; ``force=True`` (the global ``--force``) takes it anyway. Releasing only removes a lock this
+    object created, so a forced second run cannot delete a third run's.
     """
 
     def __init__(self, output_dir: str, force: bool = False, enabled: bool = True):
@@ -126,7 +121,7 @@ class RunLock:
         self.acquired = False
 
     def acquire(self) -> Optional[str]:
-        """Take the lock. Returns a note worth logging, or None. Raises LockHeld if it is held."""
+        """Take the lock. Returns a note to log, or None. Raises LockHeld if it is held."""
         if not self.enabled:
             return None
         os.makedirs(self.output_dir, exist_ok=True)
@@ -138,7 +133,7 @@ class RunLock:
             except FileExistsError:
                 record = read(self.output_dir)
                 if record is None:
-                    # Unreadable or half-written: nothing to respect, so replace it.
+                    # Unreadable or half-written lock file: replace it.
                     note = "replaced an unreadable lock file at %s" % self.path
                 elif is_stale(record):
                     note = "took over a stale lock (%s is no longer running)" % describe(record)
@@ -148,8 +143,8 @@ class RunLock:
                     raise LockHeld(
                         "%s is already in use by another MetaWrap2 run (%s).\n"
                         "Two runs writing one output directory overwrite each other's "
-                        "intermediates, so this one is stopping instead.\n"
-                        "If that run is really gone, delete %s, or re-run with --force."
+                        "intermediates, so this run is stopping.\n"
+                        "If that run is no longer running, delete %s, or re-run with --force."
                         % (self.output_dir, describe(record), self.path)
                     )
                 try:
@@ -173,8 +168,8 @@ class RunLock:
         except OSError:
             pass  # already gone, or the directory was removed under us
 
-    # typing.Self is 3.11+, and pulling in typing_extensions for one annotation is not
-    # worth a dependency. `from __future__ import annotations` makes this string-evaluated.
+    # typing.Self needs 3.11+ or typing_extensions; `from __future__ import annotations` makes
+    # this annotation a string.
     def __enter__(self) -> RunLock:  # noqa: PYI034
         self.acquire()
         return self

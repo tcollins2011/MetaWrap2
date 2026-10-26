@@ -1,8 +1,7 @@
 """MetaWrap2 command-line entry point: ``metawrap2 <module> [options]``.
 
-Thin dispatcher. Each module owns its own argument parsing and is fully usable on its own
-(``python -m metawrap2.modules.binning ...``); this just routes to the right module's
-``main()`` so ``metawrap2 binning ...`` works too. Kept deliberately simple.
+Routes ``metawrap2 <module> ...`` to that module's ``main()``. Each module parses its own
+arguments and can also be run directly (``python -m metawrap2.modules.binning ...``).
 """
 
 from __future__ import annotations
@@ -92,14 +91,13 @@ MODULES = {
         "metawrap2.modules.pathways",
         "KEGG module completeness and the functional hierarchy, per genome and per sample",
     ),
-    # Kept as a name because it is in published scripts. It is the Prokka/Bakta wrapper, which
-    # `annotate` replaces; see that module's docstring for what it could not answer.
+    # Kept because published scripts use it. The Prokka/Bakta wrapper, replaced by `annotate`.
     "annotate_bins": ("metawrap2.modules.annotate_bins", "Deprecated: use `annotate`"),
 }
 
 # Non-module utility subcommands.
 UTILITIES = {
-    # First in the list on purpose: it is the answer to "I just cloned this, now what?"
+    # Listed first because it is the starting point after cloning.
     "quickstart": (
         "metawrap2.commands.quickstart",
         "Build the conda environments and verify them, in one command (start here)",
@@ -127,6 +125,10 @@ UTILITIES = {
         "metawrap2.commands.report_cmd",
         "One PDF report, and one per-genome table, for a finished run",
     ),
+    "score": (
+        "metawrap2.commands.score_cmd",
+        "Score any directories of genomes with one scorer, and compare them",
+    ),
     "calibrate": (
         "metawrap2.commands.calibrate",
         "Check the built-in disk/memory estimates against real runs",
@@ -135,10 +137,8 @@ UTILITIES = {
         "metawrap2.commands.benchmark",
         "Measure tools and settings against known-truth datasets",
     ),
-    # `doctor` is the name to document and the one its own repair flag uses (`--fix`). It was
-    # listed as "alias for test", which put the useful name second and left a reader choosing
-    # between three spellings - `check`, `doctor`, `test` - for two behaviours. `check` is the
-    # scripting one (pass/fail exit code); `doctor` is the one that reads.
+    # `doctor` is the documented name (with `--fix`); `test` is an older alias. `check` is for
+    # scripts (pass/fail exit code); `doctor` gives a readable report.
     "doctor": (
         "metawrap2.commands.doctor",
         "Check every module's env, tools, databases and Python extras; `--fix` repairs envs",
@@ -153,9 +153,8 @@ UTILITIES = {
 }
 
 
-#: Module and flag names that existed in earlier versions and no longer do. An "unrecognized
-#: argument" from argparse is technically correct and tells the user nothing; each of these says
-#: what happened and what to use instead.
+#: Module and flag names removed since earlier versions, with what to use instead. Reported
+#: in place of argparse's "unrecognized argument".
 RETIRED = {
     "kraken": "the KRAKEN1 module was dropped. Use `kraken2`, which takes the same arguments.",
     "--metabat1": "the original metaBAT binner was dropped. Use --metabat2.",
@@ -173,26 +172,19 @@ def _retirement_notice(argv: List[str]) -> Optional[str]:
     return None
 
 
-#: How long to wait for `git rev-parse`. A version string must answer immediately: this runs on
-#: `-h` as well as `-v`, and a repository on a stalled network filesystem must not be able to
-#: hang the help text. Two seconds is far longer than the local object read ever takes.
+#: Timeout in seconds for `git rev-parse`. This runs on `-h` and `-v`, so a stalled network
+#: filesystem must not hang them.
 GIT_REVISION_TIMEOUT = 2.0
 
 
 def git_revision() -> Optional[str]:
     """The short commit this package is running from, or None if that cannot be established.
 
-    A clone is almost always some commits past the last tag, so the version number on its own
-    cannot tell a bug report filed from a release apart from one filed from an arbitrary commit -
-    and the README asks for `-v` output in bug reports. One reporter's `-v` said 2.1.2 from a
-    checkout one commit past the 2.1.2 tag, which made the report unreproducible.
+    A checkout is usually past the last tag, so `-v` output in bug reports needs the commit.
 
-    Every way this can fail ends in None rather than an exception: a wheel install has no
-    repository, a slim container has no git binary, and git in a non-repository exits non-zero.
-    None of those is an error worth telling the user about, and a version string that can raise is
-    a version string that can stop `-v` from answering at all - which is worse than a missing
-    commit. The output is checked against the shape of an abbreviated sha so that a future git
-    writing something unexpected cannot end up quoted back as if it were one.
+    Returns None instead of raising when there is no repository (wheel install), no git binary,
+    or git fails, so `-v` always prints. Output that does not look like an abbreviated sha is
+    rejected.
     """
     import subprocess
 
@@ -219,8 +211,7 @@ def git_revision() -> Optional[str]:
 def version_string() -> str:
     """What `metawrap2 -v` prints: ``MetaWrap2 2.1.2``, plus the commit in a checkout.
 
-    No ``v=``: it is not the convention, and the whole value of this line is that it can be
-    pasted into a bug report as it stands.
+    Formatted to be pasted into a bug report as is.
     """
     rev = git_revision()
     if rev:
@@ -236,8 +227,7 @@ def help_message() -> str:
         "",
         "  Modules:",
     ]
-    # The name column fits the longest name: a fixed width of 16 ran `quantify_function` straight
-    # into its own description.
+    # Name column sized to the longest name.
     width = max(len(name) for name in list(MODULES) + list(UTILITIES)) + 2
     for name, (_path, desc) in MODULES.items():
         lines.append("\t%-*s%s" % (width, name, desc))
@@ -252,13 +242,14 @@ def help_message() -> str:
         "\t%-20s overwrite an existing MetaWrap2 output directory" % "--force",
         "\t%-20s reuse an existing output directory, skipping finished steps" % "--resume",
         "\t%-20s don't collapse repeated tool messages in the captured logs" % "--verbose-logs",
+        "\t%-20s seconds of tool silence before a progress heartbeat (0 off)"
+        % "--heartbeat-seconds N",
         "\t%-20s start even if the disk-space estimate says there is no room"
         % "--skip-space-check",
         "\t%-20s skip input/intermediate file validation (use if it flags a valid file)"
         % "--skip-validation",
         "",
-        # Wider column than the block above: these flag names do not fit in 20 characters, and a
-        # description that starts mid-word is worse than a column that does not line up with it.
+        # Wider column than above: these flag names do not fit in 20 characters.
         "  Resource budget (override [limits] in metawrap2.toml for this run):",
         "\t%-24s thread ceiling for the whole run" % "--max-threads N",
         "\t%-24s or, as a share of this machine's cores (default 0.50)" % "--max-thread-fraction F",
@@ -266,9 +257,8 @@ def help_message() -> str:
         "\t%-24s or, as a share of this machine's RAM (default 0.80)" % "--max-memory-fraction F",
         "\t%-24s stop when a filesystem is this full (default 0.70)" % "--max-disk-fraction F",
         "\t%-24s how many GPUs the run may use (0 for none)" % "--max-gpus N",
-        # Listed rather than suppressed: it is an ordinary [limits] key with a documented config
-        # equivalent and its own validation, and `--help` claiming to list the budget flags while
-        # omitting one of them is how a documented flag comes to look like an internal one.
+        "\t%-24s refuse to start a GPU step on a card another process holds" % "--gpu-strict",
+        # Listed because it is a documented [limits] key like the others.
         "\t%-24s seconds between disk checks during a long step (default 60)"
         % "--disk-check-interval S",
         "",
@@ -279,9 +269,8 @@ def help_message() -> str:
     return "\n".join(lines)
 
 
-#: Global flags that carry a value, mapped to the ``[limits]`` field they override. Kept as a
-#: table rather than more branches below because every one of them behaves identically, and
-#: because the same table is what makes ``--flag=value`` work without repeating the parsing.
+#: Global flags that take a value, mapped to the ``[limits]`` field they override. Both
+#: ``--flag value`` and ``--flag=value`` are accepted.
 _LIMIT_FLAGS = {
     "--max-threads": "max_threads",
     "--max-thread-fraction": "max_thread_fraction",
@@ -293,11 +282,29 @@ _LIMIT_FLAGS = {
 }
 
 
+#: Value-carrying global flags that are not ``[limits]`` keys. Separate from
+#: :data:`_LIMIT_FLAGS` because these are ``[settings]`` and go through their own setter rather
+#: than the budget's override table and validator.
+_SETTING_FLAGS = {"--heartbeat-seconds"}
+
+
+def _apply_setting_flag(flag: str, value: str) -> None:
+    """Apply one ``[settings]`` global flag, rejecting a value the setting cannot take."""
+    from . import command, limits
+
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise limits.LimitsError("%s needs a number of seconds, got %r" % (flag, value)) from None
+    if seconds < 0:
+        raise limits.LimitsError("%s cannot be negative (got %s); 0 turns it off" % (flag, value))
+    command.set_heartbeat_seconds(seconds)
+
+
 def _apply_global_flags(argv: List[str]) -> List[str]:
     """Strip global flags (--dry-run, --force, the --max-* budget) and apply them.
 
-    Done by hand rather than with argparse because these come *before* the module name, and each
-    module owns its own parser for everything after it.
+    Parsed by hand because they come before the module name, and each module parses the rest.
     """
     from . import command, limits
 
@@ -305,7 +312,10 @@ def _apply_global_flags(argv: List[str]) -> List[str]:
     pending: Optional[str] = None
     for tok in argv:
         if pending is not None:
-            limits.set_override(_LIMIT_FLAGS[pending], tok)
+            if pending in _SETTING_FLAGS:
+                _apply_setting_flag(pending, tok)
+            else:
+                limits.set_override(_LIMIT_FLAGS[pending], tok)
             pending = None
         elif tok == "--dry-run":
             command.set_dry_run(True)
@@ -319,11 +329,18 @@ def _apply_global_flags(argv: List[str]) -> List[str]:
             command.set_skip_space_check(True)
         elif tok == "--skip-validation":
             command.set_skip_validation(True)
-        elif tok in _LIMIT_FLAGS:
+        elif tok == "--gpu-strict":
+            # A boolean [limits] key, so it takes no value and is not in _LIMIT_FLAGS. The string
+            # goes through the same validator as the config file.
+            limits.set_override("gpu_strict", "true")
+        elif tok in _LIMIT_FLAGS or tok in _SETTING_FLAGS:
             pending = tok
         elif "=" in tok and tok.split("=", 1)[0] in _LIMIT_FLAGS:
             flag, value = tok.split("=", 1)
             limits.set_override(_LIMIT_FLAGS[flag], value)
+        elif "=" in tok and tok.split("=", 1)[0] in _SETTING_FLAGS:
+            flag, value = tok.split("=", 1)
+            _apply_setting_flag(flag, value)
         else:
             kept.append(tok)
     if pending is not None:
@@ -345,7 +362,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         argv = _apply_global_flags(argv)
     except LimitsError as exc:
-        # A bad budget flag is a user error, and one worth catching before any module starts.
+        # Report a bad budget flag before any module starts.
         print("\n%s\n" % exc, file=sys.stderr)
         return 2
     if not argv:
@@ -361,8 +378,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Unknown module '%s'.\n%s" % (name, help_message()))
         return 1
 
-    # A retired flag reaches the module's parser as an unrecognised argument, which says nothing
-    # about why it is gone. Intercept it here so every module gets the explanation for free.
+    # Explain retired flags here, before the module's parser rejects them as unrecognised.
     notice = _retirement_notice(rest)
     if notice:
         print("\n%s\n" % notice, file=sys.stderr)
@@ -372,17 +388,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         return int(mod.main(rest) or 0)
     except (ConfigError, EnvManagerMissing) as exc:
-        # A mistyped config key is a user error, not a bug, so it gets a message rather than a
-        # traceback - and it is caught here so every module and utility benefits.
-        #
-        # EnvManagerMissing is the same kind of thing: mamba not being on PATH is something the user
-        # fixes, and the exception exists purely to say so in two sentences with both ways out. It
-        # was still escaping as a traceback, which buried its own message under a stack and made a
-        # PATH problem look like a crash - the exact confusion it was written to prevent.
+        # Config errors and a missing mamba on PATH are user errors: print the message, not a
+        # traceback.
         print("\n%s\n" % exc, file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        # Covers interrupt.Stopped, so a scheduler's SIGTERM exits 143 rather than tracebacking.
+        # Also covers interrupt.Stopped, so a scheduler's SIGTERM exits 143 without a traceback.
         from . import interrupt
 
         print("\nStopped before finishing. Re-run with --resume to continue.", file=sys.stderr)

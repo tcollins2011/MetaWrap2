@@ -1,9 +1,8 @@
 """End-to-end wiring test for the binning module using stub tools.
 
-No real bioinformatics software is needed: we put tiny fake executables on PATH that
-produce the files the module expects, disable conda envs, and run the module through its
-CLI. This exercises arg parsing, command assembly, the command runner (stdout redirect),
-output layout, and provenance writing - all the plumbing, without the science.
+Small fake executables on PATH produce the files the module expects, conda envs are disabled, and
+the module runs through its CLI. This covers argument parsing, command assembly, the command runner
+(stdout redirect), output layout and provenance writing.
 """
 
 import os
@@ -17,7 +16,7 @@ from metawrap2.modules import binning
 
 STUBS = {
     # minimap2 is the module's default aligner. -d writes the index; otherwise print a minimal SAM
-    # to stdout, which the module pipes into samtools sort rather than to a file.
+    # to stdout, which the module pipes into samtools sort.
     "minimap2": (
         "import sys\n"
         "if '-d' in sys.argv:\n"
@@ -25,8 +24,8 @@ STUBS = {
         "else:\n"
         "    sys.stdout.write('@HD\\tVN:1.6\\nread1\\t0\\tc1\\t1\\t60\\t4M\\t*\\t0\\t0\\tACGT\\tIIII\\n')\n"
     ),
-    # --aligner bwa / bwa-mem2. Both index into files named after the assembly, so "index" needs
-    # to write nothing the module then looks for; "mem" prints SAM, same as minimap2 above.
+    # --aligner bwa / bwa-mem2. Both write index files named after the assembly, so "index" writes
+    # nothing the module checks for; "mem" prints SAM like minimap2 above.
     "bwa": (
         "import sys\n"
         "if sys.argv[1] == 'mem':\n"
@@ -37,26 +36,18 @@ STUBS = {
         "if sys.argv[1] == 'mem':\n"
         "    sys.stdout.write('@HD\\tVN:1.6\\nread1\\t0\\tc1\\t1\\t60\\t4M\\t*\\t0\\t0\\tACGT\\tIIII\\n')\n"
     ),
-    # samtools sort -o OUT ...  -> create OUT ; samtools index -> noop
-    #
-    # The sort must drain stdin, as the real one does: binning pipes the aligner into it, and a
-    # sort that exits while the aligner is still writing hands the aligner a SIGPIPE, which
-    # pipefail then correctly reports as a failed run. That is a faithful stub's job, not a bug.
-    # samtools wears four hats here, because the module uses it for four things:
+    # samtools has four roles here:
     #
     #   sort -o OUT      create OUT, draining stdin first
     #   view -H BAM      print a header, which is where the depth table gets its contig lengths
     #   view -u BAM      print "alignments" for the pileup to read (the identity filter lives here)
     #   depth -a ... -   print per-base depth rows
     #
-    # The last three are new: the contig depth table used to be built by shelling out to
-    # jgi_summarize_bam_contig_depths, so a stub only had to write the finished file. It is computed
-    # in-process now (see metawrap2.depth), which means this test exercises the real table assembly
-    # and the stub has to supply believable pileup input rather than a believable answer.
+    # The depth table is computed in-process (metawrap2.depth), so the stub supplies pileup input.
     #
-    # The sort must drain stdin, as the real one does: binning pipes the aligner into it, and a
-    # sort that exits while the aligner is still writing hands the aligner a SIGPIPE, which
-    # pipefail then correctly reports as a failed run. That is a faithful stub's job, not a bug.
+    # The sort must drain stdin like the real one: binning pipes the aligner into it, and a sort
+    # that exits while the aligner is writing causes a SIGPIPE, which pipefail reports as a failed
+    # run.
     "samtools": (
         "import sys\n"
         "a = sys.argv\n"
@@ -96,7 +87,7 @@ def stub_path(tmp_path, monkeypatch):
 
 
 def test_binning_end_to_end_with_stubs(tmp_path, stub_path):
-    # config with conda envs OFF, so tools run straight off PATH (our stubs)
+    # config with conda envs off, so tools run from PATH (the stubs)
     cfg = tmp_path / "mw2.toml"
     cfg.write_text("[settings]\nuse_conda_envs = false\n")
 
@@ -128,15 +119,15 @@ def test_binning_end_to_end_with_stubs(tmp_path, stub_path):
     # produced bins
     bins = out / "metabat2_bins"
     assert bins.is_dir() and any(f.endswith(BIN_EXTENSION) for f in os.listdir(bins))
-    # provenance written, with the real (unwrapped, since conda disabled) commands
+    # provenance written, with the unwrapped commands (conda disabled)
     assert (out / "run_config.json").exists()
     cmds = (out / "run_commands.txt").read_text()
     assert "metabat2 -i" in cmds and "mamba run" not in cmds  # conda disabled -> no wrapping
-    # the default aligner, piped into the sort rather than routed through a SAM on disk
+    # the default aligner, piped into the sort with no SAM on disk
     assert "minimap2 -ax sr" in cmds and "| samtools sort" in cmds
     assert not any(f.endswith(".sam") for f in os.listdir(out / "work_files"))
-    # The BAM is scratch once the depth table exists, and its resume marker goes with it: leaving
-    # align_reads marked done with no BAM on disk would let a later --resume bin on an empty table.
+    # The BAM is removed once the depth table exists, and so is its resume marker; otherwise a later
+    # --resume would bin on an empty table.
     work = out / "work_files"
     assert not [f for f in os.listdir(work) if f.endswith(".bam")]
     assert (work / binning.DEPTH_TABLE).exists()
@@ -157,11 +148,10 @@ def _binning_argv(tmp_path, cfg, out, extra=()):
 
 
 def test_a_failed_alignment_is_not_hidden_by_a_successful_sort(tmp_path, stub_path):
-    """pipefail, tested rather than assumed.
+    """With pipefail, a crashed aligner fails the run even though samtools sort succeeds.
 
-    ``samtools sort`` fed a truncated stream still exits 0 and still writes a BAM, so without
-    ``set -o pipefail`` bash reports the sort's status and a crashed aligner reads as a clean run
-    that produced an empty coverage table. This is the failure mode that makes the flag necessary.
+    ``samtools sort`` fed a truncated stream still exits 0 and writes a BAM, so without
+    ``set -o pipefail`` the run would look clean with an empty coverage table.
     """
     (stub_path / "minimap2").write_text(
         "#!/usr/bin/env python3\n"

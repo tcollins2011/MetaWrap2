@@ -1,4 +1,4 @@
-"""VIRUSES, STRAINS, PANGENOME and PHYLOGENY: what the sample holds besides the bins themselves."""
+"""VIRUSES, STRAINS, PANGENOME and PHYLOGENY: analyses beyond the prokaryotic bins."""
 
 from _grid import BLUE, GREEN, PURPLE, RED, W, x, y
 from drawio import Diagram

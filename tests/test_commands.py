@@ -1,9 +1,7 @@
 def test_install_env_under_dry_run_prints_the_build_and_runs_nothing(monkeypatch, capsys):
-    """`--dry-run install-env` used to solve and build every environment it named.
+    """`--dry-run install-env` prints the environment builds and runs nothing.
 
-    The global flag promises the commands are printed rather than run, and every other command
-    keeps that promise. This one went straight to `mamba env create`, so checking what an install
-    would do cost the install - four "dry runs" built 5 GB of environments.
+    It used to call `mamba env create` directly; four dry runs built 5 GB of environments.
     """
     from metawrap2 import command
     from metawrap2.commands import install_env
@@ -23,7 +21,7 @@ def test_install_env_under_dry_run_prints_the_build_and_runs_nothing(monkeypatch
 
 
 def test_the_help_table_keeps_every_name_apart_from_its_description():
-    """A fixed 16-character column ran `quantify_function` straight into its description."""
+    """Long command names such as `quantify_function` stay separate from their descriptions."""
     from metawrap2 import cli
 
     for line in cli.help_message().splitlines():

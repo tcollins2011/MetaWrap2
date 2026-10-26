@@ -1,16 +1,15 @@
-"""Sample-level feature abundance, and the four ways the arithmetic goes wrong quietly.
+"""Sample-level feature abundance.
 
-The sum itself is one line. What is tested here is everything around it:
+The sum is simple; these tests cover the handling around it:
 
-* **Genome size is divided out once, or not at all.** Coverage is already per-cell; a read count is
-  not. Treating coverage as counts divides by length twice and makes large genomes look rare, which
-  is a systematic error in one direction rather than noise.
-* **A genome with no abundance contributes nothing**, rather than defaulting to one. A MAG absent
+* **Genome size is divided out once, or not at all.** Coverage is already per cell; a read count
+  is not. Treating coverage as counts divides by length twice and biases large genomes low.
+* **A genome with no abundance contributes nothing**, instead of defaulting to one. A MAG absent
   from a sample's abundance table was not observed there.
-* **A unit that can be looked up is never inferred.** SingleM writes a percentage; guessing from
-  the magnitude reads a host-dominated sample's 0.8% as 80%.
-* **Partial pathways do not add up.** Two genomes with half a module each are not one genome with a
-  whole one, so module presence is binary above a completeness threshold.
+* **A unit that can be looked up is not inferred.** SingleM writes a percentage; inferring from
+  magnitude reads a host-dominated sample's 0.8% as 80%.
+* **Partial pathways are not summed.** Two genomes with half a module each are not one genome with
+  a whole one, so module presence is binary above a completeness threshold.
 """
 
 from __future__ import annotations
@@ -32,15 +31,10 @@ def _counts(genome, sample, value, length):
 
 
 def test_coverage_is_not_divided_by_genome_size():
-    """CoverM's numbers are already coverage-proportional; dividing again double-corrects.
-
-    This is the single easiest thing in the module to get backwards, and getting it wrong makes
-    every large genome look rare in a way nothing else in the output would reveal.
-    """
+    """CoverM's values are already coverage-proportional and are not divided by genome size."""
     entry = _coverage("big_genome", "s1", 10.0)
     assert entry.cell_proportional == 10.0
-    # A read count is divided by genome size exactly once, and with no known length contributes
-    # nothing rather than a guessed abundance.
+    # A read count is divided by genome size once; with no known length it contributes nothing.
     assert _counts("g", "s1", 1000.0, 5_000_000).cell_proportional == pytest.approx(0.0002)
     assert _counts("g", "s1", 1000.0, None).cell_proportional == 0.0
 
@@ -63,9 +57,8 @@ def _write_fraction(path, rows):
 
 
 def test_a_host_dominated_sample_is_not_misread_as_eighty_percent(tmp_path):
-    """The bug the first version had. Inferring the unit from the magnitude - "above 1 must be a
-    percentage" - reads 0.8% as 80% and scales every gene abundance down by 100x, in exactly the
-    samples where the correction matters most."""
+    """SingleM's unit is read, not inferred from magnitude ("above 1 is a percentage"), which read
+    0.8% as 80% and scaled gene abundances down 100x."""
     path = _write_fraction(tmp_path / "mf.tsv", [("host_heavy", "0.80")])
     assert fa.parse_singlem_fraction(path)["host_heavy"] == pytest.approx(0.008)
 

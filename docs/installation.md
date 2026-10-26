@@ -19,7 +19,7 @@ On stock RHEL 8 or older Ubuntu, `python3` is 3.9 and `pip install .` fails afte
 dependencies with `requires a different Python: 3.9.x not in '>=3.10'`. Current Miniforge provides
 Python 3.14; `pip install .` took 17 seconds on a fresh install. mamba must also be on `PATH` when a
 module runs, which unattended jobs do not set up; see
-[mamba must be on PATH](#mamba-must-be-on-path-when-a-module-runs).
+[mamba on PATH at run time](#mamba-on-path-at-run-time).
 
 `quickstart` builds and verifies every module's conda environment, then lists the databases each
 module needs (550 MB to ~300 GB each). It downloads databases only when asked:
@@ -30,7 +30,7 @@ module needs (550 MB to ~300 GB each). It downloads databases only when asked:
 
 `--binning-only` installs the six modules genome recovery needs. `--skip-envs` builds no
 environments and reports each database's status. With no `--databases` and no terminal to prompt
-on, it downloads nothing and says so. The sections below go through what quickstart does.
+on, it downloads nothing and says so.
 
 ## Step by step
 
@@ -56,7 +56,7 @@ metawrap2 install-env --all -t 4      # every environment, 4 at a time
 ```
 
 - Name the environment (`bins`) or any module in it (`binning`, `coverage`). `--all` builds every
-  environment once, opt-in ones included; `quickstart` builds the ten defaults plus
+  environment once, opt-in ones included; `quickstart` builds the eleven defaults plus
   `metawrap2-learned`.
 - `-t` sets how many build at once. Each writes its solver output to a log file, printed on failure.
 - Existing environments are kept unless you pass `--force`, so a re-run after an interruption
@@ -70,7 +70,8 @@ The default environments:
 |---|---|
 | `metawrap2-reads` | read_qc, assembly, reassemble_bins, blobology, nonpareil |
 | `metawrap2-bins` | binning, coverage, dereplicate, quant_bins |
-| `metawrap2-binqc` | bin_refinement (CheckM1, GUNC, DAS Tool) |
+| `metawrap2-binqc` | bin_refinement (GUNC, DAS Tool, and CheckM1 for `--checkm1`) |
+| `metawrap2-checkm2` | bin_refinement, reassemble_bins, `binning --run-checkm` (CheckM2, the default scorer). Separate because it has no common solution with CheckM1, GUNC and DAS Tool |
 | `metawrap2-taxonomy` | classify_bins, kraken2, pathways |
 | `metawrap2-annotate` | annotate, catalogue, annotate_bins |
 | `metawrap2-amr` | amr |
@@ -83,7 +84,6 @@ The default environments:
 
 | Environment | Why separate | Selected by |
 |---|---|---|
-| `metawrap2-checkm2` | No common solution with CheckM1, GUNC and DAS Tool | `bin_refinement --checkm2` |
 | `metawrap2-gtdbtk` | No common solution with taxator-tk; needs 100+ GB of reference data | `classify_bins --gtdbtk` |
 | `metawrap2-learned` | pytorch, about 1.5 GB | `binning --semibin2` / `--vamb` / `--comebin` |
 | `metawrap2-rgi` | Pins older dependencies than AMRFinderPlus | `amr --rgi` |
@@ -93,11 +93,12 @@ The default environments:
 
 ```bash
 metawrap2 install-env learned      # all three learned binners, one environment
-metawrap2 install-env checkm2
+metawrap2 install-env gtdbtk
 ```
 
 The default binners include SemiBin2, so `quickstart` builds `metawrap2-learned`. Its pytorch is
-CUDA-capable, so `binning --device cuda` needs no extra install. The default device is the CPU; see
+CUDA-capable, so `binning --device cuda` needs no extra install. The default device is the CPU
+(cuda under `--preset gpu`); see
 [Modules](modules.md). [`src/metawrap2/envs/README.md`](https://github.com/ursky/MetaWrap2/blob/main/src/metawrap2/envs/README.md)
 lists the tools in each environment.
 
@@ -111,19 +112,31 @@ Multi-sample performance is untested.
 metawrap2 install-env bins   # then: metawrap2 coverage --coverage fairy ...
 ```
 
-### CheckM2
+### CheckM2 and CheckM1
 
-`--checkm2` needs its own database, separate from the one `install-db checkm` fetches (both are
-often called "the CheckM database"):
+Bins are scored with CheckM2 by default. CheckM2 needs less memory than CheckM1 on its full genome
+tree (pplacer holds about 34 GB per call), is faster, and scored the final bins in the MetaWrap2
+benchmarks.
+`quickstart` builds its environment, and `quickstart --databases` fetches its database:
 
 ```bash
 metawrap2 install-env checkm2
 metawrap2 install-db  checkm2          # 1.7 GB; CheckM2 downloads it, we record where it went
 ```
 
+`--checkm1` scores with CheckM1 instead, in `bin_refinement`, `binning --run-checkm` and `score`
+(`reassemble_bins` uses CheckM2 only). `bin_refinement` and `binning` run it on CheckM1's reduced
+tree, about 16 GB per call; `--full-tree` uses the full tree, about 40 GB. It is in
+`metawrap2-binqc` and needs its own database, separate from CheckM2's. A run with `--checkm1` stops
+at the start if it is not installed:
+
+```bash
+metawrap2 install-db checkm            # 1.4 GB
+```
+
 ### GUNC
 
-GUNC runs by default in `bin_refinement` and detects chimeric bins, which CheckM can score as
+GUNC runs by default in `bin_refinement` and detects chimeric bins, which CheckM2 can score as
 complete and clean. It is in `metawrap2-binqc` and needs its own database:
 
 ```bash
@@ -131,7 +144,7 @@ metawrap2 install-env binqc
 metawrap2 install-db gunc              # 6.7 GB download, ~13 GB installed; or pass --skip-gunc
 ```
 
-`bin_refinement` checks for this database before CheckM starts. If it is missing, the error says
+`bin_refinement` checks for this database, and for the scorer's, before CheckM starts. If it is missing, the error says
 to install it or pass `--skip-gunc`.
 
 ## Databases
@@ -149,6 +162,13 @@ writes each path to your config (`~/.metawrap2/config.toml`, or the file `--conf
 interrupted install keeps what it finished. `--no-config-update` installs without touching the
 config. Databases already present are skipped.
 
+Downloads use several ranged connections when `aria2c` is available and one `curl` connection
+otherwise. From a host that throttles per connection, `aria2c` is 6-10x faster. It is optional and
+is taken from `PATH` or the `metawrap2-annotate` env. Both paths run the same
+checks. These databases publish no checksums, so each archive is decompressed in full before it is
+accepted; one that does not decompress is deleted and downloaded again, up to three attempts. Set
+`METAWRAP2_ARIA2C=` (empty) to force `curl`, for example if a host rate-limits several connections.
+
 `kraken2 --bracken` needs no extra download. The pre-built KRAKEN2 standard database includes the
 `databaseNmers.kmer_distrib` files Bracken reads, for 50 to 300 bp reads. For a custom Kraken2
 database, build them with `bracken-build -d $KRAKEN2_DB -l <read length>` and point `BRACKEN_DB` at
@@ -165,7 +185,7 @@ It also reports each database's content fingerprint, so a database replaced in p
 changed. `test` is the same command under its original name. In scripts, use
 `metawrap2 check <module>`, which exits non-zero if the module is not ready.
 
-## Reproducing an environment later
+## Lockfiles
 
 Every shipped environment has a committed exact-build lockfile:
 
@@ -197,7 +217,7 @@ metawrap2 config migrate /path/to/old-config -o ~/.metawrap2/config.toml
 This keeps database paths, drops obsolete settings with a reason, and flags paths missing on this
 machine. The old file is parsed and not executed.
 
-### mamba must be on PATH when a module runs
+### mamba on PATH at run time
 
 Tools run as `mamba run -n metawrap2-<module> ...`, so `mamba` must be on PATH at run time.
 Interactive shells get it from `~/.bashrc`; `nohup`, `cron`, `sbatch` and CI jobs usually do not.

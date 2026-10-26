@@ -1,15 +1,13 @@
 """Core bin-refinement algorithms: consolidation and contig dereplication.
 
-This is the scientific heart of the bin_refinement module, kept faithful to the
-behaviour it has always had. Two changes over the original scripts:
+The algorithms behind the bin_refinement module, with the original metaWRAP behaviour except:
 
-* Contig identity is the full FASTA header string. The old code parsed a length out
-  of the header with ``line.split('_')[3]`` (a SPAdes-only assumption) in one code
-  path; here lengths always come from the actual sequence, so any assembler works.
-* Where a source bin overlapped several candidate replacements, the old code's choice
-  depended on Python's dict iteration order (which changed between Python 2 and 3).
-  We deterministically pick the single best-scoring qualifying replacement, matching
-  the documented intent ("decide which version is best").
+* Contigs are identified from the FASTA header and lengths come from the sequence. The old
+  code parsed a length from the header with ``line.split('_')[3]``, which only works for
+  SPAdes.
+* When a source bin overlaps several candidate replacements, the best-scoring qualifying one
+  is chosen. The old choice depended on dict iteration order, which differs between Python 2
+  and 3.
 
 Bin quality score (unchanged): completeness - 5 * contamination.
 """
@@ -30,8 +28,8 @@ def _read_stats(path: str) -> Tuple[str, Dict[str, str], Dict[str, Tuple[float, 
     """Parse a CheckM ``.stats`` file.
 
     Returns ``(header_line, {bin.fa: raw_line}, {bin.fa: (completeness, contamination, extra)})``
-    where ``extra`` is the N50 column when present, used only as a dereplication tiebreaker
-    (weighted 1e-10, so it separates otherwise-identical bins without shifting ranking).
+    where ``extra`` is the N50 column when present. It is used only as a dereplication
+    tiebreaker, weighted 1e-10 so it does not change the ranking otherwise.
     """
     header = ""
     raw: Dict[str, str] = {}
@@ -74,12 +72,10 @@ def _overlap_percent(a: Dict[str, int], b: Dict[str, int]) -> float:
 def passes(
     completeness: float, contamination: float, min_completion: float, max_contamination: float
 ) -> bool:
-    """Whether a bin clears the quality thresholds, for every code path that has to decide.
+    """Return whether a bin passes the quality thresholds.
 
-    The comparisons are strict on both sides, which is inherited and is the convention every number
-    measured for this project was produced under. It matters only for a bin landing exactly on a
-    threshold, and it is defined here once so the single-bin-set path and consolidation cannot drift
-    apart on it.
+    Both comparisons are strict, as in the original metaWRAP and all benchmark runs. Every code
+    path uses this function so a bin exactly on a threshold is treated the same everywhere.
     """
     return completeness > min_completion and contamination < max_contamination
 
@@ -91,12 +87,10 @@ def select_passing(
     min_completion: float,
     max_contamination: float,
 ) -> int:
-    """Copy just the bins that clear the thresholds into ``out_folder``, renumbered. Returns count.
+    """Copy the bins that pass the thresholds into ``out_folder``, renumbered. Returns the count.
 
-    Consolidation applies the thresholds as a side effect of merging, so with two or more bin sets the
-    final folder contains only bins that passed. With exactly one there is nothing to merge, and the
-    folder was being filled with every input bin - including bins at 0% completeness - under a name
-    that states a threshold. This is that filter on its own.
+    Used when there is only one bin set: consolidation applies the thresholds while merging, but
+    with one set there is nothing to merge, and every input bin used to be copied.
     """
     header, raw, stats = _read_stats(stats_path)
     keeping = sorted(
@@ -155,7 +149,7 @@ def consolidate(
 
     for bin_1 in sorted(good1):
         base_score = quality_score(*stats1[bin_1][:2])
-        # find the single best qualifying replacement in set 2 (deterministic)
+        # Find the best-scoring qualifying replacement in set 2 (deterministic).
         best_bin_2: Optional[str] = None
         best_bin_2_score = base_score
         for bin_2 in sorted(good2):
@@ -206,10 +200,8 @@ def dereplicate(stats_file: str, bins_folder: str, out_folder: str, mode: str = 
             bin_scores[cut[0]] = quality_score(float(cut[1]), float(cut[2]), extra)
 
     def score(bin_name: str) -> float:
-        # A bin file with no row in the .stats file (the two can drift apart if a run was
-        # interrupted between writing bins and re-scoring them) used to raise KeyError here
-        # and abort the whole refinement. Treat it as the worst possible bin instead, so it
-        # never wins a contig but also never crashes the run.
+        # A bin with no .stats row (possible after an interrupted run) scores as the worst bin,
+        # so it never wins a contig and does not raise KeyError.
         if bin_name not in bin_scores:
             missing_stats.add(bin_name)
             return float("-inf")

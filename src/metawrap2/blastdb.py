@@ -1,19 +1,14 @@
 """Locating and validating a BLAST nucleotide database.
 
-Both ``blobology`` and ``classify_bins`` MEGABLAST contigs against a nucleotide database.
-They used to hardcode two assumptions: that the database is named exactly ``nt``, and that
-``<BLASTDB>/nt.00.nhd`` exists. Neither holds in general:
+``blobology`` and ``classify_bins`` run MEGABLAST against a nucleotide database. The database
+name is configurable (``BLASTDB_NAME``, default ``nt``), so users can search core_nt, a RefSeq
+subset or their own database. Presence is checked by looking for the files BLAST requires under
+any volume numbering, because:
 
-* BLAST v5 databases number volumes with three digits (``nt.000.nhd``), and a database
-  small enough to fit in one volume has no volume suffix at all (``nt.nhd``);
-* ``.nhd`` only exists when the database was built with hashed sequence ids, so a perfectly
-  good ``makeblastdb`` output can lack it entirely;
-* users legitimately want to search something other than ``nt`` - core_nt, a RefSeq subset,
-  or their own curated database.
-
-So the database *name* is configurable (``BLASTDB_NAME``, default ``nt``) and presence is
-established by looking for any of the files BLAST actually requires, whatever the volume
-numbering.
+* BLAST v5 numbers volumes with three digits (``nt.000.nhd``), and a single-volume database has
+  no volume suffix (``nt.nhd``);
+* ``.nhd`` only exists when the database was built with hashed sequence ids, so valid
+  ``makeblastdb`` output can lack it.
 """
 
 from __future__ import annotations

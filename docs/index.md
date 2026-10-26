@@ -1,25 +1,25 @@
-# MetaWrap2: a benchmarked pipeline for genome-resolved metagenomics, from reads to MAGs and their functions
+# MetaWrap2
 
 MetaWrap2 is a Python pipeline for genome-resolved metagenomics. It covers read QC, assembly,
 taxonomic profiling, binning, bin refinement and reassembly, cross-sample coverage, dereplication,
-quantification and classification, and then what the genomes do: functional and pathway annotation,
+quantification and classification, and genome annotation: functional and pathway annotation,
 resistance and virulence genes, viruses, strains, pangenomes, phylogenies and differential
 abundance. Each module runs on its own.
 
 MetaWrap2 succeeds metaWRAP. Its first release reproduced metaWRAP's pipeline with the same
 algorithms, tools and thresholds, so existing analyses could be migrated and checked against it.
-Golden tests still pin that baseline. Four defaults have since changed, each based on a benchmark.
-The default configuration recovers more clean high-quality MAGs than metaWRAP 1 for less compute.
+Golden tests still pin that baseline. Five defaults have since changed, each based on a benchmark.
+The default configuration recovers more near-complete bins than metaWRAP 1 on the three CAMI2 sites
+and more clean MAGs on all four real datasets, but fewer near-complete bins on the CAMI3 toy dataset
+and on the three-sample real dataset. `--preset gpu` recovers more on every dataset.
 
-![MetaWrap2 against metaWRAP 1](figures/headline_mw1_vs_mw2.png)
+![Synthetic communities: CAMI2 and CAMI3](figures/synthetic_benchmarks.png)
 
 - [Installation](installation.md)
 - [Benchmarks](benchmarks.md): the measurements and methods.
-- [Release notes](releases/index.md): per version, what was added and which defaults changed.
-- Plans for what is built and what remains:
-  [functional annotation, pathways, AMR and abundance](plan_functional_annotation.md) and
-  [the other modules](plan_other_modules.md). [The 2.1.3 plan](plan_2.1.3.md) lists the goals of
-  this release.
+- [Release notes](https://github.com/ursky/MetaWrap2/blob/main/releases/index.md): per version, what was added and which defaults changed.
+- [Planned features](https://github.com/ursky/MetaWrap2/blob/main/PLANNED_FEATURES.md): what is not
+  built yet.
 
 ## Highlights
 
@@ -31,8 +31,8 @@ The default configuration recovers more clean high-quality MAGs than metaWRAP 1 
   dataset with a known answer and commits the result.
 - Whole studies run from a sample sheet with `run` or `cohort`. `coverage` builds one depth table
   across all samples, and `dereplicate` merges per-sample bins into one catalogue of organisms.
-- GUNC runs by default and flags chimeric bins, whose marker genes look clean but whose sequence
-  comes from two genomes. CheckM cannot detect these.
+- GUNC runs by default and flags chimeric bins (sequence from two genomes, clean marker genes),
+  which CheckM cannot detect.
 - Every run records its configuration, commands, tool versions, database fingerprints, conda
   packages and MetaWrap2 commit, and carries that record through chained runs.
 - `--resume` skips a step if it finished, its outputs are present and non-empty, and its inputs

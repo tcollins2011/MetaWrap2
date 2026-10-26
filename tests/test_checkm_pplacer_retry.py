@@ -1,12 +1,10 @@
-"""CheckM1's parallel tree placement can die without saying why, so it gets one retry.
+"""Tests for the CheckM1 retry after a pplacer crash.
 
-What happened: on three CAMI2 skin samples, three of six `bin_refinement` steps ended with
-`RuntimeError: CheckM did not produce .../storage/bin_stats_ext.tsv`, each after CheckM had logged
-every marker gene aligned. Underneath, pplacer had crashed as
-`Uncaught exception: Dune__exe__Multiprocessing.Child_error(_)` - an OCaml child failure that
-carries no cause - at seven pplacer threads. The other three steps, over
-the same kind of bin set on the same host, finished. CheckM is effectively the whole cost of
-refinement, so an hour of it was being thrown away by a crash that a single thread survives.
+With seven pplacer threads, pplacer can fail with
+`Uncaught exception: Dune__exe__Multiprocessing.Child_error(_)`, which gives no cause; CheckM then
+raises `RuntimeError: CheckM did not produce .../storage/bin_stats_ext.tsv`. This happened in three
+of six `bin_refinement` steps on CAMI2 skin samples. The same input succeeds with one pplacer
+thread, so CheckM is retried on one thread and then against the reduced tree.
 """
 
 import os
@@ -53,9 +51,11 @@ def _bins(tmp_path):
 
 
 def test_the_reduced_tree_is_the_last_resort_and_only_that(tmp_path, monkeypatch):
-    """One ordinary 2,022-residue alignment killed pplacer at one thread, three times of three,
-    and placed fine against CheckM's reduced tree. So the reduced tree is tried - third, never
-    first: it can choose a different lineage-specific marker set, which moves completeness.
+    """The reduced tree is the third attempt, never the first.
+
+    One 2,022-residue alignment crashed pplacer at one thread in three of three tries and placed
+    against the reduced tree. The reduced tree can choose a different lineage-specific marker set,
+    which changes completeness, so it is used only as the last resort.
     """
     calls = []
     monkeypatch.setattr(checkm, "run", _fake_run(calls, produce_on=3))
@@ -67,15 +67,13 @@ def test_the_reduced_tree_is_the_last_resort_and_only_that(tmp_path, monkeypatch
     assert os.path.isfile(stats)
 
 
-def test_quick_runs_the_reduced_tree_from_the_start_and_does_not_fall_back_to_it(
-    tmp_path, monkeypatch
-):
-    """`--quick` already is the reduced tree, so there is no third attempt to make."""
+def test_the_reduced_tree_from_the_start_has_no_third_attempt(tmp_path, monkeypatch):
+    """With ``reduced_tree`` (bin_refinement's default under --checkm1) there is no fallback."""
     calls = []
     monkeypatch.setattr(checkm, "run", _fake_run(calls, produce_on=0))
     monkeypatch.setattr(checkm, "checkm1_data_env", dict)
     try:
-        checkm.run_checkm(_bins(tmp_path), threads=60, mem_gb=300, env="e", quick=True)
+        checkm.run_checkm(_bins(tmp_path), threads=60, mem_gb=300, env="e", reduced_tree=True)
     except RuntimeError:
         pass
     assert len(calls) == 2
@@ -90,10 +88,10 @@ def test_a_crashed_first_attempt_is_retried_on_one_pplacer_thread(tmp_path, monk
     stats = checkm.run_checkm(_bins(tmp_path), threads=60, mem_gb=300, env="e")
 
     assert len(calls) == 2, "the first attempt produced nothing and must be retried"
-    # Seven threads is what 300 GB allows, and one is what the retry is for.
+    # 300 GB allows seven pplacer threads; the retry uses one.
     assert calls[0].pplacer_threads == checkm.pplacer_threads(60, 300) == 7
     assert calls[1].pplacer_threads == 1
-    # Everything else is the same command, so the retry cannot drift from the first attempt.
+    # The rest of the command is unchanged.
     assert calls[0].cmd.replace("--pplacer_threads 7", "--pplacer_threads 1").split()[:6] == (
         calls[1].cmd.split()[:6]
     )
@@ -101,7 +99,7 @@ def test_a_crashed_first_attempt_is_retried_on_one_pplacer_thread(tmp_path, monk
 
 
 def test_the_first_attempt_is_not_fatal_but_the_retry_is(tmp_path, monkeypatch):
-    """The first call must come back so the retry can happen; the second must not be swallowed."""
+    """The first attempt runs with check=False so it can be retried; the second with check=True."""
     calls = []
     monkeypatch.setattr(checkm, "run", _fake_run(calls, produce_on=2))
     monkeypatch.setattr(checkm, "checkm1_data_env", dict)
@@ -111,7 +109,7 @@ def test_the_first_attempt_is_not_fatal_but_the_retry_is(tmp_path, monkeypatch):
 
 
 def test_a_working_checkm_is_run_once(tmp_path, monkeypatch):
-    """No retry, and no change to the common path: one invocation, at the computed thread count."""
+    """A successful first attempt runs once, at the computed pplacer thread count."""
     calls = []
     monkeypatch.setattr(checkm, "run", _fake_run(calls, produce_on=1))
     monkeypatch.setattr(checkm, "checkm1_data_env", dict)
@@ -130,13 +128,13 @@ def test_both_attempts_failing_still_raises_naming_the_file(tmp_path, monkeypatc
         assert "bin_stats_ext.tsv" in str(problem)
     else:
         raise AssertionError("a CheckM that never produced its table must raise")
-    # Three attempts: as asked, then one pplacer thread, then CheckM's reduced reference tree.
+    # Three attempts: as configured, then one pplacer thread, then the reduced reference tree.
     assert len(calls) == 3
     assert "--reduced_tree" in calls[2].cmd and "--reduced_tree" not in calls[0].cmd
 
 
 def test_the_retry_clears_what_the_crash_left_behind(tmp_path, monkeypatch):
-    """pplacer resumes from its tmpdir, so a crashed tree left in place reproduces the crash."""
+    """The retry removes the crashed attempt's output, since pplacer would resume from it."""
     calls = []
     bins = _bins(tmp_path)
     leftover = bins + ".checkm"
@@ -147,3 +145,20 @@ def test_the_retry_clears_what_the_crash_left_behind(tmp_path, monkeypatch):
     monkeypatch.setattr(checkm, "checkm1_data_env", dict)
     checkm.run_checkm(bins, threads=60, mem_gb=300, env="e")
     assert not os.path.exists(os.path.join(leftover, "storage", "half_written.pkl"))
+
+
+def test_pplacer_threads_is_capped_at_eight():
+    """pplacer gains little past 8 threads, and its placements do not depend on the count."""
+    assert checkm.pplacer_threads(24, 700) == checkm.PPLACER_USEFUL_THREADS == 8
+    assert checkm.pplacer_threads(64, 4000) == 8
+    # Below the cap, memory bounds it first, then the thread count.
+    assert checkm.pplacer_threads(60, 300) == 7
+    assert checkm.pplacer_threads(8, 64) == 1
+    assert checkm.pplacer_threads(2, 700) == 2
+    assert checkm.pplacer_threads(1, 1) == 1
+
+
+def test_the_reduced_tree_budgets_16_gb_per_pplacer_thread():
+    assert checkm.pplacer_threads(60, 300, reduced_tree=True) == 8
+    assert checkm.pplacer_threads(8, 64, reduced_tree=True) == 4
+    assert checkm.pplacer_threads(8, 20, reduced_tree=True) == 1

@@ -1,18 +1,13 @@
-"""A durable record of every MetaWrap2 run ever started on this machine.
+"""A persistent record of every MetaWrap2 run started on this machine.
 
-A run's provenance lives in its own output directory, which answers "how was *this* made?".
-It cannot answer "what have I run?", "when did I last run binning, and with what?", or "which
-analyses used the database I just replaced" - and it disappears with the output directory.
-
-So every module invocation also appends one line to a history file outside any run:
+Per-run provenance is stored in each output directory and is lost with it. In addition, every
+module invocation appends one line to a history file outside any run:
 
     ~/.metawrap2/history.jsonl        (or $METAWRAP2_HISTORY)
 
-One JSON object per line, append-only. That format is chosen deliberately: appending a line is
-atomic enough to be safe from concurrent runs without locking, a truncated final line costs one
-record rather than the file, and the whole thing stays greppable. It is never rotated or pruned
-by MetaWrap2 - the user's own record outlives any individual analysis - and a failed write is
-ignored, because losing a history line must never be the reason a run fails.
+The file holds one JSON object per line and is append-only. Appending a line is safe enough for
+concurrent runs without locking, and a truncated final line loses only that record. MetaWrap2
+never rotates or prunes the file. A failed write is ignored so it cannot fail a run.
 
 Read it with ``metawrap2 history``.
 """
@@ -27,8 +22,7 @@ import socket
 import time
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
-#: Where the history lives. Under the user's MetaWrap2 directory, beside the config, so it
-#: survives for as long as MetaWrap2 is installed.
+#: Default history file, in the user's MetaWrap2 directory beside the config.
 DEFAULT_HISTORY = os.path.join("~", ".metawrap2", "history.jsonl")
 
 _HISTORY_ENV = "METAWRAP2_HISTORY"
@@ -40,7 +34,7 @@ INTERRUPTED = "interrupted"
 
 
 def history_path(explicit: Optional[str] = None) -> str:
-    """The history file to use: explicit, then $METAWRAP2_HISTORY, then the default."""
+    """Return the history file path: explicit, then $METAWRAP2_HISTORY, then the default."""
     path = explicit or os.environ.get(_HISTORY_ENV) or DEFAULT_HISTORY
     return os.path.abspath(os.path.expanduser(path))
 
@@ -96,7 +90,7 @@ def record(
         with open(target, "a") as fh:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
     except OSError:
-        pass  # deliberately silent: see the module docstring
+        pass  # see the module docstring
 
 
 def read(path: Optional[str] = None) -> Iterator[Dict[str, Any]]:
@@ -124,7 +118,7 @@ def entries(
     since: Optional[str] = None,
     output: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Filtered history, oldest first."""
+    """Return filtered history entries, oldest first."""
     found = []
     for entry in read(path):
         if module and entry.get("module") != module:
@@ -140,11 +134,10 @@ def entries(
 
 
 def runs(path: Optional[str] = None, **filters: object) -> List[Dict[str, Any]]:
-    """History collapsed to one row per run, merging each run's start and finish entries.
+    """Return history with one row per run, merging each run's start and finish entries.
 
     A module records a ``started`` entry and then a ``completed``/``failed``/``interrupted``
-    one, so that an interrupted or killed run still leaves a trace. For display, the two are
-    folded together on ``run_id``.
+    one, so a killed run still leaves a trace. The two are merged on ``run_id``.
     """
     merged: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []

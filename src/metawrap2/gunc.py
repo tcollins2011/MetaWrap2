@@ -1,16 +1,12 @@
 """GUNC helpers: chimerism detection for refined bins.
 
-CheckM answers "does this bin have one copy of every marker gene it should have". A bin assembled
-from two halves of two different genomes answers yes - it has a full, uncontaminated-looking marker
-set, and marker-gene scoring cannot see that the halves are unrelated. GUNC can: it maps the bin's
-genes against a reference taxonomy and asks whether they agree about where the bin sits. That makes
-it a complement to CheckM rather than a replacement, which is why both scores end up in the same
-``.stats.tsv`` instead of one overruling the other.
+CheckM scores marker-gene completeness and redundancy. A bin made of halves of two different
+genomes can still show a full, uncontaminated-looking marker set. GUNC maps the bin's genes against
+a reference taxonomy and checks whether they agree on where the bin sits, so it complements CheckM
+and both scores go in the same ``.stats.tsv``.
 
-What this module does is run GUNC and merge its verdict into that table. It deliberately does not
-drop bins: a chimera is worth knowing about, and a run that silently deleted bins on a second
-tool's opinion would be hard to audit. Filtering is the caller's decision, and the column is what
-makes it possible.
+This module runs GUNC and merges its result into that table. It does not drop bins; filtering on
+the GUNC columns is left to the caller.
 """
 
 from __future__ import annotations
@@ -22,30 +18,26 @@ from typing import Dict, List, NamedTuple, Optional
 from .command import run, runner
 from .constants import BIN_EXTENSION
 
-#: GUNC's clade-separation-score threshold. Above it, the genes in a bin disagree about its taxonomy
-#: by more than chance explains, and the bin is called chimeric. 0.45 is GUNC's own published
-#: cut-off (Orakov et al., Genome Biology 2021;22:178), kept rather than re-tuned so that
-#: "chimeric" here means what it means in the literature.
+#: GUNC's clade-separation-score threshold; above it a bin is called chimeric. 0.45 is GUNC's
+#: published cut-off (Orakov et al., Genome Biology 2021;22:178), kept for comparability.
 CSS_THRESHOLD = 0.45
 
-#: The report GUNC writes: one row per bin, at whichever taxonomic level scored highest. Matched by
+#: The report GUNC writes: one row per bin, at the taxonomic level that scored highest. Matched by
 #: prefix and suffix because the middle carries the reference database version
-#: (``GUNC.progenomes_2.1.maxCSS_level.tsv``), and a hardcoded version would find nothing the first
-#: time that database is updated.
+#: (``GUNC.progenomes_2.1.maxCSS_level.tsv``).
 REPORT_PREFIX = "GUNC."
 REPORT_SUFFIX = ".maxCSS_level.tsv"
 
-#: ``--file_suffix`` carries the leading dot on purpose. GUNC derives each genome's name with
-#: ``basename.split(file_suffix)[0]``, so a suffix of "fasta" yields "bin_001." - a name that matches
-#: nothing in the stats table, which would silently annotate zero bins. ``--temp_dir`` is set
-#: because GUNC defaults it to the working directory, and diamond's temporaries do not belong there.
+#: ``--file_suffix`` includes the leading dot. GUNC derives each genome's name with
+#: ``basename.split(file_suffix)[0]``, so a suffix of "fasta" yields "bin_001.", which matches no
+#: row in the stats table. ``--temp_dir`` is set because GUNC otherwise puts diamond's temporary
+#: files in the working directory.
 GUNC_RUN = (
     "gunc run --input_dir {bins} --file_suffix {ext} --db_file {db} "
     "--out_dir {out} --temp_dir {out} --threads {threads}"
 )
 
-#: Said whenever GUNC cannot run, because both ways out are worth naming: get the database, or
-#: decide the check is not wanted on this run.
+#: Shown whenever GUNC cannot run: install the database, or skip the check.
 DB_HINT = (
     "GUNC needs its reference database; install it with 'metawrap2 install-db gunc' and point "
     "GUNC_DB at the .dmnd file, or pass --skip-gunc."
@@ -54,6 +46,7 @@ DB_HINT = (
 __all__ = [
     "CSS_THRESHOLD",
     "DB_HINT",
+    "STATS_COLUMNS",
     "Verdict",
     "annotate_stats",
     "find_report",
@@ -61,9 +54,14 @@ __all__ = [
     "run_gunc",
 ]
 
+#: The columns :func:`annotate_stats` appends to a ``.stats.tsv``. Exported, like
+#: ``checkm.STATS_HEADER`` and ``mimag.STATS_COLUMNS``, for code that builds the full table header
+#: (`metawrap2 score`).
+STATS_COLUMNS: tuple = ("gunc_css", "gunc_pass")
+
 
 class Verdict(NamedTuple):
-    """GUNC's answer for one bin."""
+    """GUNC's result for one bin."""
 
     css: float
     passed: bool
@@ -82,17 +80,13 @@ def find_report(out_dir: str) -> Optional[str]:
 def passed_value(raw: object) -> Optional[bool]:
     """GUNC's ``pass.GUNC`` cell as a verdict, or None when it does not state one.
 
-    GUNC writes this column two ways depending on how pandas typed it: ``True``/``False`` when the
-    column stayed boolean, and ``1.0``/``0.0`` when a ``nan`` in it forced a float dtype. Both came
-    out of the *same* GUNC version in one benchmark run - one bin set each - so this is not a
-    version question that pinning solves.
+    GUNC writes this column as ``True``/``False`` when pandas kept it boolean, and as
+    ``1.0``/``0.0`` when a ``nan`` forced a float dtype. The same GUNC version produced both in one
+    benchmark run. Accepting only the words gave a 166-bin set written as floats a GUNC pass
+    fraction of 0.
 
-    Accepting only the words cost a real number: a 166-bin set whose column was written as floats
-    scored a GUNC pass fraction of **0**, which reads as every bin being chimeric. That is the kind
-    of wrong number that gets believed, because 0 is a plausible-looking answer.
-
-    ``nan`` is None, not False. GUNC writes it when a bin had too little reference representation
-    for the score to mean anything, and a bin it could not assess has not failed.
+    ``nan`` is None, not False: GUNC writes it when a bin has too little reference representation
+    to be assessed.
     """
     if raw is None:
         return None
@@ -112,10 +106,10 @@ def passed_value(raw: object) -> Optional[bool]:
 def parse_report(path: str) -> Dict[str, Verdict]:
     """GUNC's verdict per bin, keyed by bin name.
 
-    ``pass.GUNC`` is used where GUNC wrote it, because that column is its whole judgement: clade
-    separation *and* whether the bin was represented well enough in the reference for the score to
-    mean anything. Where the column is absent the threshold stands in, which agrees with GUNC for a
-    well-represented bin and is more forgiving for a poorly represented one.
+    ``pass.GUNC`` is used where present, because it combines clade separation with whether the bin
+    is represented well enough in the reference. Without it, :data:`CSS_THRESHOLD` is applied,
+    which agrees with GUNC for well-represented bins and is more lenient for poorly represented
+    ones.
     """
     verdicts: Dict[str, Verdict] = {}
     with open(path, newline="") as fh:
@@ -128,8 +122,8 @@ def parse_report(path: str) -> Dict[str, Verdict]:
             try:
                 css = float(raw_css)
             except ValueError:
-                # A bin GUNC could not score, or a header repeated mid-file. Skipping it leaves the
-                # bin unannotated, which reads as "not assessed" rather than as "passed".
+                # A bin GUNC could not score, or a header repeated mid-file. The bin is left
+                # unannotated ("not assessed").
                 continue
             stated = passed_value(record.get(columns.get("pass.gunc", ""), ""))
             passed = stated if stated is not None else css <= CSS_THRESHOLD
@@ -177,9 +171,7 @@ def run_gunc(
 def annotate_stats(stats_path: str, verdicts: Dict[str, Verdict]) -> int:
     """Add ``gunc_css`` and ``gunc_pass`` to a ``.stats.tsv``; return how many rows were annotated.
 
-    A bin GUNC did not score gets empty cells rather than a default. Writing an unassessed bin as
-    passing would be the exact mistake this step exists to catch, and writing it as failing would
-    condemn a bin over a measurement that was never made.
+    A bin GUNC did not score gets empty cells, not a pass or a fail.
     """
     if not os.path.isfile(stats_path):
         return 0
@@ -188,15 +180,16 @@ def annotate_stats(stats_path: str, verdicts: Dict[str, Verdict]) -> int:
     if not rows:
         return 0
 
+    css_column, pass_column = STATS_COLUMNS
     header = rows[0]
-    if "gunc_css" in header:
-        # Already annotated - a --resume that re-runs this step would otherwise append the two
-        # columns a second time and leave a table nothing can parse.
+    if css_column in header:
+        # Already annotated (a --resume re-ran this step): overwrite the columns instead of
+        # appending them a second time.
         at = {name: i for i, name in enumerate(header)}
-        css_at, pass_at = at["gunc_css"], at["gunc_pass"]
+        css_at, pass_at = at[css_column], at[pass_column]
     else:
         css_at, pass_at = len(header), len(header) + 1
-        header = header + ["gunc_css", "gunc_pass"]
+        header = header + list(STATS_COLUMNS)
 
     width = len(header)
     out: List[List[str]] = [header]

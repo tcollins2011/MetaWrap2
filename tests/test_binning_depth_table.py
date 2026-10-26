@@ -1,19 +1,12 @@
-"""The shared depth table, and the flag that used to hand MaxBin2 a column of zeros.
+"""Tests for the shared depth table and MaxBin2's abundance files.
 
-MaxBin2 got its own ``jgi_summarize_bam_contig_depths --noIntraDepthVariance`` pass, which reads as a
-formatting flag - MaxBin2 has no use for the variance columns - but in jgi 2.18 that code path
-reports values that are not depths. On a 60-contig, two-sample probe it zeroed 59 of the 60 contigs
-and gave the 60th 7867 where the real per-sample depths were 0.267 and 0.453, and rerunning it
-unchanged returned 7874, so the number came from uninitialized memory.
+MaxBin2 used to get its own ``jgi_summarize_bam_contig_depths --noIntraDepthVariance`` pass. In jgi
+2.18 that code path reports values that are not depths: on a 60-contig, two-sample probe it gave 59
+contigs zero and the 60th 7867 (real per-sample depths 0.267 and 0.453), and 7874 on a rerun.
 
-Nothing failed, which is why it needed finding on purpose: a file of zeros is a well-formed
-abundance file and MaxBin2 still bins on composition. These tests pin the two halves of the fix -
-that one table serves both binners, and that MaxBin2's abundance files carry the mean-depth columns
-of that table rather than the variances next to them.
-
-The table is no longer built by a third-party binary at all: `metawrap2.depth` computes it from
-``samtools depth``, for the reason this file exists - the number every binner depends on should be
-code with tests, not an opaque pass whose output could only be checked by eye.
+These tests check that one table serves both binners, and that MaxBin2's abundance files carry the
+mean-depth columns of that table, not the variances. The table is now computed by
+`metawrap2.depth` from ``samtools depth``.
 """
 
 from __future__ import annotations
@@ -26,8 +19,8 @@ import pytest
 from metawrap2 import command
 from metawrap2.modules import binning
 
-#: A two-sample jgi depth table, in the layout the real one has: a mean and a variance per sample,
-#: and the variances deliberately unlike the means so a test cannot pass by reading either.
+#: A two-sample jgi depth table in the real layout (a mean and a variance per sample). The variances
+#: differ from the means so a test reading the wrong column fails.
 DEPTH = (
     "contigName\tcontigLen\ttotalAvgDepth\tsample_0\tsample_0-var\tsample_1\tsample_1-var\n"
     "c1\t5000\t8.5\t3.5\t91.1\t5.0\t92.2\n"
@@ -38,22 +31,22 @@ DEPTH = (
 def test_maxbin2_abundance_files_carry_the_means_not_the_variances(tmp_path, monkeypatch):
     """One file per sample, each the contig and that sample's mean depth.
 
-    The variances sit in the column next to each mean and are an order of magnitude larger here, so
-    an off-by-one in the split shows up as a number rather than as a missing file.
+    The variances are next to each mean and an order of magnitude larger, so an off-by-one
+    column shows up as a wrong value.
     """
     work = tmp_path / "work_files"
     work.mkdir()
     depth = work / binning.DEPTH_TABLE
     depth.write_text(DEPTH)
 
-    # MaxBin2 itself is not what is under test, and it is the only thing _run_maxbin2 shells out to.
+    # Stub out MaxBin2, the only command _run_maxbin2 runs.
     calls = []
     monkeypatch.setattr(binning, "run", lambda cmd, **kw: calls.append(cmd))
     monkeypatch.setattr(binning, "announcement", lambda *a, **k: None)
     monkeypatch.setattr(binning, "comm", lambda *a, **k: None)
     monkeypatch.setattr(binning, "dry_run", lambda: False)
-    # No bins to collect afterwards is an error in the module, which is correct and not this test's
-    # subject; the error function is replaced so the split can be inspected on its own.
+    # With no bins produced the module calls error(); make that raise SystemExit so the split can
+    # be inspected afterwards.
     monkeypatch.setattr(binning, "error", lambda msg: (_ for _ in ()).throw(SystemExit(msg)))
 
     out = tmp_path / "out"
@@ -79,8 +72,8 @@ def test_maxbin2_abundance_files_carry_the_means_not_the_variances(tmp_path, mon
 
 # ─── the shared table, through main() ────────────────────────────────────────────────────
 
-#: jgi, but counting its own invocations into a file so a test can assert there was only one.
-#: Emits the two-sample layout above, named for whatever BAMs it was handed.
+#: Stub tools. The samtools stub records each `samtools depth` call in a file so a test can count
+#: depth passes.
 _OTHER_STUBS = {
     "minimap2": (
         "import sys\n"
@@ -89,10 +82,8 @@ _OTHER_STUBS = {
         "else:\n"
         "    sys.stdout.write('@HD\\tVN:1.6\\nr\\t0\\tc1\\t1\\t60\\t4M\\t*\\t0\\t0\\tACGT\\tIIII\\n')\n"
     ),
-    # samtools now does the pileup the depth table is computed from, so the stub has to answer
-    # three more questions than it used to: what contigs the BAM header names, what its alignments
-    # are, and what the per-base depth is. Every `samtools depth` call is recorded, which is how the
-    # "one pass for both binners" test counts passes.
+    # The depth table is computed from samtools output, so the stub answers the BAM header, the
+    # alignments and the per-base depth. Every `samtools depth` call is recorded.
     "samtools": (
         "import os, sys\n"
         "a = sys.argv\n"
@@ -142,16 +133,13 @@ def stubs(tmp_path, monkeypatch):
 
 
 def test_resuming_with_a_new_binner_rebuilds_the_table_it_needs(tmp_path, stubs):
-    """The table is a stage of its own now, so --resume has to be able to get back to it.
+    """``--resume --maxbin2`` after a metaBAT2-only run realigns and rebuilds the depth table.
 
-    The sequence that has to work: metaBAT2 alone, which deletes the BAMs when it is done, then
-    ``--resume --maxbin2``, which has no BAMs to read and no table that was built from the reads this
-    binner is being asked about. Both markers are cleared with the BAMs, so it realigns and rebuilds;
-    had only the alignment marker been cleared, MaxBin2 would have been handed a table from a
-    previous read set, which is the kind of wrong answer that does not look like one.
+    The metaBAT2 run deletes the BAMs, and both step markers are cleared with them, so the resumed
+    run does not reuse a table from a previous read set.
 
-    ``--resume`` is set through the runner rather than passed in argv: it is a global flag that
-    ``cli.main`` strips before the module ever sees it, so a module parser handed it rejects it.
+    ``--resume`` is set through the runner, not argv: ``cli.main`` strips this global flag before
+    the module parser sees it.
     """
     cfg = tmp_path / "mw2.toml"
     cfg.write_text("[settings]\nuse_conda_envs = false\n")

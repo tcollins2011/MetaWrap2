@@ -1,20 +1,16 @@
-"""MetaWrap2 pangenome: one pangenome per species in a cohort, from the clusters dereplication made.
+"""MetaWrap2 pangenome: one pangenome per species cluster, from dereplication's clusters.
 
-`dereplicate` groups a cohort's bins by organism and keeps one representative of each, which is the
-right thing for a catalogue and throws away the interesting part: the same species recovered from
-several samples differs in gene content between them, and that difference is where strain-level
-biology lives. This module builds a pangenome per cluster instead.
+`dereplicate` keeps one representative per organism. The copies of a species recovered from
+different samples differ in gene content, and this module builds a pangenome from each cluster's
+members to describe that variation.
 
-**The input is a cluster, not a catalogue.** A pangenome is defined over one species; computed over
-a dereplicated catalogue it is a pangenome of a community, which is not a quantity. So the module
-takes `dereplicate`'s `clusters.tsv` and the bin folders it was built from, and refuses to treat the
-whole set as one group. `--genomes` is there for the case where you already know a folder holds one
-species.
+A pangenome is defined over one species, so the input is `dereplicate`'s `clusters.tsv` plus the
+bin folders it was built from, and the whole set is never treated as one group. `--genomes` takes a
+single folder known to hold one species.
 
-Expect most cohorts to yield nothing, and expect that to be reported rather than looking like a
-failure: on three samples almost every cluster is a singleton. See
-:mod:`metawrap2.pangenome` for the group floor and why the partitioning needs about 15 genomes to
-mean what its names say.
+With few samples most clusters are singletons (almost all of them on three samples), so many
+cohorts produce no pangenome; this is reported. See :mod:`metawrap2.pangenome` for the minimum
+group size and why the partitioning needs about 15 genomes to be reliable.
 """
 
 from __future__ import annotations
@@ -50,20 +46,14 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["pangenome"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# `workflow` rather than the individual steps: it runs annotation, clustering, the graph, the
-# partitioning and the flat-file output in one call, and the per-step route exists for people
-# tuning the partitioning rather than for a pipeline.
+# `workflow` runs annotation, clustering, the graph, partitioning and flat-file output in one call.
 #
-# --fasta rather than --anno: PPanGGOLiN calls its own genes with Prodigal, consistently across the
-# group, which is what a gene-family clustering needs. Handing it this pipeline's GFFs would mix
-# gene models from annotate's own calling with its clustering assumptions for no gain here.
+# --fasta, not --anno: PPanGGOLiN calls genes with Prodigal consistently across the group, which
+# gene-family clustering needs.
 PPANGGOLIN = "ppanggolin workflow --fasta {genome_list} -o {outdir} -c {threads} --force"
-# The core-gene alignment, which is what `phylogeny` takes. Written only on request because it is a
-# second pass over the pangenome and most users want the gene-content answer rather than a tree.
-# --phylo writes one concatenated alignment across the core families rather than one file per
-# family, which is what a tree is built from. --single_copy excludes families present more than once
-# in a genome: a concatenation that includes a paralogous family is aligning different genes to each
-# other, and the tree that comes out is of the duplication history rather than of the strains.
+# Core-gene alignment for `phylogeny`, written only with --msa because it is a second pass.
+# --phylo writes one concatenated alignment of the core families. --single_copy excludes families
+# present more than once in a genome, since paralogs would align different genes to each other.
 PPANGGOLIN_MSA = (
     "ppanggolin msa -p {pangenome} -o {outdir} -c {threads} --partition core --source dna"
     " --phylo --single_copy --force"
@@ -89,8 +79,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "-c",
         "--clusters",
         help="`dereplicate`'s clusters.tsv. Each cluster with enough members becomes one "
-        "pangenome; a pangenome over the whole catalogue would be a pangenome of a community, "
-        "which is not a quantity",
+        "pangenome (one per species, never one over the whole catalogue)",
     )
     p.add_argument(
         "-b",
@@ -109,13 +98,11 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         type=int,
         default=_pan.MIN_GENOMES,
         metavar="N",
-        # Concatenated rather than %-formatted: argparse interpolates %(default)s itself, so a
-        # help string that is also %-formatted here leaves a stray conversion for it to choke on -
-        # which broke every --help in the package once already.
+        # Concatenated, not %-formatted, because argparse interpolates %(default)s itself.
         help="smallest group to build a pangenome for (default: %(default)s). Below "
         + str(_pan.RELIABLE_GENOMES)
-        + " genomes the persistent/shell/cloud partitioning is provisional whatever this is set "
-        "to, and the rows say so",
+        + " genomes the persistent/shell/cloud partitioning is marked provisional in the "
+        "output, whatever this is set to",
     )
     p.add_argument(
         "--msa",
@@ -136,8 +123,8 @@ def _groups(args) -> List[_pan.GenomeGroup]:
         group = _pan.GenomeGroup(name=os.path.basename(args.genomes.rstrip("/")), genomes=paths)
         if not group.is_a_pangenome:
             error(
-                "%d genome(s) in %s: a pangenome needs at least %d. One genome has no gene-content "
-                "variation and two have a comparison rather than a partitioning"
+                "%d genome(s) in %s: a pangenome needs at least %d, since one or two genomes "
+                "cannot be partitioned into persistent, shell and cloud genes"
                 % (group.size, args.genomes, _pan.MIN_GENOMES)
             )
         return [group]
@@ -162,7 +149,7 @@ def main(argv: List[str]) -> int:
     if not args.clusters and not args.genomes:
         error("nothing to build: pass --clusters with --bins, or --genomes")
     if args.clusters and not args.bins:
-        error("--clusters needs --bins: the cluster table names genomes, it does not hold them")
+        error("--clusters needs --bins: the cluster table lists genome names, not the genomes")
     if args.clusters:
         validate_inputs("pangenome", [(require_file, args.clusters, "cluster table (-c)")])
 
@@ -183,9 +170,8 @@ def main(argv: List[str]) -> int:
 
         work = os.path.join(args.output, "work_files")
         ensure_dir(work)
-        # PPanGGOLiN creates its own output directory with a non-recursive mkdir, so the parent has
-        # to exist first - otherwise every group fails with a FileNotFoundError about the directory
-        # it was about to create.
+        # PPanGGOLiN creates its output directory with a non-recursive mkdir, so the parent must
+        # exist.
         ensure_dir(os.path.join(args.output, GROUPS_DIR))
         summaries: List[_pan.PangenomeSummary] = []
         for group in bar(groups, desc="pangenomes", unit=" group", total=len(groups)):

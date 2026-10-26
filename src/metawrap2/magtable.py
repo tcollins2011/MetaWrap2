@@ -1,33 +1,23 @@
 """One row per genome, joined from the tables a finished run already wrote.
 
-A finished run leaves twenty-odd correct tables and not one row per genome. Completeness and
-contamination are in ``<bins>.stats.tsv``, the chimerism verdict is in GUNC's own report, the
-lineage is in ``classify_bins``' two-column file, and the per-sample abundance is in
-``quant_bins``' matrix - so the simplest question anyone asks of a MAG ("how good is it, what is
-it, and how much of it is there") needs four files opened side by side and joined by hand. This
-module does that join once.
+Completeness and contamination are in ``<bins>.stats.tsv``, the chimerism verdict in GUNC's
+report, the lineage in ``classify_bins``' two-column file and per-sample abundance in
+``quant_bins``' matrix. This module joins them.
 
-Nothing here measures anything. Every cell is copied from a file the pipeline already wrote, which
-is why the GC column is left as the fraction CheckM writes rather than rescaled to a percentage:
-a value copied verbatim cannot disagree with the file beside it, and a value converted twice is a
-silent factor of 100.
+No values are computed. Every cell is copied from a pipeline output, so the GC column stays the
+fraction CheckM writes and is not converted to a percentage.
 
-Two things decide whether this table is trustworthy:
+Rules:
 
-* **An absent measurement is blank, never zero.** A contamination of 0 is a finding; an unmeasured
-  contamination is not. Three other tools' tables in this project have conflated the two, and the
-  resulting numbers were believed, because 0 looks like an answer. :data:`BLANK` is the only thing
-  this module ever writes for a measurement that was not made.
-* **Every input is optional and no input can drop a genome.** A run that skipped ``classify_bins``
-  gets the whole table with an empty taxonomy column, not a shorter table and not a failure. A
-  genome that appears only in the abundance matrix still gets a row, because the alternative is a
-  table that silently answers a different question than the one it was asked.
+* An absent measurement is blank, never zero. :data:`BLANK` is written for every measurement that
+  was not made, since a 0 would read as a result.
+* Every input is optional and no input drops a genome. A run without ``classify_bins`` gets an
+  empty taxonomy column. A genome found only in the abundance matrix still gets a row.
 
-Genome names are joined through :func:`metawrap2.constants.bin_label`, which is the one place in
-this project that knows ``bin_001.fasta``, ``bin.1.fa`` and ``bin_001`` are the same genome. The
-four files being joined here use three of those conventions between them - a real run has
-``bin.1`` in the stats table, ``bin.1.fa`` in the taxonomy file and ``bin_001`` in GUNC's report -
-so a fourth copy of the stripping rule is the obvious way for this join to lose rows.
+Genome names are joined through :func:`metawrap2.constants.bin_label`, which maps
+``bin_001.fasta``, ``bin.1.fa`` and ``bin_001`` to the same genome. A real run uses three of these
+forms across the inputs (``bin.1`` in the stats table, ``bin.1.fa`` in the taxonomy file,
+``bin_001`` in GUNC's report).
 """
 
 from __future__ import annotations
@@ -48,35 +38,30 @@ from .constants import (
     is_unbinned_name,
 )
 
-#: What an unmeasured cell holds. Not "0", not "0.0", not "NA" - an empty cell, which every reader
-#: of a TSV already treats as "no value" and no reader averages, sums or plots.
+#: Value of an unmeasured cell: an empty string, which TSV readers treat as missing.
 BLANK = ""
 
-#: The table this module writes, beside whatever else a caller is producing.
+#: File name of the table this module writes.
 TABLE_NAME = "mag_table" + TSV_SUFFIX
 
-#: The one label for a genome scored but below every tier, so "measured and poor" is distinct from
-#: :data:`BLANK` ("not measured"). Those two were the same cell in the tables this replaces.
+#: Label for a genome scored below every tier, distinct from :data:`BLANK` ("not measured").
 BELOW_TIERS = "below_medium_quality"
 
-#: ``quant_bins``' abundance columns are prefixed rather than used bare. The unit depends on which
-#: quantifier ran (salmon and the depth route give coverage, sylph a relative abundance), so the
-#: prefix says what kind of number it is; and a sample legitimately named "genome" or "n50" would
-#: otherwise collide with a column of this table and overwrite it.
+#: Prefix for ``quant_bins``' abundance columns. It marks the values as abundances (coverage for
+#: salmon and the depth route, relative abundance for sylph) and stops a sample named e.g.
+#: "genome" or "n50" from colliding with a base column.
 ABUNDANCE_PREFIX = "abundance."
 
-#: The leftmost column when a report covers more than one bin set: which sample's bin set a row
-#: came from. Taken from the directory the stats table sits in, because that is where ``metawrap2
-#: run`` puts it (``BIN_REFINEMENT/sample_7/metawrap_70_10_bins.stats.tsv`` -> ``sample_7``), and
-#: omitted entirely for a single bin set - a per-run report should not grow an empty field.
+#: Leftmost column when the table covers more than one bin set: the sample a row's bin set came
+#: from, taken from the stats table's directory as ``metawrap2 run`` lays it out
+#: (``BIN_REFINEMENT/sample_7/metawrap_70_10_bins.stats.tsv`` -> ``sample_7``). Omitted for a
+#: single bin set.
 SAMPLE_COLUMN = "sample"
 
-#: The columns before the per-sample ones, in the order a reader wants them: what the genome is
-#: called, how big it is, how good it is, and what it is.
+#: Columns before the per-sample ones: name, size, quality, then taxonomy.
 #:
-#: ``mimag_tag`` is named from :data:`metawrap2.mimag.STATS_COLUMNS` rather than spelled out, so the
-#: column here and the column ``mimag.annotate_stats`` appends to a ``.stats.tsv`` cannot drift
-#: apart and be read as two different things.
+#: The ``mimag_tag`` name comes from :data:`metawrap2.mimag.STATS_COLUMNS`, so it matches the
+#: column ``mimag.annotate_stats`` appends to a ``.stats.tsv``.
 BASE_COLUMNS: Tuple[str, ...] = (
     "genome",
     "size",
@@ -92,44 +77,39 @@ BASE_COLUMNS: Tuple[str, ...] = (
     "taxonomy",
 )
 
-#: Tier order for a distribution plot: best first, with :data:`BLANK` last under its own label.
-#: An unscored genome is shown rather than dropped - a bar chart that omits them makes a run where
-#: CheckM failed look like a run with fewer genomes.
+#: Tier order for a distribution plot: best first, with :data:`BLANK` last under its own label,
+#: so unscored genomes are shown.
 TIER_ORDER: Tuple[str, ...] = tuple(name[len("bins_") :] for name, _c, _x in QUALITY_TIERS) + (
     BELOW_TIERS,
     BLANK,
 )
 
-#: Label for the :data:`BLANK` tier in a plot or a count, where an empty string reads as a bug.
+#: Label for the :data:`BLANK` tier in a plot or a count.
 NOT_MEASURED = "not measured"
 
-#: Suffixes the current code writes, each with the one earlier runs wrote. Both are accepted
-#: because a report is most wanted over output that already exists: this repo's own reference run
-#: has ``metawrap_50_10_bins.stats`` and ``bin_abundance_table.tab``, written before the suffixes
-#: were normalised, and a reader that only knew the new names would call that whole run absent.
+#: Current suffixes mapped to the ones earlier runs wrote. Both are accepted so older output can be
+#: read; the repo's reference run has ``metawrap_50_10_bins.stats`` and ``bin_abundance_table.tab``.
 LEGACY_SUFFIX = {STATS_SUFFIX: ".stats", CONTIGS_SUFFIX: ".contigs", TSV_SUFFIX: ".tab"}
 
 #: ``classify_bins``' per-bin consensus taxonomy, and ``quant_bins``' abundance matrix.
 TAXONOMY_NAME = "bin_taxonomy" + TSV_SUFFIX
 ABUNDANCE_NAME = "bin_abundance_table" + TSV_SUFFIX
 
-#: How many directory levels below a run directory to descend. Files *in* a directory at this depth
-#: are still read, so 2 reaches a per-sample study's stats table from the study root
-#: (``study/BIN_REFINEMENT/sample_7/metawrap_70_10_bins.stats.tsv``). Bounded because an assembly
-#: directory holds a metaSPAdes tree thousands of entries deep, and unbounded recursion here turned
-#: a report over a real run directory into a walk of the whole assembly.
+#: Directory levels to descend below a run directory. Files in a directory at this depth are still
+#: read, so 2 reaches ``study/BIN_REFINEMENT/sample_7/metawrap_70_10_bins.stats.tsv`` from the
+#: study root. Bounded because an assembly directory holds a metaSPAdes tree thousands of entries
+#: deep.
 MAX_DEPTH = 2
 
 #: ``bin_refinement``'s scratch directory, skipped when looking for a bin set.
 #:
-#: It holds a stats table per *intermediate* bin set - ``binsA``, ``binsAB``, ``binsO.to_score`` -
-#: which are the arithmetic of consolidation rather than anybody's answer: the reference study has
-#: seven of them per sample against one final table. It also holds the GUNC report, which *is*
-#: wanted, so this is skipped for stats tables specifically and not walked around entirely.
+#: It holds stats tables for intermediate bin sets (``binsA``, ``binsAB``, ``binsO.to_score``;
+#: seven per sample in the reference study). It also holds the GUNC report, so it is only skipped
+#: when looking for stats tables.
 WORK_DIR = "work_files"
 
-#: First-column values that mean "this is a header", for the two-column files that have no header
-#: by contract but have gained one twice (``classify_bins --gtdbtk`` writes ``user_genome``).
+#: First-column values treated as a header in two-column files that are specified without one but
+#: sometimes have one (``classify_bins --gtdbtk`` writes ``user_genome``).
 HEADER_WORDS = frozenset({"bin", "bins", "genome", "genomic bins", "user_genome", "name"})
 
 __all__ = [
@@ -162,12 +142,11 @@ __all__ = [
 
 
 class BinSet(NamedTuple):
-    """One set of genomes, and the three per-bin-set files that describe it.
+    """One set of genomes and the three per-bin-set files that describe it.
 
-    Grouped rather than looked up independently because all three have to be *the same bins*. Every
-    sample in a study names its bins ``bin_001`` onwards, so a stats table from one sample and a
-    GUNC report from another join perfectly and silently: on the reference study that produced 23
-    wrong chimerism verdicts plus one phantom genome that existed in neither sample's bin set.
+    Grouped because the three files must describe the same bins. Every sample numbers its bins from
+    ``bin_001``, so files from different samples would join without error; in the reference study
+    that gave 23 wrong chimerism verdicts and one genome present in neither bin set.
     """
 
     #: Which sample's bins these are, for the :data:`SAMPLE_COLUMN` cell.
@@ -178,11 +157,11 @@ class BinSet(NamedTuple):
 
 
 class Inputs(NamedTuple):
-    """What a table is built from. Every part is optional and there may be many bin sets.
+    """Inputs for a table. Every part is optional and there may be many bin sets.
 
-    *taxonomy* and *abundance* are study-wide rather than per-bin-set: ``classify_bins`` and
-    ``quant_bins`` each write one table for the whole study, and in a cohort run they are keyed on
-    the *dereplicated* catalogue's names, which need not match any sample's bin names.
+    *taxonomy* and *abundance* are study-wide: ``classify_bins`` and ``quant_bins`` each write one
+    table per study. In a cohort run they are keyed on the dereplicated catalogue's names, which
+    need not match any sample's bin names.
     """
 
     bin_sets: Tuple[BinSet, ...] = ()
@@ -190,29 +169,25 @@ class Inputs(NamedTuple):
     abundance: Optional[str] = None
 
 
-#: The kinds of input a cell can come from, which are the names used in :attr:`Table.absent` and
-#: :attr:`Table.unjoined`. Spelled out rather than taken from ``Inputs._fields``, because three of
-#: them live inside a :class:`BinSet` and a reader of a report wants to hear "no taxonomy", not
-#: "no bin_sets".
+#: Input kinds, as named in :attr:`Table.absent` and :attr:`Table.unjoined`. Listed explicitly
+#: because three of them are fields of :class:`BinSet`, not of ``Inputs``.
 INPUT_KINDS: Tuple[str, ...] = ("stats", "contigs", "gunc", "taxonomy", "abundance")
 
 
 class Table(NamedTuple):
-    """One row per genome, plus what it was built from, what was missing, and what would not join."""
+    """One row per genome, plus the source files, missing inputs and inputs that did not join."""
 
     columns: List[str]
     rows: List[List[str]]
     #: The abundance matrix's sample names - the ``abundance.*`` columns, not
     #: :data:`SAMPLE_COLUMN`, which names the bin set a row came from.
     abundance_samples: List[str]
-    #: input kind -> the file(s) it was read from, so a reader can check a surprising cell.
+    #: input kind -> the file it was read from.
     sources: Dict[str, str]
-    #: input kinds with no file anywhere. These are the columns that are blank for every row, and a
-    #: reader has to be told the difference between that and a measurement that came back empty.
+    #: Input kinds with no file anywhere; their columns are blank in every row.
     absent: List[str]
-    #: ``(kind, sample)`` for a file that exists but matched none of that bin set's genomes - a
-    #: join that could not be made rather than one that came back empty. The cells are left blank
-    #: and the caller says so, because the alternative is guessing which genome is which.
+    #: ``(kind, sample)`` for a file that exists but matched none of that bin set's genomes. The
+    #: cells are left blank and the caller reports it.
     unjoined: List[Tuple[str, str]]
     #: How many bin sets the rows came from. More than one means :data:`SAMPLE_COLUMN` is present.
     bin_sets: int = 0
@@ -254,24 +229,18 @@ def _named(dirs: Sequence[str], name: str) -> Optional[str]:
 def find_stats(dirs: Sequence[str]) -> List[str]:
     """Every bin set's CheckM table under *dirs*: one per directory, preferring a consolidated set.
 
-    **One per directory, and all of the directories.** Two different mistakes are possible here and
-    the rule has to avoid both:
+    One table per directory, from every directory:
 
-    * *Reporting a subset as the whole.* A ``metawrap2 run`` study puts one bin set per sample
-      (``BIN_REFINEMENT/sample_6``, ``sample_7``, ``sample_13``), and returning only the first of
-      them described 24 genomes in a study that recovered 62, with nothing on the page saying which
-      sample the 24 came from.
-    * *Counting the same genomes twice.* Within one directory the several tables are competing
-      answers over one assembly - ``bin_refinement`` leaves one per input binner beside the
-      consolidated set, so reporting all four would report every genome up to four times and
-      quadruple the study's apparent yield.
+    * A ``metawrap2 run`` study has one bin set per sample (``BIN_REFINEMENT/sample_6``,
+      ``sample_7``, ``sample_13``); all are returned (in the reference study, 62 genomes, against 24
+      from the first sample alone).
+    * Tables in one directory are alternative bin sets of one assembly (``bin_refinement`` leaves
+      one per input binner beside the consolidated set), so only one is taken to avoid counting
+      genomes several times. The consolidated set is preferred; two consolidated sets (a re-run at
+      different thresholds, ``metawrap_50_10_bins`` and ``metawrap_70_10_bins``) still give one.
 
-    So: group by directory, and within a directory take the consolidated set if there is one. Two
-    consolidated sets in one directory (a re-run at different thresholds, ``metawrap_50_10_bins``
-    beside ``metawrap_70_10_bins``) are also the same bins cut twice, so that is still one table.
-
-    A directory with no consolidated set contributes its alphabetically first table, which is what
-    a ``binning``-only run looks like.
+    A directory with no consolidated set contributes its alphabetically first table (the case for
+    a ``binning``-only run).
     """
     by_directory: Dict[str, List[str]] = {}
     for path in _files(dirs):
@@ -285,16 +254,15 @@ def find_stats(dirs: Sequence[str]) -> List[str]:
         directory: [p for p in paths if is_refined_bins_dirname(_stats_stem(p))]
         for directory, paths in by_directory.items()
     }
-    # Consolidated sets win outright where any exist. Mixing a consolidated set from one directory
-    # with a raw binner's table from another would put bins and the bins they were consolidated
-    # from in one table as if they were different genomes.
+    # If any consolidated set exists, use only consolidated sets. Mixing in a raw binner's table
+    # from another directory would list bins alongside the bins they were consolidated from.
     if any(refined.values()):
         return [min(paths) for _directory, paths in sorted(refined.items()) if paths]
     return [min(paths) for _directory, paths in sorted(by_directory.items())]
 
 
 def _stats_stem(stats_path: str) -> str:
-    """``.../metawrap_50_10_bins.stats.tsv`` -> ``metawrap_50_10_bins``: the bin set it describes."""
+    """``.../metawrap_50_10_bins.stats.tsv`` -> ``metawrap_50_10_bins``."""
     base = os.path.basename(stats_path)
     for ending in _endings(STATS_SUFFIX):
         if base.endswith(ending):
@@ -305,9 +273,7 @@ def _stats_stem(stats_path: str) -> str:
 def find_contigs(stats_path: str) -> Optional[str]:
     """The contig-membership table for the same bin set as *stats_path*.
 
-    Looked up from the stats path rather than searched for, because the contig count has to be of
-    the bins the rest of the row describes. A refined row with CONCOCT's contig count would be
-    wrong in a way nothing on the page could reveal.
+    Derived from the stats path so the contig counts are for the same bins as the rest of the row.
     """
     root = os.path.join(os.path.dirname(stats_path), _stats_stem(stats_path))
     for ending in _endings(CONTIGS_SUFFIX):
@@ -317,7 +283,7 @@ def find_contigs(stats_path: str) -> Optional[str]:
 
 
 def sample_of(stats_path: str) -> str:
-    """Which sample a bin set belongs to: the name of the directory its stats table sits in."""
+    """The sample a bin set belongs to: the name of its stats table's directory."""
     return os.path.basename(os.path.dirname(os.path.abspath(stats_path)))
 
 
@@ -333,9 +299,8 @@ def discover(run_dirs: Sequence[str]) -> Inputs:
         for stats in find_stats(run_dirs)
     )
     if not bin_sets:
-        # No stats table anywhere, but GUNC may still have run - and with no bin set to pair it
-        # with there is only one thing it can be about, so the broad search is safe here and only
-        # here. The rows then come from whatever taxonomy or abundance table exists.
+        # No stats table, but GUNC may have run. With no bin set to mismatch, a broad search for
+        # its report is safe here. Rows then come from any taxonomy or abundance table.
         found = _find_gunc_under(run_dirs)
         if found:
             bin_sets = (BinSet(sample=sample_of(found), gunc=found),)
@@ -349,15 +314,12 @@ def discover(run_dirs: Sequence[str]) -> Inputs:
 def find_gunc(stats_path: str) -> Optional[str]:
     """GUNC's report for the same bins as *stats_path*, or None.
 
-    Searched inside the stats table's own directory, not across the run directories. GUNC's output
-    is a sibling of the bin set it scored (``bin_refinement`` leaves it in that sample's
-    ``work_files/gunc/``), and a study-wide search returned *one* report for *all* samples: on the
-    reference study, sample_6's verdicts were joined onto sample_13's genomes, which matched
-    because both sets are numbered from ``bin_001``.
+    Searched only in the stats table's directory (``bin_refinement`` leaves the report in that
+    sample's ``work_files/gunc/``). A study-wide search would return one report for all samples,
+    and since every sample numbers bins from ``bin_001`` the wrong verdicts would join.
 
-    Through :func:`metawrap2.gunc.find_report` rather than a second pattern of our own, because the
-    middle of that filename carries the reference database version and a literal name here would
-    find nothing the first time the database is updated.
+    Uses :func:`metawrap2.gunc.find_report`, since the report filename contains the reference
+    database version.
     """
     return _gunc.find_report(os.path.dirname(os.path.abspath(stats_path)))
 
@@ -367,8 +329,7 @@ def _find_gunc_under(dirs: Sequence[str]) -> Optional[str]:
     for root in dirs:
         if not os.path.isdir(root):
             continue
-        # abspath because these paths are printed next to each other on a report page, and a
-        # mixture of absolute and relative ones reads as two different runs.
+        # abspath so all paths printed in a report have the same form.
         found = _gunc.find_report(os.path.abspath(root))
         if found:
             return found
@@ -381,9 +342,7 @@ def _find_gunc_under(dirs: Sequence[str]) -> Optional[str]:
 def read_tsv(path: str) -> Iterator[List[str]]:
     """Non-empty tab-separated rows of *path*.
 
-    Public because :mod:`metawrap2.report` reads the same tables for the same reason, and two
-    copies of "skip the blank lines" is how two readers of one file come to disagree about how many
-    rows it has.
+    Public so :mod:`metawrap2.report` reads the same tables the same way.
     """
     with open(path, newline="") as fh:
         for fields in csv.reader(fh, delimiter="\t"):
@@ -394,14 +353,11 @@ def read_tsv(path: str) -> Iterator[List[str]]:
 def read_stats(path: str) -> Dict[str, Dict[str, str]]:
     """A ``.stats.tsv`` as ``genome -> column -> value``, keyed on :func:`bin_label`.
 
-    Column names are lowercased so ``GC`` and ``gc`` are one column, and every column is kept -
-    including the ones ``gunc.annotate_stats`` and ``mimag.annotate_stats`` append - because a
-    value already written into this file is the value this table must report. Re-deriving a tag
-    that is sitting in the file is how two tables of the same run come to disagree.
+    Column names are lowercased (``GC`` and ``gc`` are one column). Every column is kept, including
+    those ``gunc.annotate_stats`` and ``mimag.annotate_stats`` append, so this table reports the
+    values already in the file.
 
-    File order is preserved: ``checkm.write_stats`` sorts by completeness descending, which is the
-    order a reader of that file already knows, and re-sorting here would make the two tables of the
-    same bin set look like tables of different ones.
+    File order is preserved (``checkm.write_stats`` sorts by completeness, descending).
     """
     out: Dict[str, Dict[str, str]] = {}
     rows = read_tsv(path)
@@ -412,9 +368,8 @@ def read_stats(path: str) -> Dict[str, Dict[str, str]]:
     for fields in rows:
         name = bin_label(fields[0].strip())
         if not name or is_unbinned_name(fields[0].strip()):
-            # The unbinned catch-all is not a genome. It is a legitimate member of a bin set
-            # (`binning` writes concoct_bins/unbinned.fasta on purpose) and a row for it in a MAG
-            # table would be counted in every per-genome total on the page.
+            # Skip the unbinned catch-all (e.g. `binning` writes concoct_bins/unbinned.fasta); it
+            # is not a genome and would be counted in per-genome totals.
             continue
         out[name] = {
             key: fields[i].strip() if i < len(fields) else BLANK
@@ -425,7 +380,7 @@ def read_stats(path: str) -> Dict[str, Dict[str, str]]:
 
 
 def read_contig_counts(path: str) -> Dict[str, int]:
-    """How many contigs each genome holds, from the ``contig -> bin`` membership table."""
+    """Contig count per genome, from the ``contig -> bin`` membership table."""
     counts: Dict[str, int] = {}
     for fields in read_tsv(path):
         if len(fields) < 2:
@@ -440,9 +395,8 @@ def read_contig_counts(path: str) -> Dict[str, int]:
 def read_taxonomy(path: str) -> Dict[str, str]:
     """``classify_bins``' per-bin consensus lineage, keyed on :func:`bin_label`.
 
-    An empty lineage in the file is kept as :data:`BLANK` rather than skipped: ``classify_bins``
-    writes a row with no lineage for a bin it could not place, and that is a different statement
-    from the bin not having been classified at all.
+    An empty lineage is kept as :data:`BLANK`: ``classify_bins`` writes a row with no lineage for a
+    bin it could not place, which differs from a bin that was not classified.
     """
     out: Dict[str, str] = {}
     for fields in read_tsv(path):
@@ -458,9 +412,8 @@ def read_taxonomy(path: str) -> Dict[str, str]:
 def read_abundance(path: str) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
     """``quant_bins``' matrix as ``(sample names, genome -> sample -> value)``.
 
-    Values are carried as text, not parsed to float and reformatted. The matrix is written by one
-    of four quantifiers with different precision, and rounding it here would make the report and
-    the table it was built from disagree in the last digit for no gain.
+    Values are kept as text so they match the matrix exactly (the four quantifiers write different
+    precisions).
     """
     rows = read_tsv(path)
     try:
@@ -499,17 +452,14 @@ def _number(raw: object) -> Optional[float]:
 def quality_tier(completeness: Optional[float], contamination: Optional[float]) -> str:
     """The strongest :data:`metawrap2.benchmark.scoring.QUALITY_TIERS` tier a genome clears.
 
-    The thresholds are the project's own, reused rather than restated, so this column means the
-    same thing as the counts in ``docs/benchmarks.md``. Note that
-    ``bins_high_quality`` (70/10) is this project's working threshold and not a MIMAG tier - the
-    MIMAG answer is the separate ``mimag_tag`` column, which also accounts for the rRNA and tRNA
-    evidence that completeness and contamination cannot speak to.
+    Uses the same thresholds as the counts in ``docs/benchmarks.md``. ``bins_high_quality``
+    (70/10) is this project's threshold, not a MIMAG tier; MIMAG is the separate ``mimag_tag``
+    column, which also uses rRNA and tRNA evidence.
 
-    One tier per genome, strongest first, because a table needs one label per row; the
-    non-exclusive counting ``scoring.quality_counts`` does is right for a benchmark and would put
-    the same genome in three bars of one chart here.
+    One tier per genome, strongest first. ``scoring.quality_counts`` counts non-exclusively, which
+    suits benchmarks but would put one genome in several bars of a chart.
 
-    Either measurement missing gives :data:`BLANK`. A genome with no completeness has not scored 0.
+    Either measurement missing gives :data:`BLANK`.
     """
     if completeness is None or contamination is None:
         return BLANK
@@ -522,10 +472,9 @@ def quality_tier(completeness: Optional[float], contamination: Optional[float]) 
 def build(inputs: Inputs) -> Table:
     """Join whatever of *inputs* exists into one row per genome, across every bin set.
 
-    Rows are built per bin set and appended, never keyed by genome name across bin sets. Every
-    sample in a study numbers its bins from ``bin_001``, so a table keyed on the name alone would
-    have each sample's ``bin_001`` overwrite the last - 62 genomes collapsing into the 24 distinct
-    names of the largest bin set, with no duplicate to notice.
+    Rows are built per bin set and appended, not keyed by genome name across bin sets, because
+    every sample numbers its bins from ``bin_001`` (in the reference study, keying by name would
+    collapse 62 genomes into 24).
     """
     taxonomy = read_taxonomy(inputs.taxonomy) if inputs.taxonomy else {}
     abundance_samples, abundance = (
@@ -546,9 +495,8 @@ def build(inputs: Inputs) -> Table:
     for bin_set in inputs.bin_sets:
         stats = read_stats(bin_set.stats) if bin_set.stats else {}
         contigs = read_contig_counts(bin_set.contigs) if bin_set.contigs else {}
-        # GUNC keys its report on the bin filenames it was given, which for a gzipped or
-        # differently suffixed bin set is not the spelling the stats table uses. Re-keyed once per
-        # bin set rather than at each lookup, so the join is on one convention throughout.
+        # GUNC keys its report on the bin filenames it was given, which may differ from the stats
+        # table's names (gzipped or other suffixes), so re-key through bin_label.
         gunc = {
             bin_label(name): verdict
             for name, verdict in (_gunc.parse_report(bin_set.gunc) if bin_set.gunc else {}).items()
@@ -587,10 +535,8 @@ def build(inputs: Inputs) -> Table:
             )
         placed.update(names)
 
-    # A genome named only by a study-wide table - in the abundance matrix but in no bin set, which
-    # is every row of it once a cohort has been dereplicated. Kept, because dropping it would make
-    # this table answer a narrower question than the files it came from; and with a blank sample
-    # cell, because which bin set it came from is exactly what is not known.
+    # Genomes only in a study-wide table (e.g. every row of the abundance matrix after cohort
+    # dereplication) are kept, with a blank sample cell since their bin set is unknown.
     for name in sorted((set(taxonomy) | set(abundance)) - placed):
         rows.append(
             ([BLANK] if many else [])
@@ -614,10 +560,8 @@ def build(inputs: Inputs) -> Table:
 def _genomes(*tables: Mapping[str, object]) -> List[str]:
     """Every genome named by any of one bin set's files, in the stats table's order then the rest.
 
-    The stats table comes first and keeps its order, because that is the ordering a reader of the
-    ``.stats.tsv`` already has in their head. A genome named only by a later file - in the contig
-    membership table but not in the stats table - is appended rather than dropped, because dropping
-    it would make this table quietly answer a narrower question than the files it came from.
+    The stats table's order comes first. Genomes only in a later file (e.g. the contig membership
+    table) are appended, sorted.
     """
     first = tables[0] if tables else {}
     order = list(first)
@@ -638,9 +582,8 @@ def _row(
     completeness = _number(stat.get("completeness"))
     contamination = _number(stat.get("contamination"))
     verdict = gunc.get(name)
-    # The tags already written into the stats table win over anything derived here: `gunc` and
-    # `mimag` both append their columns to that file, and a report that re-derived them could
-    # disagree with the file a user opens next to it.
+    # Tags already in the stats table (appended by `gunc` and `mimag`) take precedence over values
+    # derived here, so the two files agree.
     gunc_pass = stat.get("gunc_pass") or (
         BLANK if verdict is None else ("yes" if verdict.passed else "no")
     )
@@ -668,14 +611,11 @@ def _row(
 def _mimag_tag(name: str, completeness: Optional[float], contamination: Optional[float]) -> str:
     """:mod:`metawrap2.mimag`'s tag for a genome whose stats table was never tagged.
 
-    Called with no rRNA/tRNA evidence, which is the honest state here: this module joins tables and
-    does not go looking for an ``annotate`` output to search for a 16S. A genome that clears 90/5
-    therefore comes back as high quality *unverified*, which is what MIMAG allows to be said when
-    nothing has looked.
+    Called without rRNA/tRNA evidence, since this module does not search ``annotate`` output for a
+    16S. A genome that clears 90/5 is therefore tagged high quality unverified.
     """
     if completeness is None and contamination is None:
-        # Left blank rather than passed to mimag, which would correctly return its "unscored" tag -
-        # a word in a cell that reads as a verdict. A cell nothing measured should look unmeasured.
+        # Blank instead of mimag's "unscored" tag, so unmeasured cells look the same everywhere.
         return BLANK
     return _mimag.assess(name, completeness, contamination).tag.value
 
@@ -683,8 +623,8 @@ def _mimag_tag(name: str, completeness: Optional[float], contamination: Optional
 def tier_counts(table: Table) -> List[Tuple[str, int]]:
     """How many genomes are in each tier, in :data:`TIER_ORDER`, for a distribution plot.
 
-    Empty tiers are kept so two runs' charts have the same bars in the same places, and the
-    :data:`BLANK` tier is labelled :data:`NOT_MEASURED` rather than left as an empty axis label.
+    Empty tiers are kept so charts of different runs have the same bars. The :data:`BLANK` tier is
+    labelled :data:`NOT_MEASURED`.
     """
     at = table.columns.index("quality_tier")
     counts = {tier: 0 for tier in TIER_ORDER}

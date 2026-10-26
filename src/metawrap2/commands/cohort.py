@@ -1,11 +1,9 @@
 """``metawrap2 cohort``: assemble and bin every sample on its own, then dereplicate.
 
-A thin alias over ``metawrap2 run --no-coassembly``, and deliberately nothing more: the sample
-sheet, manifest, checkpointing, run lock, resource budget, history and ``--resume`` all behave
-identically because it is the same planner and the same executor. The separate name exists because
-"co-assemble a cohort" and "bin each sample and dereplicate" are two different analyses, and the
-second one should not be reachable only by negating a flag - the steps that only exist in that mode
-(``coverage``, ``dereplicate``) then come on by default, which is the part people miss.
+An alias for ``metawrap2 run --no-coassembly``, using the same planner and executor, so the
+sample sheet, manifest, checkpointing, run lock, resource budget, history and ``--resume`` behave
+the same. Per-sample assembly is a different analysis from co-assembly, so it has its own command;
+the steps specific to it (``coverage``, ``dereplicate``) are on by default.
 
 Every option is ``run``'s; ``metawrap2 cohort -h`` lists them.
 """

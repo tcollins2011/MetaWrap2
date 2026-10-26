@@ -4,17 +4,16 @@ Runs KRAKEN2 on any number of assembly FASTA files and/or paired-end read sets, 
 the taxid output into full taxonomy lineages, collapses each into KRONA format, and draws a
 single interactive kronagram of all samples with KronaTools.
 
-With ``--bracken`` it then turns each read sample's KRAKEN2 report into an abundance estimate at
-one rank. That is a separate step rather than the default because the KRAKEN2 report's read counts
-are not abundances: a read whose k-mers are shared across a genus is assigned to the genus node, so
-a species present at 10% of the community can show a small share of reads at its own node with the
-rest stranded above it. Bracken redistributes those reads downward using the k-mer distribution of
-the KRAKEN2 database, so it needs a database built from *that* KRAKEN2 database at a matching read
-length. See :mod:`metawrap2.bracken` for the method, the column layout and the guards.
+With ``--bracken`` it also turns each read sample's KRAKEN2 report into an abundance estimate at
+one rank. KRAKEN2 read counts are not abundances: a read whose k-mers are shared across a genus is
+assigned to the genus node, so a species at 10% of the community can show a small share of reads
+at its own node. Bracken redistributes those reads downward using the k-mer distribution of the
+KRAKEN2 database, so it needs distributions built from that database at a matching read length.
+See :mod:`metawrap2.bracken` for the method, the column layout and the checks.
 
 This file is meant to be read and edited: the commands each tool runs live in the COMMANDS
 block below, and the tunable numbers/defaults in the CONSTANTS block. Change a flag there
-and it takes effect — no need to follow the orchestration logic underneath.
+and it takes effect; the orchestration logic below does not need to change.
 
 Author: Gherman Uritskiy.
 """
@@ -59,17 +58,15 @@ KRAKEN2_PAIRED = (
 )
 KRAKEN2_SINGLE = "kraken2 --use-names --db {db} --threads {threads} --output {out} {seq}"
 MEMORY_MAPPING = "--memory-mapping"  # appended when --no-preload is given (lower memory, slower)
-# Appended only under --bracken. Bracken takes the aggregated *report*, not the per-read --output
-# file, and refuses the latter outright: its check_report_file() exits 1 when the first character is
-# C or U, which is exactly what a --output file starts with. Kept off by default so that a run
-# without --bracken writes byte-identical output to one from before this flag existed.
+# Appended only under --bracken. Bracken takes the aggregated report, not the per-read --output
+# file (its check_report_file() exits 1 when the first character is C or U, as in a --output
+# file). Off by default so a run without --bracken writes the same output as before the flag.
 #
-# Deliberately not --report-minimizer-data: that inserts two columns before the taxid, and Bracken
-# reads the rank and taxid by negative index, so the report would parse into the wrong fields.
+# Not --report-minimizer-data: that inserts two columns before the taxid, and Bracken reads the
+# rank and taxid by negative index.
 KRAKEN2_REPORT = "--report {report}"
-# -w is the second output: a Kraken2-style report with Bracken's estimates in place of the assigned
-# counts, which is what KrakenTools and Pavian consume. -t is a read floor applied *before*
-# redistribution, not after; see BRACKEN_THRESHOLD.
+# -w writes a Kraken2-style report with Bracken's estimates in place of the assigned counts, for
+# KrakenTools and Pavian. -t is a read floor applied before redistribution; see BRACKEN_THRESHOLD.
 BRACKEN = (
     "bracken -d {db} -i {report} -o {out} -w {outreport} "
     "-r {read_length} -l {rank} -t {threshold}"
@@ -77,8 +74,8 @@ BRACKEN = (
 KTIMPORTTEXT = "ktImportText -o {out} {krona_files}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 FASTA_EXTS = (".fa", ".fasta", ".fa.gz", ".fasta.gz")
-#: The first file of a pair. Shared by the Kraken2 loop and the Bracken stage so the two agree on
-#: which inputs are reads - Bracken runs on those and only those.
+#: The first file of a pair. Shared by the Kraken2 loop and the Bracken stage so both treat the
+#: same inputs as reads (Bracken runs only on reads).
 READ_1_SUFFIXES = ("_1.fastq", "_1.fq", "_1.fastq.gz", "_1.fq.gz")
 #: Kraken2's aggregated report, written per sample only under --bracken.
 REPORT_SUFFIX = ".kreport"
@@ -87,17 +84,17 @@ BRACKEN_SUFFIX = ".bracken"
 #: One long-format abundance table across every sample, in the four-column shape
 #: `catalogue --quantify` writes and `diff_abundance` reads.
 BRACKEN_TABLE = "bracken_abundance" + TSV_SUFFIX
-#: Default read length. 100 because that is Bracken's own default and because the pre-built
-#: distributions shipped with the Kraken2 standard database cover 50/75/100/150/200/250/300 - but it
-#: must match the reads, so there is no safe default and the guard reports what the database has.
+#: Default read length: Bracken's own default, and one of the pre-built distributions shipped with
+#: the Kraken2 standard database (50/75/100/150/200/250/300). It must match the reads; the check
+#: reports which lengths the database has.
 BRACKEN_READ_LENGTH = 100
-#: Minimum reads at a node before Bracken will redistribute to it. 10 is Bracken's wrapper default
-#: (its own -h text claims 0 and is wrong). Raising it drops rare taxa rather than reassigning them,
-#: so their reads leave the table entirely instead of landing somewhere else.
+#: Minimum reads at a node before Bracken redistributes to it. 10 is Bracken's wrapper default
+#: (its -h text says 0, which is wrong). Raising it drops the reads of rare taxa from the table
+#: instead of reassigning them.
 BRACKEN_THRESHOLD = 10
-#: Which column of Bracken's table goes into the long abundance table. The fraction, because it is
-#: the compositional quantity `diff_abundance`'s ANCOM-BC expects; `_bracken.READS_UNIT` writes the
-#: re-estimated counts instead, which are not comparable across libraries of different depth.
+#: Which column of Bracken's table goes into the long abundance table. The fraction is the
+#: compositional quantity `diff_abundance`'s ANCOM-BC expects; `_bracken.READS_UNIT` would write
+#: re-estimated counts, which are not comparable across libraries of different depth.
 BRACKEN_UNIT = _bracken.FRACTION_UNIT
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -127,10 +124,10 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--bracken",
         action="store_true",
         help="re-estimate abundance at one rank with Bracken (Lu et al., PeerJ Comput Sci 2017). "
-        "kraken2 reports the reads assigned *at* each node, which is not an abundance: a read "
-        "matching sequence conserved across a genus stops at the genus node, so a species at 10%% "
-        "of the community can show a fraction of that at its own node. Bracken redistributes those "
-        "reads down to --bracken-rank, and needs a database built from this kraken2 database at a "
+        "kraken2 reports the reads assigned at each node, which is not an abundance: a read "
+        "matching sequence conserved across a genus is assigned to the genus, so a species at 10%% "
+        "of the community can show much less at its own node. Bracken redistributes those reads "
+        "down to --bracken-rank. It needs a database built from this kraken2 database at a "
         "matching read length. Runs on read samples only, not on assemblies",
     )
     p.add_argument(
@@ -144,8 +141,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=BRACKEN_READ_LENGTH,
         metavar="BP",
         help="read length the Bracken database was built for (default: %(default)s). Must match a "
-        "databaseNmers.kmer_distrib in --bracken-db: the distribution depends on how many k-mers a "
-        "read has, so a mismatch is not an approximation Bracken can make",
+        "databaseNmers.kmer_distrib in --bracken-db, because the distribution depends on the "
+        "number of k-mers per read",
     )
     p.add_argument(
         "--bracken-rank",
@@ -194,10 +191,7 @@ def _iter_records(path):
 def _subsample_pairs(r1: str, r2: str, depth: int, out1: str, out2: str) -> None:
     """Randomly subsample *depth* read pairs from r1/r2 into out1/out2 (gz-transparent input).
 
-    Uses reservoir sampling, so peak memory is bounded by *depth* rather than by the input
-    size. The previous implementation materialised every record of both files in Python
-    lists first, which needs many times the file size in RAM and made ``--subsample``
-    unusable on exactly the large libraries it exists to shrink.
+    Uses reservoir sampling, so peak memory is bounded by *depth*, not by the input size.
     """
     reservoir = []
     pairs = zip(_iter_records(r1), _iter_records(r2))
@@ -229,9 +223,9 @@ def _report_path(args, sample: str) -> str:
 def _read_samples(args) -> List[Tuple[str, str]]:
     """(sample, first-mate path) for the read inputs, in the order given.
 
-    Derived from ``args.seqs`` rather than returned by the Kraken2 loop so that it is the same list
-    under ``--resume``, when that loop does not run at all. Reads only: Bracken's model is the k-mer
-    content of a read of a stated length, and a contig is neither, so an assembly has no entry here.
+    Derived from ``args.seqs``, not from the Kraken2 loop, so it is the same under ``--resume``
+    when that loop does not run. Reads only: Bracken models reads of a stated length, so
+    assemblies are excluded.
     """
     return [(_fastq_sample(path), path) for path in args.seqs if path.endswith(READ_1_SUFFIXES)]
 
@@ -298,28 +292,24 @@ def _run_kraken_on_inputs(args, env, db) -> None:
 
 
 def _resolve_bracken_db(args, kraken2_db: str) -> str:
-    """Where the Bracken k-mer distributions are, and a usable error when they are not there.
+    """The directory holding the Bracken k-mer distributions; errors if they are missing.
 
-    Read from ``--bracken-db``, defaulting to the Kraken2 database directory because that is where
-    ``bracken-build`` writes ``databaseNmers.kmer_distrib`` - the files belong to that database and
-    are meaningless beside another one.
+    From ``--bracken-db``, defaulting to the Kraken2 database directory, where ``bracken-build``
+    writes ``databaseNmers.kmer_distrib`` (the files only apply to that database).
 
-    There is deliberately no ``BRACKEN_DB`` key in ``metawrap2.toml`` yet, and so no `doctor` check
-    and no `install-db` entry: those live in files this change does not own. Until they land the flag
-    is the only route, so the failure has to say so rather than report a missing config key the user
-    cannot set.
+    There is no ``BRACKEN_DB`` key in ``metawrap2.toml`` yet, nor a `doctor` check or `install-db`
+    entry, so the error message points to the flag.
     """
     db = args.bracken_db or kraken2_db
     problem = _bracken.check_read_length(db, args.bracken_read_length)
     if problem:
         message = (
             "--bracken cannot run: %s. Point --bracken-db at a directory holding the "
-            "distributions, or build them into the Kraken2 database. MetaWrap2 has no "
-            "`install-db bracken` yet, so this is not a database it can fetch for you." % problem
+            "distributions, or build them into the Kraken2 database with bracken-build. "
+            "There is no `install-db bracken` yet." % problem
         )
-        # A dry run is asked to print the commands it would run, and it is routinely used on a
-        # machine that has neither the database nor the reads. Erroring here would make the flag
-        # impossible to inspect before committing to a real run.
+        # Only a warning under a dry run, which is often used on a machine without the database
+        # or the reads.
         if dry_run():
             warning(message)
         else:
@@ -335,9 +325,9 @@ def _run_bracken(args, env, db: str, samples: Sequence[Tuple[str, str]]) -> None
         report = _report_path(args, sample)
         if not dry_run() and not (os.path.isfile(report) and os.path.getsize(report)):
             error(
-                "%s was not written, so Bracken has nothing to read for %s. kraken2 only writes a "
-                "report when --bracken is given; a directory from an earlier run without the flag "
-                "has none, and needs --force rather than --resume" % (report, reads_1)
+                "%s was not written, so Bracken has nothing to read for %s. kraken2 writes this "
+                "report only when --bracken is given. For output from an earlier run without the "
+                "flag, re-run with --force instead of --resume" % (report, reads_1)
             )
 
         table = os.path.join(args.output, sample + BRACKEN_SUFFIX)
@@ -357,18 +347,16 @@ def _run_bracken(args, env, db: str, samples: Sequence[Tuple[str, str]]) -> None
             ),
             env=env,
             tool="bracken",
-            # Bracken's exit status carries no information: its wrapper ends every error path with
-            # `echo "ERROR: ..."` and a bare `exit`, which returns the echo's status of 0. A missing
-            # database, a missing kmer_distrib and a missing input all look like success, so the
-            # table below is the only evidence that anything happened.
+            # Bracken's wrapper ends every error path with `echo "ERROR: ..."` and a bare `exit`,
+            # which returns 0. Success is judged by whether the table below was written.
             check=False,
         )
         if dry_run():
             continue
         if not (os.path.isfile(table) and os.path.getsize(table)):
             error(
-                "Bracken wrote no table for %s (expected %s). It exits 0 even when it fails, so "
-                "its message is in run.stderr rather than in a non-zero status" % (sample, table)
+                "Bracken wrote no table for %s (expected %s). Bracken exits 0 even when it fails; "
+                "see run.stderr for its error message" % (sample, table)
             )
 
         rows = _bracken.read_table(table)
@@ -408,7 +396,7 @@ def main(argv: List[str]) -> int:
         db = settings.db("KRAKEN2_DB")
         if not (db and os.path.isdir(db)):
             error(
-                "The folder %s doesnt exist. Please consult the MetaWrap2 database guide to "
+                "The folder %s does not exist. See the MetaWrap2 database guide to "
                 "download and build the KRAKEN2 database" % db
             )
 
@@ -432,19 +420,15 @@ def main(argv: List[str]) -> int:
             skipped = len(args.seqs) - len(read_samples)
             if skipped:
                 warning(
-                    "--bracken skips %d assembly input(s). Bracken estimates how many reads of a "
-                    "stated length a genome would contribute; a contig is neither a read nor of "
-                    "that length, so running it on an assembly produces numbers that look like "
-                    "abundances and are not" % skipped
+                    "--bracken skips %d assembly input(s). Bracken models reads of a fixed length, "
+                    "so its output for contigs would not be abundances" % skipped
                 )
             if not read_samples:
                 warning("--bracken was given but no paired-end read input was; nothing to estimate")
             else:
                 bracken_db = _resolve_bracken_db(args, db)
-                # On the record for the same reason every other database path is: an abundance
-                # estimate is only reproducible against the k-mer distribution that produced it, and
-                # this one comes from a flag rather than from metawrap2.toml, so nothing else in the
-                # run would name it.
+                # Recorded like other database paths, for reproducibility. It comes from a flag,
+                # not metawrap2.toml, so it is not recorded anywhere else.
                 rec.databases["BRACKEN_DB"] = bracken_db
                 if ckpt.todo("bracken"):
                     announcement("ESTIMATING ABUNDANCE WITH BRACKEN")

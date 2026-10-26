@@ -1,45 +1,36 @@
-"""Bracken: Kraken2's read assignments turned into an abundance estimate at one rank.
+"""Bracken: abundance estimates at one rank from Kraken2 read assignments.
 
-**A Kraken2 report is not an abundance table.** Its third column is the reads assigned *at* a node,
-and Kraken2 assigns a read to the lowest node all of its k-mers agree on. A read drawn from sequence
-conserved across a genus therefore stops at the genus node, so a species genuinely at 10% of the
-community can show a small share of reads at its own node with the rest sitting at genus, family or
-higher. Reading the species rows of a report as composition understates every species and invents a
-large "genus-level" population that is not an organism.
+A Kraken2 report's third column counts reads assigned at a node, and Kraken2 assigns a read to the
+lowest node all its k-mers agree on. Reads from sequence conserved across a genus stop at the genus
+node, so a species at 10% of the community can have only a small share of reads at its own node.
+Reading the species rows as composition understates every species and adds a large "genus-level"
+share that is not an organism.
 
-Bracken (Lu et al., *PeerJ Comput Sci* 2017, 10.7717/peerj-cs.104) fixes this by redistributing the
-stalled reads down to a chosen rank. For each node above the rank it asks, from the k-mer content of
-the reference genomes themselves, how probable it is that a read of a given length from each
-candidate genome would have stopped at that node, and splits the node's reads accordingly.
+Bracken (Lu et al., *PeerJ Comput Sci* 2017, 10.7717/peerj-cs.104) redistributes those reads down
+to a chosen rank. For each node above the rank it uses the k-mer content of the reference genomes
+to estimate how likely a read of a given length from each candidate genome is to stop at that node,
+and splits the node's reads accordingly. Two constraints follow:
 
-Two consequences, and they are the whole reason this file has guards rather than just a parser:
+* The k-mer distribution belongs to one Kraken2 database: it is built by classifying that
+  database's reference genomes against it. ``bracken-build`` writes its files into the Kraken2
+  database directory, so ``--bracken-db`` defaults there.
+* It also belongs to one read length, because the chance of a read stopping at a node depends on
+  how many k-mers it has. Each length is stored as ``database<N>mers.kmer_distrib``, and Bracken
+  cannot estimate for a length that was not built.
 
-* **The k-mer distribution is a property of one Kraken2 database.** It is computed by mapping that
-  database's own reference genomes back through it, so a distribution built from a different database
-  describes different genomes. ``bracken-build`` writes its files *into* the Kraken2 database
-  directory for exactly this reason, which is why ``--bracken-db`` defaults there.
-* **It is also a property of one read length.** The probability that a read stops at the genus node
-  depends on how many k-mers the read has, so the distribution is built per read length and stored as
-  ``database<N>mers.kmer_distrib``. Asking for a length the database was not built for is not a
-  degraded answer, it is no answer.
+On the fixture under ``tests/fixtures/bracken/`` (a hand-built 1,000-read report run through
+Bracken 3.0.1), *Streptococcus pneumoniae* has 150 reads at its own node (15%) and 450 reads sit at
+the genus and phylum nodes above it. Bracken estimates 301 reads (31.7%), twice the species count.
 
-The size of the correction, on a hand-built 1,000-read report run through real Bracken 3.0.1 (the
-fixture under ``tests/fixtures/bracken/``): *Streptococcus pneumoniae* has 150 reads at its own node,
-15% of the sample, and 450 of the 1,000 reads sit at the genus and phylum nodes above it. Bracken
-estimates 301 reads for it, 31.7%. The species-level read count was wrong by a factor of two.
+``fraction_total_reads`` is a fraction in 0-1, not a percentage: Bracken's ``est_abundance.py``
+writes ``"%0.5f" % (new_est_reads / sum_all_reads)``. The same fraction/percentage confusion has
+caused errors with SingleM's ``read_fraction`` (a percentage), skani's alignment fraction and
+CheckM's completeness. :data:`FRACTION_UNIT` records the unit in every row of the output table.
 
-**``fraction_total_reads`` is a fraction in 0-1, not a percentage.** Verified in Bracken's own
-``est_abundance.py``, which writes ``"%0.5f" % (new_est_reads / sum_all_reads)``. This is stated
-rather than inferred because the project has been bitten three times by the same confusion in other
-tools' tables - SingleM's ``read_fraction`` (a percentage), skani's alignment fraction and CheckM's
-completeness - and in each case the magnitude of a typical value made the wrong guess look right.
-:data:`FRACTION_UNIT` carries the answer into every row of the output table.
-
-One thing this file will not do: Bracken has no exit status worth trusting. Its wrapper script ends
-every error path with ``echo "ERROR: ..."`` followed by a bare ``exit``, which exits with the status
-of the ``echo`` - zero. A missing database, a missing ``kmer_distrib`` for the requested read length
-and a missing input file all look like success to the caller. Everything here therefore checks the
-file Bracken was supposed to write, and the guards below run before the call rather than after it.
+Bracken's exit status cannot be trusted. Its wrapper ends every error path with ``echo "ERROR:
+..."`` and a bare ``exit``, which returns the ``echo``'s status of zero. A missing database, a
+missing ``kmer_distrib`` for the read length and a missing input file all exit 0. This module
+therefore runs its guards before the call and checks the file Bracken should have written.
 """
 
 from __future__ import annotations
@@ -51,20 +42,19 @@ from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 #: Lu J, Breitwieser FP, Thielen P, Salzberg SL. "Bracken: estimating species abundance in
-#: metagenomics data." *PeerJ Computer Science* 3:e104 (2017). Verified against Crossref metadata
-#: for 10.7717/peerj-cs.104 rather than quoted from memory.
+#: metagenomics data." *PeerJ Computer Science* 3:e104 (2017). Checked against Crossref metadata
+#: for 10.7717/peerj-cs.104.
 CITATION = (
     "Lu J, Breitwieser FP, Thielen P, Salzberg SL. Bracken: estimating species abundance in "
     "metagenomics data. PeerJ Comput Sci 3:e104 (2017). doi:10.7717/peerj-cs.104"
 )
 
-#: The ranks offered, in descending order. Bracken's ``-l`` also takes ``S1``, ``S2`` and so on for
-#: strain sub-levels, which are deliberately not offered: a Kraken2 standard database has almost no
-#: nodes below species, so ``-l S1`` on one produces a near-empty table rather than strain calls, and
-#: a flag whose usual answer is "nothing found" is a flag that gets misread as a negative result.
+#: The ranks offered, in descending order. Bracken's ``-l`` also accepts strain sub-levels (``S1``,
+#: ``S2``, ...), which are not offered: a standard Kraken2 database has almost no nodes below
+#: species, so ``-l S1`` gives a near-empty table that is easily misread as a negative result.
 RANKS: Tuple[str, ...] = ("D", "P", "C", "O", "F", "G", "S")
 
-#: Bracken's rank letters spelled out, for messages. A guard that says "rank K" helps nobody.
+#: Bracken's rank letters spelled out, for messages.
 RANK_NAMES: Mapping[str, str] = {
     "D": "domain",
     "P": "phylum",
@@ -75,9 +65,8 @@ RANK_NAMES: Mapping[str, str] = {
     "S": "species",
 }
 
-#: The columns Bracken writes, in order. Taken from the single ``o_file.write`` call in
-#: ``est_abundance.py`` that emits the header, not from documentation - Bracken's README describes
-#: the columns in prose and does not name them.
+#: The columns Bracken writes, in order, taken from the ``o_file.write`` call in
+#: ``est_abundance.py`` that writes the header (the README does not name them).
 BRACKEN_COLUMNS: Tuple[str, ...] = (
     "name",
     "taxonomy_id",
@@ -88,33 +77,29 @@ BRACKEN_COLUMNS: Tuple[str, ...] = (
     "fraction_total_reads",
 )
 
-#: ``bracken -r N`` resolves to this file inside the database directory, and nothing else. Knowing
-#: the name is what lets the read-length guard say which lengths *are* available instead of only
-#: that the requested one is not.
+#: The file ``bracken -r N`` reads inside the database directory. The read-length guard uses it to
+#: list the lengths that are available.
 KMER_DISTRIB = "database%dmers.kmer_distrib"
 _KMER_DISTRIB_RE = re.compile(r"^database(\d+)mers\.kmer_distrib$")
 
-#: ``kraken2-inspect``/``inspect.txt`` opens with this, and it carries the database's k. A read
-#: shorter than k yields no k-mers at all, so such a request is meaningless rather than imprecise.
+#: The database's k, from the header of ``kraken2-inspect`` output (``inspect.txt``). A read
+#: shorter than k has no k-mers and cannot be classified.
 _KMER_LENGTH_RE = re.compile(r"\bk\s*=\s*(\d+)")
 
-#: Below this share of the movable reads actually being moved, the database and the reads disagree.
-#: Not zero, because Bracken legitimately moves nothing for a node whose children are all below the
-#: ``-t`` threshold; and not high, because a clean single-organism sample has little to move. On the
-#: fixture under tests/fixtures/bracken/ a matched database moves 100% of the 450 movable reads and
-#: a mismatched one moves 0.
+#: If less than this share of the movable reads is moved, the database and the reads do not match.
+#: Above zero because Bracken moves nothing for a node whose children are all below the ``-t``
+#: threshold; low because a single-organism sample has little to move. On the fixture under
+#: tests/fixtures/bracken/ a matched database moves 100% of the 450 movable reads, a mismatched 0.
 MIN_REDISTRIBUTED_FRACTION = 0.01
 
-#: The unit written in the long abundance table, spelled the way Bracken spells it so that nothing
-#: downstream has to guess. A fraction of the rank's estimated reads, in 0-1.
+#: The unit written in the long abundance table, named as in Bracken. A fraction of the rank's
+#: estimated reads, in 0-1.
 FRACTION_UNIT = "fraction_total_reads"
-#: The alternative: Bracken's re-estimated read counts. Not compositional, but also not comparable
-#: across samples without a depth correction, since a deeper library has more reads of everything.
+#: Bracken's re-estimated read counts. Not comparable across samples without a depth correction.
 READS_UNIT = "est_reads"
 
-#: Columns of MetaWrap2's long-format abundance table. The same four `catalogue --quantify` writes
-#: and `diff_abundance` reads, in the same order, so a Bracken table can be fed straight into the
-#: statistics module without a conversion step.
+#: Columns of MetaWrap2's long-format abundance table, as written by `catalogue --quantify` and read
+#: by `diff_abundance`, so a Bracken table needs no conversion.
 LONG_COLUMNS: Tuple[str, ...] = ("sample", "feature", "value", "unit")
 
 
@@ -126,9 +111,8 @@ class BrackenError(ValueError):
 class BrackenRow:
     """One taxon's row of a ``.bracken`` table.
 
-    ``added_reads`` is redundant - Bracken writes ``int(new_est_reads) - int(kraken_assigned_reads)``
-    - but it is parsed rather than recomputed because it is the one column that says whether Bracken
-    did anything at all, and a column read from the file can be checked against the arithmetic.
+    ``added_reads`` equals ``int(new_est_reads) - int(kraken_assigned_reads)``. It is parsed from
+    the file because it shows whether Bracken redistributed anything.
     """
 
     name: str
@@ -140,16 +124,14 @@ class BrackenRow:
     added_reads: int
     #: The estimate: assigned plus added. This is the abundance number.
     new_est_reads: int
-    #: Share of the rank's total estimated reads. A fraction in 0-1 - see the module docstring.
+    #: Share of the rank's total estimated reads, a fraction in 0-1 (see the module docstring).
     fraction_total_reads: float
 
     @property
     def added_share(self) -> float:
-        """What share of this taxon's estimate Bracken supplied rather than Kraken2.
+        """Share of this taxon's estimate that Bracken added on top of Kraken2's assignments.
 
-        Worth having per row and not only in aggregate: a taxon whose estimate is 95% redistributed
-        reads was barely observed directly, and that is a different kind of claim from one Kraken2
-        assigned outright, even though the two look identical in the abundance column.
+        A taxon whose estimate is mostly redistributed reads had few reads assigned directly.
         """
         if self.new_est_reads <= 0:
             return 0.0
@@ -161,7 +143,7 @@ def check_rank(rank: str) -> str:
     normalised = (rank or "").strip().upper()
     if normalised not in RANKS:
         raise BrackenError(
-            "rank %r is not one this module estimates at; expected one of %s (%s)"
+            "rank %r is not supported; expected one of %s (%s)"
             % (
                 rank,
                 ",".join(RANKS),
@@ -174,10 +156,9 @@ def check_rank(rank: str) -> str:
 def read_table(path: str) -> List[BrackenRow]:
     """Parse a ``.bracken`` / ``*_bracken_species.txt`` table.
 
-    The header is required to be exactly :data:`BRACKEN_COLUMNS`. Checked rather than trusted
-    because the two files Bracken writes look alike and are not: ``-o`` is this table and ``-w`` is a
-    six-column Kraken2-style report with no header, so a swapped pair parses into plausible nonsense
-    if columns are taken positionally.
+    The header must equal :data:`BRACKEN_COLUMNS`. Bracken's ``-w`` output is a six-column
+    Kraken2-style report with no header, and parsing it positionally as the ``-o`` table gives
+    plausible but wrong values.
     """
     with open(path) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -212,39 +193,34 @@ def _row(path: str, line_number: int, record: Mapping[str, str]) -> BrackenRow:
 
 
 def _check_fractions(path: str, rows: Sequence[BrackenRow]) -> None:
-    """Confirm the last column really is a fraction, with the file in front of us.
+    """Check that the last column is a fraction in 0-1.
 
-    A value above 1 means the column is a percentage, which would make every abundance derived from
-    it 100x too large; and since Bracken's fractions are shares of one rank's total they must also
-    sum to about 1, so a sum near 100 catches the same mistake from the other side. The tolerance is
-    loose because the column is rounded to five decimals, so a table with many rows loses a little.
+    A value above 1 means a percentage (100x too large). The fractions are shares of one rank's
+    total, so they must also sum to about 1. The tolerance allows for rounding to five decimals.
     """
     if not rows:
         return
     largest = max(row.fraction_total_reads for row in rows)
     if largest > 1.0:
         raise BrackenError(
-            "%s has fraction_total_reads=%g, which is above 1. Bracken writes a fraction in 0-1 "
-            "(new_est_reads / total estimated reads at the rank), so this column is a percentage "
-            "or this is not a Bracken table" % (path, largest)
+            "%s has fraction_total_reads=%g, above 1. Bracken writes a fraction in 0-1 "
+            "(new_est_reads / total estimated reads at the rank); this column is a percentage "
+            "or the file is not a Bracken table" % (path, largest)
         )
     total = sum(row.fraction_total_reads for row in rows)
     if not 0.95 <= total <= 1.05:
         raise BrackenError(
-            "%s: fraction_total_reads sums to %.4f over %d row(s), not to 1. Bracken's fractions "
-            "are shares of one rank's estimated reads, so a table whose fractions do not sum to 1 "
-            "has been filtered, concatenated from several samples, or is not a Bracken table"
-            % (path, total, len(rows))
+            "%s: fraction_total_reads sums to %.4f over %d row(s), expected 1. The table has "
+            "been filtered, concatenated from several samples, "
+            "or is not a Bracken table" % (path, total, len(rows))
         )
 
 
 def check_table_rank(rows: Sequence[BrackenRow], rank: str, path: str = "table") -> None:
     """Raise unless every row was estimated at *rank*.
 
-    Bracken stamps the rank it was asked for into ``taxonomy_lvl`` on every row, which makes this
-    cheap and makes it worth doing: the common way to end up with the wrong one is ``--resume`` over
-    an output directory whose tables were written at a different ``--bracken-rank``, and a genus
-    table read as a species table is wrong without looking wrong.
+    Bracken writes the requested rank into ``taxonomy_lvl`` on every row. A mismatch usually comes
+    from ``--resume`` over tables written with a different ``--bracken-rank``.
     """
     wanted = check_rank(rank)
     found = sorted({row.taxonomy_lvl for row in rows})
@@ -252,21 +228,20 @@ def check_table_rank(rows: Sequence[BrackenRow], rank: str, path: str = "table")
         return
     if found != [wanted]:
         raise BrackenError(
-            "%s was estimated at rank %s, not at %s (%s) as requested. Bracken writes the rank it "
-            "ran at into every row's taxonomy_lvl; re-run with --force, or ask for rank %s"
+            "%s was estimated at rank %s; requested %s (%s). The rank comes from each row's "
+            "taxonomy_lvl. Re-run with --force, or ask for rank %s"
             % (path, "/".join(found), wanted, RANK_NAMES[wanted], found[0])
         )
 
 
-# ── the database: which read lengths it was built for, and what k it used ─────────────────────
+# ── database read lengths and k ───────────────────────────────────────────────────────────────
 
 
 def available_read_lengths(db: str) -> List[int]:
     """The read lengths *db* has a Bracken k-mer distribution for, ascending.
 
-    Empty means ``bracken-build`` has never run against this Kraken2 database. That is a different
-    failure from a wrong read length and gets a different message: one is a missing install step,
-    the other is a wrong flag.
+    Empty means ``bracken-build`` has not been run on this Kraken2 database (a missing install
+    step), which gets a different message from a wrong read length.
     """
     if not os.path.isdir(db):
         return []
@@ -281,8 +256,7 @@ def available_read_lengths(db: str) -> List[int]:
 def database_kmer_length(db: str) -> Optional[int]:
     """The Kraken2 database's k, from the header ``kraken2-inspect`` writes. None if unavailable.
 
-    Only used to reject a read length below k, which is not a tuning question: Kraken2 classifies on
-    k-mers, so a read shorter than k produces none and cannot be classified at all.
+    Used to reject a read length below k: such a read has no k-mers and cannot be classified.
     """
     inspect = os.path.join(db, "inspect.txt")
     if not os.path.isfile(inspect):
@@ -303,37 +277,36 @@ def database_kmer_length(db: str) -> Optional[int]:
 def check_read_length(db: str, read_length: int) -> Optional[str]:
     """What is wrong with asking *db* for *read_length*, or None if nothing is.
 
-    Returns a message rather than raising, because the caller is a module that wants to report this
-    through its own ``error``/``warning`` channel alongside the sample it happened on. Bracken
-    itself prints the same problem and then exits zero, so this has to run before the call.
+    Returns a message instead of raising, so the calling module can report it with the sample
+    through its own ``error``/``warning`` channel. Run it before Bracken, which exits zero on this
+    error.
     """
     if not os.path.isdir(db):
         return (
-            "the Bracken database directory %s does not exist. bracken-build writes its files into "
-            "the Kraken2 database directory, so --bracken-db should name that directory" % db
+            "the Bracken database directory %s does not exist. bracken-build writes its files "
+            "into the Kraken2 database directory; pass that directory as --bracken-db" % db
         )
 
     available = available_read_lengths(db)
     if not available:
         return (
-            "%s holds no Bracken k-mer distribution (no database<N>mers.kmer_distrib). Bracken "
-            "needs one built from this Kraken2 database with `bracken-build -d %s -l %d`; the "
-            "Kraken2 database alone is not enough" % (db, db, read_length)
+            "%s holds no Bracken k-mer distribution (no database<N>mers.kmer_distrib). Build "
+            "one from this Kraken2 database with `bracken-build -d %s -l %d`"
+            " (needed in addition to the Kraken2 database)" % (db, db, read_length)
         )
 
     kmer_length = database_kmer_length(db)
     if kmer_length is not None and read_length < kmer_length:
         return (
-            "read length %d is shorter than this Kraken2 database's k of %d, so a read of that "
-            "length contains no complete k-mer and cannot be classified at all"
-            % (read_length, kmer_length)
+            "read length %d is shorter than this Kraken2 database's k of %d; reads that "
+            "short contain no complete k-mer and cannot be classified" % (read_length, kmer_length)
         )
 
     if read_length not in available:
         return (
-            "%s has no k-mer distribution for %d bp reads: it expects %s (looked for %s). The "
-            "distribution is built per read length, so this is not an approximation Bracken can "
-            "make - pass --bracken-read-length with one of those, or build the missing one with "
+            "%s has no k-mer distribution for %d bp reads: it has %s (looked for %s). "
+            "Distributions are built per read length. Pass --bracken-read-length with one of "
+            "those, or build the missing one with "
             "`bracken-build -d %s -l %d`"
             % (
                 db,
@@ -347,37 +320,32 @@ def check_read_length(db: str, read_length: int) -> Optional[str]:
     return None
 
 
-# ── the Kraken2 report: how many reads there were to move ────────────────────────────────────
+# ── reads above the rank in the Kraken2 report ───────────────────────────────────────────────
 
-#: Kraken2's report columns. No header in the file, so they are positional by necessity.
+#: Kraken2's report columns, by position (the file has no header).
 _REPORT_RANK_COLUMN = 3
 _REPORT_TAXON_READS_COLUMN = 2
 _REPORT_COLUMNS = 6
 
-#: Rank codes ordered coarsest first, copied from ``main_lvls`` in Bracken's ``est_abundance.py`` so
-#: that this module's notion of "above the rank" is the same as the tool's. Note ``K`` before ``D``:
-#: NCBI's superkingdom is Kraken2's ``D`` and its kingdom is ``K``, and Bracken orders them this way.
-#: Agreeing with Bracken matters more here than being right about taxonomy, since the point of the
-#: number is to predict what Bracken will try to move.
+#: Rank codes, coarsest first, copied from ``main_lvls`` in Bracken's ``est_abundance.py`` so "above
+#: the rank" matches Bracken. Bracken puts ``K`` (NCBI kingdom) before ``D`` (NCBI superkingdom);
+#: this follows Bracken's order, since the aim is to predict what Bracken will move.
 _REPORT_RANK_ORDER: Tuple[str, ...] = ("R", "K", "D", "P", "C", "O", "F", "G", "S")
 
 
 def reads_above_rank(report: str, rank: str) -> Optional[int]:
-    """Reads Kraken2 assigned at nodes coarser than *rank*: the reads Bracken exists to move.
+    """Reads Kraken2 assigned at nodes coarser than *rank*, which Bracken can redistribute.
 
-    This is the denominator the redistribution guard needs and the ``.bracken`` table cannot supply.
-    A table shows the reads that arrived at the rank; it has no row for one that stayed at the family
-    node, so "Bracken added almost nothing" is indistinguishable from "there was almost nothing to
-    add" without reading the report as well.
+    This is the denominator for the redistribution guard. The ``.bracken`` table has no rows for
+    reads left above the rank, so without the report "Bracken added almost nothing" cannot be told
+    apart from "there was almost nothing to add".
 
     Unranked nodes (code ``-``, such as "cellular organisms") count as movable: Bracken gives them a
-    derived sub-level of their parent and redistributes their reads like any other node above the
-    rank, and a read parked there is as stuck as one parked on a phylum. Unclassified reads (``U``)
-    do not - Bracken cannot place them, and counting them would make every sample look like a
-    failure. A sub-level code such as ``S1`` is below its letter, so it is never movable upward.
+    derived sub-level of their parent and redistributes them like other nodes above the rank.
+    Unclassified reads (``U``) are not counted, since Bracken cannot place them. A sub-level code
+    such as ``S1`` is below its letter and never counts.
 
-    None when the report cannot be read, which leaves the guard with a weaker denominator rather
-    than a wrong one.
+    None when the report cannot be read; the guard then falls back to a weaker denominator.
     """
     target = _REPORT_RANK_ORDER.index(check_rank(rank))
     total = 0
@@ -402,7 +370,7 @@ def reads_above_rank(report: str, rank: str) -> Optional[int]:
     return total
 
 
-# ── did Bracken actually redistribute anything? ──────────────────────────────────────────────
+# ── redistribution check ─────────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -416,8 +384,8 @@ class Redistribution:
     added: int
     #: The estimate at the rank: assigned + added.
     estimated: int
-    #: Reads Kraken2 left above the rank, from the Kraken2 report. None when it was not read, and
-    #: then :attr:`moved_share` is of the estimate instead - a weaker number, flagged as such.
+    #: Reads Kraken2 left above the rank, from the Kraken2 report. When None, :attr:`moved_share` is
+    #: relative to the estimate instead, which is a weaker measure.
     movable: Optional[int] = None
 
     @property
@@ -432,8 +400,7 @@ class Redistribution:
     def suspicious(self) -> bool:
         """True when reads were available to move and nearly none of them moved.
 
-        Both halves matter. With nothing above the rank there is nothing to redistribute and a share
-        of zero is correct, so the guard must not fire on a sample that was simply easy to classify.
+        With no reads above the rank a share of zero is correct, so the guard does not fire.
         """
         if self.movable is not None and self.movable <= 0:
             return False
@@ -473,30 +440,28 @@ def redistribution(
 def check_redistribution(summary: Redistribution) -> Optional[str]:
     """What is wrong with this redistribution, or None if nothing is.
 
-    The failure this catches is the quiet one. A Bracken database built from a *different* Kraken2
-    database has k-mer distributions keyed by taxids the report never mentions, so every lookup
-    misses, every node's reads stay where they were, and Bracken still writes a full table whose
-    fractions still sum to 1. Nothing in the output says the estimate is just Kraken2's assigned
-    counts renormalised - which is the number the user ran Bracken to avoid.
+    Catches a Bracken database built from a different Kraken2 database. Its k-mer distributions use
+    taxids the report does not contain, so no reads move, yet Bracken writes a full table whose
+    fractions sum to 1. The result is Kraken2's assigned counts renormalised, with no error.
     """
     if not summary.suspicious:
         return None
     if not summary.estimated:
         return (
-            "Bracken estimated no reads at rank %s (%s). Either the Kraken2 report has no nodes at "
-            "that rank, or every one of them fell below Bracken's read threshold"
+            "Bracken estimated no reads at rank %s (%s). The Kraken2 report has no nodes at "
+            "that rank, or all of them are below Bracken's read threshold"
             % (summary.rank, RANK_NAMES.get(summary.rank, summary.rank))
         )
     return (
-        "%s. Almost nothing was redistributed, so these numbers are close to Kraken2's assigned "
-        "counts renormalised rather than an abundance estimate. The usual cause is a Bracken "
+        "%s. Almost no reads were redistributed, so these numbers are close to Kraken2's "
+        "assigned counts renormalised. The usual cause is a Bracken "
         "database built from a different Kraken2 database than the one that produced the report: "
-        "its k-mer distributions are keyed by taxids this report never mentions, so every lookup "
-        "misses and Bracken still writes a complete-looking table" % summary.describe()
+        "its k-mer distributions use taxids that are not in this report, and Bracken "
+        "still writes a full table" % summary.describe()
     )
 
 
-# ── MetaWrap2's own long-format abundance table ───────────────────────────────────────────────
+# ── MetaWrap2 long-format abundance table ─────────────────────────────────────────────────────
 
 
 def long_rows(
@@ -504,15 +469,13 @@ def long_rows(
 ) -> List[List[str]]:
     """One sample's rows of the long abundance table: sample, feature, value, unit.
 
-    The feature is the taxon name rather than its taxid, matching every other long table in the
-    pipeline in being readable - `diff_abundance` reports whichever string it finds here straight
-    back to the user, and a list of significant taxids is not a result anyone can read. Names from
-    one Kraken2 database are unique per taxid, but that is checked rather than assumed: two rows
-    sharing a name would be silently summed into one feature by any consumer that keys on it.
+    The feature is the taxon name, not the taxid, as in the pipeline's other long tables, because
+    `diff_abundance` reports this string to the user. Names are checked to be unique per taxid:
+    two rows sharing a name would be summed into one feature by consumers that key on it.
     """
     if unit not in (FRACTION_UNIT, READS_UNIT):
         raise BrackenError(
-            "unit %r is not one this writer produces; expected %r (a fraction in 0-1) or %r "
+            "unit %r is not supported; expected %r (a fraction in 0-1) or %r "
             "(Bracken's re-estimated read counts)" % (unit, FRACTION_UNIT, READS_UNIT)
         )
     seen: Dict[str, int] = {}
@@ -520,8 +483,8 @@ def long_rows(
     for row in rows:
         if row.name in seen and seen[row.name] != row.taxonomy_id:
             raise BrackenError(
-                "sample %s has two taxa named %r (taxids %d and %d), so the name cannot identify a "
-                "feature here; they would be summed into one row"
+                "sample %s has two taxa named %r (taxids %d and %d); the name must identify one "
+                "taxon, or both would be summed into one row"
                 % (sample, row.name, seen[row.name], row.taxonomy_id)
             )
         seen[row.name] = row.taxonomy_id
@@ -535,9 +498,8 @@ def write_long_table(
 ) -> int:
     """Write the combined long-format abundance table across samples. Returns the row count.
 
-    Samples and taxa are both sorted so the file is byte-identical between runs over the same
-    inputs: a table that reorders itself cannot be diffed, which is how a changed number gets
-    missed in review.
+    Samples and taxa are sorted so the file is byte-identical between runs on the same inputs and
+    can be diffed.
     """
     written = 0
     with open(path, "w", newline="") as handle:

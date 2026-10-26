@@ -1,18 +1,16 @@
 """MetaWrap2 dereplicate module: collapse many samples' bins into one non-redundant catalogue.
 
-Binning one cohort per sample produces the same genome once per sample it occurs in. Twenty
-samples of one gut cohort can yield two thousand bins describing a few hundred organisms, and
-every downstream step pays for the duplication: abundance estimation has near-identical genomes
-stealing each other's reads, annotation runs on the same genome twenty times, and a MAG count
-reported off that set is not a count of organisms.
+Binning each sample separately produces the same genome once per sample it occurs in. Twenty
+samples of one gut cohort can yield two thousand bins for a few hundred organisms. Near-identical
+genomes then split reads in abundance estimation, annotation repeats per copy, and the MAG count
+overstates the number of organisms.
 
-So the bins are clustered by whole-genome identity and one representative is kept per cluster.
+The bins are clustered by whole-genome identity and one representative is kept per cluster.
 Identity comes from skani (Shaw & Yu, *Nat Methods* 2023), which estimates ANI from sparse k-mer
-sketches rather than alignment and reports the aligned fraction alongside it; the clustering and
-the choice of representative are done here, where they can be read and tested.
+sketches and reports the aligned fraction. Clustering and representative choice are done here.
 
-Two numbers decide the result and both are flags rather than findings - see SPECIES_ANI and
-MIN_ALIGNED_FRACTION. Neither has been measured on this project's data yet.
+The result depends on two flags, SPECIES_ANI and MIN_ALIGNED_FRACTION. Neither has been tuned on
+this project's data yet.
 
 This file is meant to be read and edited: the command skani runs lives in the COMMANDS block
 below, and the tunable numbers in the CONSTANTS block.
@@ -51,43 +49,36 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["dereplicate"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-#: ``-E`` is the sparse form: one row per pair instead of a square matrix, which is what the
-#: clustering wants and is the difference between a file of N rows and one of N^2 cells on a
-#: two-thousand-genome catalogue. ``--min-af`` filters at the source so a pair sharing only a
-#: plasmid never reaches the clustering, and ``-s`` is skani's own screen - pairs below it are not
-#: compared at all, which is where its speed comes from.
+#: ``-E`` writes one row per pair instead of an N^2 matrix. ``--min-af`` drops pairs that share only
+#: a short region (e.g. a plasmid) before clustering. ``-s`` is skani's pre-filter; pairs below it
+#: are not compared.
 SKANI_TRIANGLE = (
     "skani triangle -E -l {genome_list} -o {output} -t {threads} "
     "-s {screen} --min-af {min_af}{preset}"
 )
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
-#: ANI at which two bins are called the same species. 95% is the convention the large MAG
-#: catalogues are built on, which is the only reason to start here: it makes a species count
-#: comparable with a published one. It is not a measurement of ours, and the right value depends on
-#: what the catalogue is for - 99 separates strains and is what an inStrain-style analysis wants.
+#: ANI at which two bins are called the same species. 95% is the convention used by the large MAG
+#: catalogues, so species counts are comparable with published ones. It was not tuned here; 99
+#: separates strains, as an inStrain-style analysis needs.
 SPECIES_ANI = 95.0
-#: How much of a genome has to align before an ANI estimate is allowed to speak for the whole
-#: genome, as a percentage. Deliberately permissive: at 95% identity the ANI estimate is doing the
-#: species call, and this filter exists only to stop a short shared region - a prophage, a plasmid,
-#: a conserved operon - standing in for a genome-wide comparison. Raising it makes clusters smaller
-#: and the catalogue larger, which is a real choice and not a correctness fix.
+#: Minimum percentage of a genome that must align for its ANI estimate to count. Permissive: the
+#: ANI does the species call, and this only stops a short shared region (a prophage, a plasmid, a
+#: conserved operon) from standing in for the genome. Raising it gives smaller clusters and a larger
+#: catalogue.
 MIN_ALIGNED_FRACTION = 10.0
-#: skani's pre-filter, in approximate percent identity. Anything it screens out cannot be in a
-#: cluster, so it has to sit below SPECIES_ANI with room for the approximation; skani's own default
-#: is 80, which is far enough below 95 to be safe and is left alone.
+#: skani's pre-filter, in approximate percent identity. Pairs screened out cannot cluster, so it
+#: must sit well below SPECIES_ANI. skani's default of 80 is used.
 SKANI_SCREEN = 80
-#: skani presets trade compression factor for accuracy on fragmented assemblies. MAGs are
-#: fragmented, which argues for ``medium``, but skani's help puts that at an N50 below 10 kb and
-#: costs 2x for it, so which one a MAG catalogue actually needs is a measurement nobody here has
-#: made. Left at skani's default until it is one.
+#: skani presets trade compression factor for accuracy on fragmented assemblies. skani's help
+#: recommends ``medium`` for an N50 below 10 kb, at 2x the cost. Which one MAGs need has not been
+#: measured, so skani's default is used.
 SKANI_PRESET = "default"
 SKANI_PRESETS = ("default", "fast", "medium", "slow")
 #: Where the kept genomes and the record of what was collapsed into them are written.
 CATALOGUE_DIR = "dereplicated_genomes"
 CLUSTERS_TABLE = "clusters" + TSV_SUFFIX
 ANI_TABLE = "ani" + TSV_SUFFIX
-#: The cluster table's columns. ``ani_to_representative`` is in there on purpose - it is what makes
-#: an over-merged cluster visible rather than a number nobody can question.
+#: The cluster table's columns. ``ani_to_representative`` shows over-merged clusters.
 CLUSTER_COLUMNS = (
     "cluster",
     "genome",
@@ -113,9 +104,8 @@ class Edge(NamedTuple):
     def aligned_fraction(self) -> float:
         """The larger of the two aligned fractions.
 
-        The larger, not the smaller: a 60% complete bin of the same organism aligns almost
-        entirely to its complete neighbour while the neighbour aligns only 60% to it, and taking
-        the smaller would refuse to collapse exactly the duplicates this module exists to collapse.
+        A 60% complete bin aligns almost entirely to a complete bin of the same organism, which
+        aligns only 60% to it. Using the smaller fraction would keep such duplicates apart.
         """
         return max(self.af_ref, self.af_query)
 
@@ -149,14 +139,14 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--ani",
         type=percent(),
         default=SPECIES_ANI,
-        help="ANI%% at which two bins are the same genome - the species boundary; "
-        "99 gives strain-level clusters instead",
+        help="ANI%% at which two bins count as the same genome (the species boundary); "
+        "99 gives strain-level clusters",
     )
     p.add_argument(
         "--min-aligned-fraction",
         type=percent(),
         default=MIN_ALIGNED_FRACTION,
-        help="minimum %% of either genome that must align for an ANI value to be believed",
+        help="minimum %% of either genome that must align for an ANI value to be used",
     )
     p.add_argument(
         "--preset",
@@ -179,11 +169,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 def collect_genomes(bin_dirs: Sequence[str]) -> List[Genome]:
     """Every bin in every input directory, under a name unique across directories.
 
-    Bins are numbered within one binner's output, so ``bin_001.fasta`` exists in every sample and
-    the names cannot be used as they are - skani would be handed several files with the same label
-    and the clustering could not say which sample a genome came from. The source directory's name
-    becomes a prefix, which is also what makes the catalogue's filenames say where each kept genome
-    was found.
+    Bin names repeat across samples (``bin_001.fasta`` exists in each), so the source directory's
+    name is used as a prefix. The catalogue's filenames then also show where each genome came from.
     """
     genomes: List[Genome] = []
     seen: Set[str] = set()
@@ -191,9 +178,8 @@ def collect_genomes(bin_dirs: Sequence[str]) -> List[Genome]:
         source = os.path.basename(os.path.normpath(directory))
         for filename in list_bins(directory, FASTA_EXTENSIONS):
             name = "%s__%s" % (source, bin_name_from_filename(filename))
-            # Two input directories can share a basename (one per sample, all called
-            # "metawrap_70_10_bins"). Disambiguating here rather than refusing keeps the common
-            # cohort layout usable without asking the caller to rename anything.
+            # Input directories can share a basename (one per sample, all called
+            # "metawrap_70_10_bins"); add a numeric suffix instead of refusing.
             if name in seen:
                 suffix = 2
                 while "%s_%d" % (name, suffix) in seen:
@@ -207,9 +193,8 @@ def collect_genomes(bin_dirs: Sequence[str]) -> List[Genome]:
 def parse_skani(path: str) -> List[Edge]:
     """Read skani's sparse table into edges, keyed by file path.
 
-    The columns are named in the header rather than assumed by position, because skani's ``--ci``
-    and ``--detailed`` flags insert columns and a positional read would silently take the wrong
-    one if anybody added either to the command above.
+    Columns are looked up by header name because skani's ``--ci`` and ``--detailed`` flags insert
+    extra columns.
     """
     edges: List[Edge] = []
     with open(path) as fh:
@@ -252,18 +237,13 @@ def cluster_genomes(
 ) -> List[List[str]]:
     """Group *names* so that every pair above *ani* ends up together. Single linkage.
 
-    Single linkage, which is a choice with a known cost: identity is not transitive, so a chain of
-    genomes each 95% identical to the next can be pulled into one cluster whose ends are not 95%
-    identical to each other. The alternative is to require every pair inside a cluster to clear the
-    threshold, which needs the full matrix and makes the answer depend on the order genomes are
-    considered in. Single linkage is taken here because it never splits a genuine duplicate - which
-    is the failure this module exists to prevent - and because what it over-merges can be seen: the
-    cluster table records every member's ANI to its representative, so a chained cluster shows up
-    as a member well below the threshold.
+    Identity is not transitive, so single linkage can chain genomes into one cluster whose ends are
+    below the threshold. Requiring every pair to pass would need the full matrix and make the result
+    depend on input order. Single linkage never splits a true duplicate, and chaining is visible in
+    the cluster table as a member with low ANI to its representative.
 
-    Genomes with no edge to anything are their own cluster, so the output always accounts for every
-    name given. Returned in input order, each cluster's members in input order, so two runs over
-    the same bins give the same catalogue.
+    Genomes with no edge form their own cluster, so every name is accounted for. Clusters and their
+    members are returned in input order, so the result is reproducible.
     """
     index = {name: i for i, name in enumerate(names)}
     parent = list(range(len(names)))
@@ -284,8 +264,8 @@ def cluster_genomes(
             continue
         root_a, root_b = find(a), find(b)
         if root_a != root_b:
-            # Lower index wins, so a cluster's root is its earliest member and the ordering below
-            # follows the input rather than the order edges happened to arrive in.
+            # Lower index wins, so a cluster's root is its earliest member and the order below
+            # follows the input, not the edge order.
             parent[max(root_a, root_b)] = min(root_a, root_b)
 
     groups: Dict[int, List[str]] = {}
@@ -297,10 +277,9 @@ def cluster_genomes(
 def read_quality(bin_dirs: Sequence[str], genomes: Sequence[Genome]) -> Dict[str, float]:
     """Each genome's quality score, from the CheckM table beside its bin directory if there is one.
 
-    ``<bins>.stats.tsv`` is what this project's CheckM runs leave next to the bins they scored, so
-    a cohort that has been through bin_refinement already has the numbers and nothing needs to be
-    re-run. Genomes with no row are absent from the result rather than scored zero, which lets the
-    caller tell "scored badly" from "never scored" - they pick different representatives.
+    CheckM runs in this project write ``<bins>.stats.tsv`` next to the bins, so bins from
+    bin_refinement need no re-run. Genomes with no row are left out instead of scored zero, so the
+    caller can tell "scored badly" from "not scored".
     """
     by_source: Dict[str, Dict[str, float]] = {}
     for directory in bin_dirs:
@@ -330,7 +309,7 @@ def read_quality(bin_dirs: Sequence[str], genomes: Sequence[Genome]) -> Dict[str
 
 
 def genome_size(path: str) -> int:
-    """Total bases in a fasta, used to break ties and to rank genomes nobody scored."""
+    """Total bases in a fasta, used to break ties and to rank unscored genomes."""
     total = 0
     with open(path) as fh:
         for line in fh:
@@ -346,10 +325,8 @@ def choose_representative(
 ) -> str:
     """The genome that stands for its cluster: best CheckM score, else largest.
 
-    A scored genome always beats an unscored one, however large: size says a bin is big, not that
-    it is one organism, and a 6 Mb chimera would otherwise represent a cluster containing the clean
-    3 Mb version of the same genome. Ties fall to the input order, which keeps the choice
-    reproducible.
+    A scored genome always beats an unscored one regardless of size; otherwise a 6 Mb chimera could
+    represent a cluster that contains a clean 3 Mb genome. Ties go to input order.
     """
     return max(
         members,
@@ -369,9 +346,8 @@ def ani_to_representative(
 ) -> Dict[str, float]:
     """Each member's ANI to its cluster's representative, where there is an edge to it.
 
-    Recorded because it is how an over-merged cluster is spotted: single linkage can chain, and a
-    member whose ANI to the representative is below the threshold - or absent entirely - was pulled
-    in through somebody else.
+    Used to spot over-merged clusters: a member with ANI below the threshold, or no edge to the
+    representative, was joined through another member by single linkage.
     """
     wanted = set(members)
     out: Dict[str, float] = {}
@@ -442,6 +418,22 @@ def main(argv: List[str]) -> int:
     for directory in args.bins:
         if not os.path.isdir(directory):
             error("%s does not exist. Exiting..." % directory)
+
+    # A sample whose binning or refinement found nothing leaves an empty folder, which is common in
+    # a cohort. Empty folders are skipped with a warning and the other folders are dereplicated.
+    # The run stops only if every folder is empty.
+    kept = []
+    for directory in args.bins:
+        if any(name.endswith(tuple(FASTA_EXTENSIONS)) for name in os.listdir(directory)):
+            kept.append(directory)
+        else:
+            warning("%s has no bins in it; dereplicating without it." % directory)
+    if not kept:
+        error(
+            "Every bin folder given is empty (%s), so there is nothing to dereplicate."
+            % ", ".join(args.bins)
+        )
+    args.bins = kept
 
     settings = load_settings(args.config)
     resolve_threads(args, settings)
@@ -524,10 +516,10 @@ def main(argv: List[str]) -> int:
         scores = read_quality(args.bins, genomes)
         if not scores:
             warning(
-                "no CheckM table beside any input folder, so representatives are being chosen on\n"
-                "genome size alone. Size says a bin is large, not that it is one organism, so a\n"
-                "chimera can win its cluster. Run bin_refinement (or CheckM) over these bins first\n"
-                "and this module will use the scores it leaves in <bins>%s." % STATS_SUFFIX
+                "no CheckM table beside any input folder, so representatives are chosen by\n"
+                "genome size alone, and a large chimeric bin can be picked. Run bin_refinement\n"
+                "(or CheckM) over these bins first; this module then uses the scores it writes\n"
+                "to <bins>%s." % STATS_SUFFIX
             )
         sizes = {g.name: genome_size(g.path) for g in genomes}
 

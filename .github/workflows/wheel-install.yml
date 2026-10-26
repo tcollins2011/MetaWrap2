@@ -2,16 +2,14 @@ name: Wheel install
 
 # Build the wheel, install it into a clean virtualenv, and use it from there.
 #
-# This is the boundary the rest of CI cannot cross. Every other job installs the package with
-# `pip install -e .`, which puts the *checkout* on sys.path: every file in the repository is
-# importable and openable whether or not the wheel carries it. That is why
-# `[tool.setuptools.package-data]` could ship the env files and not src/metawrap2/data/, and
-# `pathways` and `quantify_function` could raise FileNotFoundError on
-# site-packages/metawrap2/data/kegg/modules_table.tsv for every user who installed the way the
-# README's first line says, while 178 unit tests passed and the CLI smoke test passed with them.
+# Every other job installs with `pip install -e .`, which puts the checkout on sys.path, so every
+# repository file is importable whether or not the wheel carries it. As a result
+# `[tool.setuptools.package-data]` once shipped the env files but not src/metawrap2/data/, and
+# `pathways` and `quantify_function` raised FileNotFoundError on
+# site-packages/metawrap2/data/kegg/modules_table.tsv for anyone who installed as the README says,
+# while 178 unit tests and the CLI smoke test passed.
 #
-# Nothing here needs conda, a database, or more than a minute of CPU, so it runs on every push -
-# a packaging defect is cheapest to find in the pull request that introduces it.
+# No conda, database or more than a minute of CPU is needed, so this runs on every push.
 
 on:
   push:
@@ -24,9 +22,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The two ends of the supported range rather than all five: a missing package-data
-        # pattern is the same on every interpreter, but a dependency with no wheel for the
-        # newest Python - or a floor that no longer builds on the oldest - is not.
+        # The two ends of the supported range instead of all five: a missing package-data pattern is
+        # the same on every interpreter, but a dependency with no wheel for the newest Python, or a
+        # floor that no longer builds on the oldest, is not.
         python-version: ["3.10", "3.14"]
     steps:
       - name: Check out
@@ -47,21 +45,19 @@ jobs:
           print('\n'.join(n for n in sorted(names) if not n.endswith('.py')))
           "
 
-      # A separate interpreter with nothing but the wheel in it. Installed from an absolute path
-      # and used from outside the checkout, so nothing can be satisfied by a repository file that
-      # the wheel does not contain.
+      # A separate interpreter with only the wheel installed, from an absolute path and used outside
+      # the checkout, so no repository file can stand in for one the wheel lacks.
       - name: Install it into a clean virtualenv
         run: |
           python -m venv "$RUNNER_TEMP/clean"
           "$RUNNER_TEMP/clean/bin/pip" install --upgrade pip
           "$RUNNER_TEMP/clean/bin/pip" install "$(ls "$PWD"/dist/*.whl)"
-          # Modules here run tools off PATH; none of the invocations below needs a real tool, but
-          # without this they stop at "mamba is not on PATH" instead of doing anything.
+          # Run tools off PATH. None of the commands below needs a real tool, but without this
+          # setting they stop with "mamba is not on PATH".
           printf '[settings]\nuse_conda_envs = false\n' > "$RUNNER_TEMP/metawrap2.toml"
 
-      # The failure the user reported, asserted directly: the data directory is in the install
-      # tree, the module table loads out of it, and it is the installed copy being read and not a
-      # file left over in the checkout.
+      # The reported failure: the data directory is in the install tree, the module table loads from
+      # it, and it is the installed copy being read, not a file in the checkout.
       - name: The packaged data files are in site-packages
         working-directory: ${{ runner.temp }}
         run: |
@@ -71,9 +67,9 @@ jobs:
           import metawrap2
           from metawrap2 import kegg
 
-          # Resolved, and checked for "site-packages" rather than against sysconfig's purelib:
-          # a venv on some distributions installs into lib64 and reports lib, and this check
-          # failing over that would say "testing the checkout" about a perfectly good wheel.
+          # Check the resolved path for "site-packages" instead of comparing it with sysconfig's
+          # purelib: on some distributions a venv installs into lib64 but reports lib, which
+          # would fail a good wheel.
           installed = os.path.realpath(os.path.dirname(metawrap2.__file__))
           table = os.path.realpath(kegg.MODULES_TABLE)
           assert "site-packages" in installed, (
@@ -89,10 +85,10 @@ jobs:
                   print("packaged:", os.path.relpath(os.path.join(root, name), installed))
           PY
 
-      # Pfam's release is read out of relnotes.txt beside whatever PFAM_DB names - which is the
-      # HMM file, because that is what `install-db pfam` records. Checked here as well as in the
-      # unit tests because the full `annotate --pfam` path needs the 399 MB database, and this is
-      # the part of it that silently returned "unknown" on every run.
+      # Pfam's release is read from relnotes.txt beside whatever PFAM_DB names, which is the HMM
+      # file (what `install-db pfam` records). Checked here as well as in the unit tests because
+      # the full `annotate --pfam` path needs the 399 MB database, and this part used to return
+      # "unknown" on every run.
       - name: Pfam provenance survives the install
         working-directory: ${{ runner.temp }}
         run: |
@@ -111,9 +107,9 @@ jobs:
           print("Pfam release read from all three path shapes")
           PY
 
-      # Enumerated from the installed CLI's own tables, so a module added tomorrow is covered
-      # without touching this file - and a module whose import breaks only in an installed
-      # layout (a data file, a missing dependency) fails here.
+      # Enumerated from the installed CLI's own tables, so a new module is covered without editing
+      # this file, and a module whose import breaks only when installed (a data file, a missing
+      # dependency) fails here.
       - name: Every module and utility prints its help
         run: |
           export METAWRAP2_CONFIG="$RUNNER_TEMP/metawrap2.toml"
@@ -127,11 +123,10 @@ jobs:
             "$mw2" "$name" --help > /dev/null
           done
 
-      # One real invocation, not a help text: `pathways` is one of the two modules the missing
-      # package-data broke, and it is the module that reads the vendored KEGG table on its first
-      # line of work. The KO table is written here rather than committed because ten curated
-      # glycolysis KOs are enough to score modules, and the point is the code path.
-      - name: A module that reads the packaged data actually runs
+      # One real invocation: `pathways` is one of the two modules the missing package-data broke,
+      # and it reads the vendored KEGG table first. The KO table is written here, not committed;
+      # ten curated glycolysis KOs are enough to score modules.
+      - name: A module that reads the packaged data runs
         run: |
           export METAWRAP2_CONFIG="$RUNNER_TEMP/metawrap2.toml"
           work="$RUNNER_TEMP/pathways"
@@ -143,16 +138,16 @@ jobs:
               printf 'binA\tgene_%s\t%s\t200.0\t100.0\t1e-40\tcurated\t0.98\t-\tcurated\tci\n' "$ko" "$ko"
             done
           } > "$work/kos.tsv"
-          # --skip-krona: Krona draws the pictures and lives in a conda env; the completeness
-          # table is the number, and it comes from the packaged module definitions.
+          # --skip-krona: Krona (the plots) needs a conda env. The completeness table comes from
+          # the packaged module definitions.
           "$RUNNER_TEMP/clean/bin/metawrap2" pathways -k "$work/kos.tsv" -o "$work/out" --skip-krona
           test -s "$work/out/modules.tsv"
           head -n 3 "$work/out/modules.tsv"
 
-      # The committed fixture, through the whole-study driver. A dry run on purpose in this job:
-      # it builds and validates every module command for a real pair of read files without any
-      # tool installed, which is what catches a module whose arguments the driver gets wrong. The
-      # run that executes those commands is .github/workflows/end-to-end.yml.
+      # The committed fixture through the whole-study driver, as a dry run: it builds and validates
+      # every module command for a real pair of read files with no tool installed, which catches a
+      # module whose arguments the driver gets wrong. The run that executes those commands is
+      # .github/workflows/end-to-end.yml.
       - name: The run driver plans a study on the tiny fixture
         run: |
           export METAWRAP2_CONFIG="$RUNNER_TEMP/metawrap2.toml"

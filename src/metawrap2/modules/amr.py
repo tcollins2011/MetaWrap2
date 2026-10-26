@@ -1,21 +1,19 @@
-"""MetaWrap2 amr: resistance and virulence genes, where they sit, and what that licenses saying.
+"""MetaWrap2 amr: resistance and virulence genes, their genomic context, and evidence level.
 
-Runs AMRFinderPlus over bins or a whole assembly and turns its report into a table built around the
-Cao et al. evidence ladder - see :mod:`metawrap2.amr` for the ladder, the contig-edge rule, and why
-"no mobile element nearby" is a claim that needs a contig long enough to support it.
+Runs AMRFinderPlus over bins or a whole assembly and builds a table around the Cao et al. evidence
+ladder. See :mod:`metawrap2.amr` for the ladder, the contig-edge rule, and the contig length needed
+to report "no mobile element nearby".
 
-Two things this module does that a plain AMRFinderPlus wrapper does not:
+Compared with a plain AMRFinderPlus wrapper:
 
-* **It knows how long the contigs are**, so a gene's distance to the nearer contig end is on every
-  row. AMRFinderPlus reports coordinates and not contig lengths, so a wrapper that passes its output
-  through cannot tell a gene in the middle of a megabase from one 300 bp from the edge of what was
-  assembled.
-* **It runs before any length filter.** ARG-bearing contigs are short - one measurement puts
-  MEGAHIT's at 284 bp on average - so a filter applied first removes the evidence.
+* Every row has the gene's distance to the nearer contig end. AMRFinderPlus reports coordinates
+  but not contig lengths, so its output alone cannot separate a gene in a long contig from one
+  300 bp from a contig end.
+* It runs before any length filter, because ARG-bearing contigs are short (one measurement puts
+  MEGAHIT's at 284 bp on average).
 
-``--plus`` is on by default, which also yields AMRFinderPlus' virulence and stress entries. They go
-to their own table rather than into the resistance one: a virulence factor and a resistance gene are
-not interchangeable units of risk, and nothing here should make it easy to add them up.
+``--plus`` is on by default and adds AMRFinderPlus' virulence and stress entries. Virulence calls go
+to a separate table so they are not summed with resistance genes.
 """
 
 from __future__ import annotations
@@ -57,77 +55,65 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["amr"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# -n: nucleotide input, so the report carries contig coordinates. Protein input (-p) would lose the
-# genomic context this module is built around.
+# -n: nucleotide input, so the report has contig coordinates (protein input, -p, would not).
 #
-# --plus adds AMRFinderPlus' stress-response and virulence references to the resistance ones. They
-# are separated again on the way out, by Type.
+# --plus adds AMRFinderPlus' stress-response and virulence references. Output is split again by
+# Type.
 #
-# --database points at a specific dated release rather than letting the tool pick: an ARG call is
-# only as datable as its database, and `amrfinder -u` moves "latest" under a user's feet.
+# --database names a dated release, because `amrfinder -u` changes what "latest" points to and the
+# database version dates each call.
 AMRFINDER = (
     "amrfinder -n {input} --plus --database {db} --threads {threads} -o {out}" "{organism}{ident}"
 )
-# hAMRonization normalises a backend's own report into a 35-field schema shared across tools. The
-# versions are passed explicitly rather than let it guess: it has no way to know which AMRFinderPlus
-# database produced a report handed to it on disk, and "which database version" is one of Cao et
-# al.'s L1 validity requirements rather than metadata.
+# hAMRonization converts a backend's report into a 35-field schema shared across tools. Versions
+# are passed explicitly because it cannot tell which database produced a report on disk, and the
+# database version is one of Cao et al.'s L1 validity requirements.
 #
-# Worth running even with one backend. It is what makes a second one additive instead of producing a
-# second incomparable table, and it maps every call onto a shared vocabulary - so a gene found by
-# AMRFinderPlus and by RGI is recognisably one gene rather than two findings.
+# Run even with one backend, so a second backend's calls share the schema and a gene found by both
+# AMRFinderPlus and RGI can be matched.
 HAMRONIZE = (
     "hamronize amrfinderplus --analysis_software_version {tool_version}"
     " --reference_database_version {db_version} --input_file_name {genome}"
     " --format tsv --output {out} {report}"
 )
-# RGI, the opt-in second backend. `--local` keeps CARD in a directory this run owns rather than
-# writing into the conda env, so two runs with two CARD versions do not overwrite each other's
-# database - which matters because the version is what dates the calls.
+# RGI, the optional second backend. `--local` keeps CARD in a directory owned by this run instead
+# of the conda env, so runs with different CARD versions do not overwrite each other.
 #
-# -t contig because the input is assembled sequence: RGI then calls genes with Prodigal itself and
-# reports contig coordinates, which is what the context classification needs. -a DIAMOND rather than
-# BLAST for the same reason the rest of the pipeline prefers it on protein search: same calls,
-# minutes instead of hours. --clean removes the intermediate files, which are large and which
-# nothing here reads.
+# -t contig: the input is assembled sequence, so RGI calls genes with Prodigal and reports contig
+# coordinates for the context classification. -a DIAMOND: same calls as BLAST in minutes instead of
+# hours. --clean removes large intermediate files that are not used.
 RGI_LOAD = "rgi load --card_json {card_json} --local"
 RGI_MAIN = "rgi main --local -i {genome} -o {prefix} -t contig -a DIAMOND -n {threads} --clean"
-# hAMRonization again, for RGI's own schema. Passed the CARD version rather than letting it guess:
-# it has no way to know which CARD produced a table handed to it on disk.
+# hAMRonization for RGI's schema, with the CARD version passed explicitly.
 HAMRONIZE_RGI = (
     "hamronize rgi --analysis_software_version {tool_version}"
     " --reference_database_version {db_version} --input_file_name {genome}"
     " --format tsv --output {out} {report}"
 )
-# argNorm maps every normalised call onto an ARO term and onto the drugs that term confers
-# resistance to. That is the second half of what makes a cross-tool table useful: hAMRonization makes
-# the *columns* comparable, argNorm makes the *gene names* comparable, since one gene has a different
-# symbol in every database. It also turns a gene list into something a reader can act on - "cepA"
-# means little, "confers resistance to cephalosporin" is the finding.
+# argNorm maps each normalised call to an ARO term and the drugs it confers resistance to.
+# hAMRonization makes the columns comparable across tools; argNorm makes the gene names comparable,
+# since each database uses its own symbols, and adds the drug classes.
 #
-# No --hamronization_skip_unsupported_tool: that flag downgrades an unsupported backend from an error
-# to a warning, and a silently unmapped backend is exactly what this step exists to prevent. If a
-# future backend is unsupported, failing here is the right outcome - the primary tables are already
-# written by this point.
+# No --hamronization_skip_unsupported_tool: it turns an unsupported backend into a warning and
+# leaves its calls unmapped. An unsupported backend should fail here; the primary tables are already
+# written by then.
 ARGNORM = "argnorm hamronization -i {input} -o {output}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
 #: Resistance and stress calls.
 AMR_TABLE = "amr" + TSV_SUFFIX
-#: Virulence calls, deliberately a separate file.
+#: Virulence calls, kept in a separate file.
 VIRULENCE_TABLE = "virulence" + TSV_SUFFIX
-#: The same calls in hAMRonization's cross-tool schema, for anyone combining this with another
-#: pipeline's resistome output.
+#: The same calls in hAMRonization's cross-tool schema, for combining with other resistome output.
 HARMONISED_TABLE = "amr_hamronized" + TSV_SUFFIX
 #: The hAMRonization table with every gene mapped onto an ARO term and the drugs it confers
 #: resistance to.
 NORMALISED_TABLE = "amr_normalised" + TSV_SUFFIX
-#: Co-located calls grouped into the unit that actually moves.
+#: Co-located calls grouped into clusters on one contig.
 CLUSTERS_TABLE = "amr_clusters" + TSV_SUFFIX
-#: Where RGI's own per-genome reports are kept, for the same reason AMRFinderPlus' are.
+#: Directory for RGI's raw per-genome reports.
 RGI_DIR = "rgi_reports"
-#: Where the raw per-genome AMRFinderPlus reports are kept, because a derived table should never be
-#: the only copy of a tool's own output.
+#: Directory for the raw per-genome AMRFinderPlus reports, kept alongside the derived tables.
 REPORTS_DIR = "amrfinder_reports"
 #: Columns of CLUSTERS_TABLE.
 CLUSTER_COLUMNS = (
@@ -158,27 +144,27 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--db",
         help="path to the AMRFinderPlus database (default: AMRFINDER_DB from metawrap2.toml). "
-        "Point it at a dated release rather than 'latest' if you want the run to stay reproducible",
+        "Use a dated release instead of 'latest' for a reproducible run",
     )
     p.add_argument(
         "--organism",
         help="AMRFinderPlus organism for point-mutation screening and common-protein suppression "
-        "(e.g. Escherichia). Only meaningful for a bin you have already classified",
+        "(e.g. Escherichia). Use it only for a bin that is already classified",
     )
     p.add_argument(
         "--min-identity",
         type=float,
         default=None,
         metavar="FRACTION",
-        help="minimum identity to the reference, 0-1. Default: AMRFinderPlus' own curated per-gene "
-        "thresholds, which is the better choice - a single global cutoff replaces 7000 curated ones",
+        help="minimum identity to the reference, 0-1. Default: AMRFinderPlus' curated per-gene "
+        "thresholds. A single global cutoff replaces about 7000 curated ones",
     )
     p.add_argument(
         "--rgi",
         action="store_true",
         help="also call resistance with RGI against CARD (needs `metawrap2 install-env rgi` and "
-        "`install-db card`). The two backends disagree, and which genes they disagree about is the "
-        "useful part; every row says which tool found it",
+        "`install-db card`). The two backends call different genes; every row says which tool "
+        "found it",
     )
     p.add_argument(
         "--card-db",
@@ -188,23 +174,22 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument(
         "--skip-amrfinder",
         action="store_true",
-        help="run only the backends selected by flags. With --rgi that means RGI alone, which is a "
-        "narrower screen: AMRFinderPlus is the only backend here that also reports virulence and "
-        "stress genes",
+        help="run only the backends selected by flags. With --rgi that means RGI alone, which "
+        "reports no virulence or stress genes (only AMRFinderPlus reports them)",
     )
     p.add_argument(
         "--mobile-elements",
         metavar="DIR",
         help="a `metawrap2 viruses` output directory, or a geNomad run directory, to take mobile "
         "elements from. Without it every call's context is `context_unknown` and no call can reach "
-        "evidence level L2 - which is accurate, since nothing looked",
+        "evidence level L2",
     )
     p.add_argument(
         "--skip-hamronize",
         action="store_true",
-        help="do not write the hAMRonization-normalised table. It is what makes this output "
-        "comparable with another tool's resistome, so skipping it is a size decision rather than a "
-        "quality one",
+        help="do not write the hAMRonization-normalised table, which makes this output "
+        "comparable with other tools' resistome tables. Skipping it saves space and does not "
+        "change the calls",
     )
     p.add_argument(
         "--mobility-window",
@@ -212,8 +197,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=_amr.MOBILITY_WINDOW,
         metavar="BP",
         help="how far from a gene to look for a mobile element, and how much flanking sequence a "
-        "'nothing nearby' verdict requires (default: %(default)s). There is no field-wide standard "
-        "for this, so it is recorded in every row",
+        "'nothing nearby' call requires (default: %(default)s). There is no standard value, so it "
+        "is recorded in every row",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
     return p.parse_args(argv)
@@ -228,7 +213,7 @@ def _inputs(args) -> List[Tuple[str, str]]:
 
 
 def _contig_lengths(path: str) -> Dict[str, int]:
-    """Contig lengths, which are what make a context claim checkable."""
+    """Contig lengths by contig id, used for distance to contig end."""
     return {contig_id(header): len(seq) for header, seq in iter_fasta(path)}
 
 
@@ -245,8 +230,8 @@ def _database(args, settings) -> str:
 def _database_version(db: str) -> str:
     """The dated release string, from the database directory itself.
 
-    Read rather than asked of the tool, because the tool reports the version of whatever it resolves
-    'latest' to at run time, and that is not necessarily the directory a rerun will see.
+    Read from the directory, because the tool reports whatever 'latest' resolves to at run time,
+    which a rerun may not see.
     """
     for candidate in (
         os.path.join(db, "version.txt"),
@@ -269,9 +254,8 @@ def env_for_rgi(args):
 def _tool_version(env: Optional[str], executable: str) -> Optional[str]:
     """A tool's version string, read from inside *env* rather than from PATH.
 
-    The same rule as :func:`_amrfinder_version`, for the same reason: a version read off PATH can
-    belong to a different installation than the one that produced the calls, and it goes into the
-    normalised table as provenance.
+    As in :func:`_amrfinder_version`: a version found on PATH may come from a different
+    installation than the one that made the calls, and it is recorded as provenance.
     """
     prefix = env_prefix(env) if env else None
     binary = os.path.join(prefix, "bin", executable) if prefix else executable
@@ -291,10 +275,9 @@ def _tool_version(env: Optional[str], executable: str) -> Optional[str]:
 def _hamronize(args, env, version: str, todo: List[Tuple[str, str]]) -> List[_amr.NormalisedCall]:
     """Normalise every per-genome report into one hAMRonization table.
 
-    hamronize takes one report at a time and each invocation writes a full header, so the per-genome
-    outputs are concatenated with only the first header kept. Doing it here rather than asking
-    hamronize for a combined run keeps the genome column - its ``input_file_name`` - meaningful: a
-    combined run would name the file it was handed, which for a bin set is not the genome.
+    hamronize takes one report per call and writes a header each time, so the outputs are
+    concatenated keeping the first header. Running per genome keeps ``input_file_name`` set to the
+    genome name.
     """
     reports = os.path.join(args.output, REPORTS_DIR)
     pieces: List[str] = []
@@ -357,12 +340,10 @@ def _hamronize(args, env, version: str, todo: List[Tuple[str, str]]) -> List[_am
     _concatenate(pieces, out_path)
     comm("hAMRonization schema -> %s" % out_path)
 
-    # argNorm is given the AMRFinderPlus rows only. It refuses a hAMRonization table containing a
-    # tool it cannot map - "argNorm can only map genes from the following tools: argsoap, deeparg,
-    # resfinder, amrfinderplus, groot, abricate" - and raises on the whole file, so passing the
-    # combined table produced no normalised output at all once --rgi was used. RGI loses nothing by
-    # being left out: its calls are made against CARD, so they already carry their ARO accession,
-    # which `amr.tsv` reports in the `aro` column.
+    # argNorm gets the AMRFinderPlus rows only. It rejects the whole file if it contains a tool it
+    # cannot map ("argNorm can only map genes from the following tools: argsoap, deeparg, resfinder,
+    # amrfinderplus, groot, abricate"), so with --rgi it produced no output. RGI calls are made
+    # against CARD and already have an ARO accession (the `aro` column of `amr.tsv`).
     mappable = [piece for piece in pieces if "hamronized_rgi_" not in os.path.basename(piece)]
     if not mappable:
         comm(
@@ -391,8 +372,7 @@ def _concatenate(pieces: List[str], out_path: str) -> None:
 def _argnorm(args, env, harmonised: str) -> List[_amr.NormalisedCall]:
     """Map every normalised call onto an ARO term, and report which drugs are implicated.
 
-    A second pass over a table that already exists, so a failure here must not cost the tables
-    already written - hence check=False and a warning rather than an error.
+    Runs with check=False and warns on failure, so the tables already written are kept.
     """
     out_path = os.path.join(args.output, NORMALISED_TABLE)
     rc = run(
@@ -404,7 +384,7 @@ def _argnorm(args, env, harmonised: str) -> List[_amr.NormalisedCall]:
     if rc != 0 or not os.path.isfile(out_path):
         warning(
             "argnorm failed, so the calls are not mapped onto ARO terms. %s is still written and "
-            "is still comparable with another tool's hAMRonization output" % HARMONISED_TABLE
+            "can be compared with other tools' hAMRonization output" % HARMONISED_TABLE
         )
         return []
     rows = _amr.parse_argnorm(out_path)
@@ -412,9 +392,8 @@ def _argnorm(args, env, harmonised: str) -> List[_amr.NormalisedCall]:
     comm("%d of %d call(s) mapped to an ARO term -> %s" % (len(mapped), len(rows), out_path))
     drugs = _amr.drugs_implicated(rows)
     if drugs:
-        # One line for the drugs and one per gene, rather than a line per gene-drug pair. A single
-        # gene can confer resistance to nine aminoglycosides, and printing nine lines for it reads
-        # as nine findings.
+        # One line for all drugs, then one per gene, not one per gene-drug pair: a single gene can
+        # cover nine aminoglycosides.
         comm(
             "%d drug(s) implicated: %s%s"
             % (
@@ -432,8 +411,8 @@ def _argnorm(args, env, harmonised: str) -> List[_amr.NormalisedCall]:
         comm("  ... and %d more in the table" % (len(mapped) - 10))
     if len(mapped) < len(rows):
         comm(
-            "an unmapped call is not a false one: argNorm maps what the ontology holds, and a "
-            "recently described gene can be absent from it"
+            "unmapped calls are not false calls: argNorm only maps genes in the ontology, and "
+            "recently described genes may be missing from it"
         )
     return rows
 
@@ -441,16 +420,11 @@ def _argnorm(args, env, harmonised: str) -> List[_amr.NormalisedCall]:
 def _amrfinder_version(env: Optional[str]) -> Optional[str]:
     """AMRFinderPlus' own version, for the provenance hAMRonization records.
 
-    Asked of the tool rather than hard-coded: the env is pinned to a range, so the version in a
-    given install is whatever that range resolved to, and recording the wrong one makes the
-    normalised table claim provenance it does not have.
+    Queried from the tool, because the env pins a version range and the installed version varies.
 
-    Run from inside the env's own bin directory, not from PATH. A bare
-    ``subprocess.run(["amrfinder", ...])`` reads whatever is on PATH, which is the mistake `check`
-    was making - it reported a tool present because the user had it installed system-wide while the
-    run used a conda env that did not. Here it would be quieter and worse: the normalised table
-    would record a version number from a different installation than the one that produced the
-    calls.
+    Runs the binary in the env's bin directory, not from PATH, which may hold a different
+    installation (as happened with `check`, which found a system-wide copy while the run used an
+    env without it). A PATH lookup would record the wrong version in the normalised table.
     """
     executable = "amrfinder"
     if env:
@@ -476,10 +450,9 @@ def _amrfinder_version(env: Optional[str]) -> Optional[str]:
 def _run_rgi(args, settings, todo: List[Tuple[str, str]]) -> List[_amr.ArgCall]:
     """Screen every genome with RGI against CARD, and return its calls.
 
-    CARD is loaded once into a localDB this run owns, not into the conda environment: two runs
-    against two CARD versions would otherwise overwrite each other's database, and the version is
-    what dates the calls. RGI is run from that directory because `--local` looks for localDB in the
-    working directory.
+    CARD is loaded once into a localDB owned by this run, not into the conda environment, so runs
+    with different CARD versions do not overwrite each other. RGI runs from that directory because
+    `--local` looks for localDB in the working directory.
     """
     card = args.card_db or settings.db("CARD_DB")
     if not card:
@@ -506,7 +479,7 @@ def _run_rgi(args, settings, todo: List[Tuple[str, str]]) -> List[_amr.ArgCall]:
         cwd=work,
     )
     if rc != 0:
-        warning("`rgi load` failed, so RGI contributes no calls; AMRFinderPlus' stand")
+        warning("`rgi load` failed, so RGI adds no calls; the AMRFinderPlus calls are kept")
         return []
 
     calls: List[_amr.ArgCall] = []
@@ -569,7 +542,7 @@ def main(argv: List[str]) -> int:
         if args.skip_amrfinder:
             comm(
                 "skipping AMRFinderPlus (--skip-amrfinder). No virulence or stress calls will be "
-                "made: it is the only backend here that reports them"
+                "made, since only AMRFinderPlus reports them"
             )
         elif ckpt.todo("amrfinder"):
             organism = " --organism %s" % args.organism if args.organism else ""
@@ -614,10 +587,8 @@ def main(argv: List[str]) -> int:
             announcement("AMR PIPELINE SUCCESSFULLY FINISHED!!!")
             return 0
 
-        # None rather than an empty list when no mobile-element caller has run: see
-        # amr.classify_context on why those are different claims. With --mobile-elements the
-        # question *was* asked, so an empty result is an empty list and can support
-        # no_mge_in_window.
+        # None when no mobile-element caller has run, and an empty list when one ran and found
+        # nothing; only the latter can support no_mge_in_window (see amr.classify_context).
         elements: Optional[List[_amr.MobileElement]] = None
         whole_contig: Dict[str, str] = {}
         if args.mobile_elements:
@@ -630,9 +601,8 @@ def main(argv: List[str]) -> int:
             if not elements and not whole_contig:
                 warning(
                     "no mobile-element calls found under %s. Every call's context stays "
-                    "`context_unknown`, which is the honest answer: nothing was found to compare "
-                    "against, and that is not the same as nothing being there"
-                    % args.mobile_elements
+                    "`context_unknown`: with no mobile elements to compare against, the run "
+                    "cannot tell whether any are nearby" % args.mobile_elements
                 )
                 elements = None
         resistance = [c for c in all_calls if not c.is_virulence]
@@ -712,9 +682,8 @@ def main(argv: List[str]) -> int:
             normalised = _hamronize(args, env, version, todo)
 
         if len({call.tool for call in all_calls}) > 1:
-            # Joined on ARO where it is known, which needs argNorm's output - hence after it. The
-            # symbol join undercounts: AMRFinderPlus' `cepA` and RGI's `CepA-29` are the same
-            # beta-lactamase at the same identity, two names and one ontology term.
+            # Joined on ARO where known (from argNorm, so this runs after it). A symbol join
+            # undercounts: AMRFinderPlus' `cepA` and RGI's `CepA-29` are one ARO term.
             aro_for = {(row.genome, row.gene.lower()): row.aro for row in normalised if row.aro}
             agreement = _amr.backend_agreement(all_calls, aro_for=aro_for)
             comm(
@@ -735,10 +704,10 @@ def main(argv: List[str]) -> int:
                         % (tool, ", ".join(only[:8]), " ..." if len(only) > 8 else "")
                     )
             comm(
-                "  disagreement is the expected result rather than a fault: the backends model "
-                "resistance differently and their thresholds are curated separately. RGI's extra "
-                "calls here are mostly Strict-tier homologs well below 50% identity, which is a "
-                "weaker claim than an exact match and is in the `method` column"
+                "  the backends are expected to disagree: they model resistance differently and "
+                "curate their thresholds separately. RGI's extra calls are mostly Strict-tier "
+                "homologs below 50% identity, a weaker match than an exact hit; the `method` "
+                "column records it"
             )
 
         counts = _amr.summarise(all_calls)

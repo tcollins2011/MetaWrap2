@@ -1,27 +1,18 @@
-"""Splitting a bin set back into per-sample bins, for multi-split binning.
+"""Split a bin set back into per-sample bins, for multi-split binning.
 
-Binning a cohort has two shapes and they are not the same experiment.
+Default cohort binning bins each assembly separately with a cross-sample depth table:
+``coverage`` concatenates the assemblies, maps every sample against the catalogue, then slices the
+depth table back per assembly, so each binning run sees N samples' coverage of its own contigs.
 
-**What MetaWrap2 does today** is bin each assembly separately while giving every run a *cross-sample*
-depth table: ``coverage`` concatenates the assemblies, maps every sample against the catalogue, then
-slices the depth table back per assembly so each binning run sees N samples' coverage of its own
-contigs. That is a real improvement over per-sample coverage and is what the cohort arms measure.
+Multi-split binning bins the catalogue itself, so the model is fitted on every sample's contigs at
+once, then splits the resulting clusters by the sample each contig came from. The split happens
+after the model instead of before it. Söding's analysis reports that splitting the embedding space
+by sample gives 19% more bins and 79% more high-quality bins than splitting the final clusters.
+Fitted on the catalogue, the model sees an organism's contigs from every sample when it clusters.
 
-**Multi-split binning** is the other shape: bin the *catalogue itself*, so the model is fitted on
-every sample's contigs at once, then split the resulting clusters by which sample each contig came
-from. The difference is where the split happens - after the model instead of before it - and the
-reported gain is large: Söding's analysis finds splitting the embedding space by sample beats
-splitting the final clusters, worth 19% more bins and 79% more high-quality bins.
-
-Why that would be: a cluster is a set of contigs the model thinks belong to one organism. Fitted on
-one sample it can only use that sample's contigs to decide; fitted on the catalogue it sees the same
-organism's contigs from ten samples and has ten times the evidence for the same decision. The split
-afterwards is bookkeeping - the clustering already happened with all of it in view.
-
-Two of the binners can do the split themselves and should be told to: VAMB takes ``-o SEP`` (the
-current code passes ``-o ''``, which is correct for a single assembly and wrong for a catalogue) and
-SemiBin2 has ``multi_easy_bin -s SEP``. The rest cannot, so this module does it for them, which is
-why the split is here as a library rather than inline in one binner's branch.
+VAMB (``-o SEP``) and SemiBin2 (``multi_easy_bin -s SEP``) can do the split themselves. The current
+code passes VAMB ``-o ''``, which is correct for a single assembly but not for a catalogue. For the
+other binners this module does the split.
 """
 
 from __future__ import annotations
@@ -34,8 +25,8 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 from .io.seqio import contig_id, iter_fasta
 
-#: The separator ``coverage`` writes between a sample label and a contig name. Shared rather than
-#: redefined so a catalogue built by one module can be split by another.
+#: The separator ``coverage`` writes between a sample label and a contig name. Defined once so a
+#: catalogue built by one module can be split by another.
 SEPARATOR = "~"
 
 
@@ -63,9 +54,8 @@ def split_contig_names(
     """Group prefixed contig names by sample label.
 
     Returns ``(label -> original contig names, names with no prefix)``. Unprefixed names are
-    returned rather than dropped or assigned somewhere: a catalogue bin containing them means the
-    catalogue was not built by ``coverage``, and guessing would attribute sequence to the wrong
-    sample.
+    returned, not dropped or assigned: they mean the catalogue was not built by ``coverage``, and
+    assigning them could attribute sequence to the wrong sample.
     """
     grouped: Dict[str, List[str]] = defaultdict(list)
     unprefixed: List[str] = []
@@ -111,9 +101,7 @@ def split_bin(
 ) -> Tuple[List[SplitBin], List[str]]:
     """Split one catalogue bin's fasta into per-sample pieces, without writing anything.
 
-    A bin whose contigs all come from one sample yields a single piece, which is the normal case for
-    a well-separated organism and is not special-cased: one code path, and the interesting case - a
-    cluster drawing contigs from several samples - is what the mode exists to produce.
+    A bin whose contigs all come from one sample yields a single piece; this is not special-cased.
     """
     per_label, unprefixed = read_split(path, separator)
     return _pieces_of(bin_name, per_label), unprefixed
@@ -128,14 +116,12 @@ def write_split_bins(
 ) -> Tuple[List[SplitBin], List[str]]:
     """Split one bin and write each piece into ``out_dir/<label>/``.
 
-    The original contig names are restored, because a piece is handed to tools that will be pointed
-    at that sample's own assembly - a bin naming catalogue contigs against an unprefixed assembly is
-    exactly the well-formed-but-wrong input that `binning`'s own checks exist to catch.
+    The original contig names are restored, because downstream tools pair a piece with that
+    sample's own (unprefixed) assembly.
 
-    *min_bp* drops pieces below a size. A multi-sample cluster often has a few kilobases from a
-    sample that barely contains the organism, and writing those as bins would inflate the bin count
-    with fragments nothing downstream can use. 0 keeps everything, which is the default: the floor
-    belongs to whatever scores the bins, not here.
+    *min_bp* drops pieces below a size, such as the few kilobases a multi-sample cluster often
+    takes from a sample that barely contains the organism. The default 0 keeps everything and
+    leaves size filtering to whatever scores the bins.
     """
     # One read of the fasta, used for both the piece summaries and the sequences written out.
     by_label, unprefixed = read_split(path, separator)
@@ -173,9 +159,8 @@ class SplitReport:
     bins_in: int
     pieces_out: int
     labels: Tuple[str, ...]
-    #: Bins whose contigs came from more than one sample. These are the ones multi-split binning
-    #: exists to produce; a run where this is zero got nothing out of the mode that per-sample
-    #: binning would not also have found.
+    #: Bins whose contigs came from more than one sample. If zero, the mode found nothing that
+    #: per-sample binning would not.
     multi_sample_bins: int
     unprefixed_contigs: int
 
@@ -187,14 +172,11 @@ class SplitReport:
 def flatten_split_bins(split_dir: str, flat_dir: str) -> int:
     """Link every per-sample piece under *split_dir* into one directory, keeping its own name.
 
-    The nested layout (`<out>/<sample>/bin_001.fasta`) is what a per-sample refinement wants, and it
-    is the wrong shape for everything that treats a bin set as one folder of FASTA files - including
-    this project's own benchmark scorer, which collects top-level `*_bins` directories and would
-    silently score the *unsplit* catalogue bins instead, reporting the split arm and its control as
-    identical.
+    The nested layout (`<out>/<sample>/bin_001.fasta`) suits per-sample refinement. Tools that treat
+    a bin set as one folder of FASTA files need the flat copy; the benchmark scorer collects
+    top-level `*_bins` directories and would otherwise score the unsplit catalogue bins.
 
-    Hard links where the filesystem allows them, so a second view of a bin set costs an inode rather
-    than a copy of the sequence.
+    Uses hard links where the filesystem allows, and copies otherwise.
     """
     if not os.path.isdir(split_dir):
         return 0
@@ -208,8 +190,7 @@ def flatten_split_bins(split_dir: str, flat_dir: str) -> int:
             if not name.endswith((".fa", ".fasta", ".fna")):
                 continue
             source = os.path.join(inner, name)
-            # The piece's own filename already carries its sample - `bin_001.sample_0.fasta` -
-            # so it is unique across samples and prefixing it again would only say it twice.
+            # The filename already carries the sample (`bin_001.sample_0.fasta`), so it is unique.
             dest = os.path.join(flat_dir, name)
             if os.path.exists(dest):
                 continue

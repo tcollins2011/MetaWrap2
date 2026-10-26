@@ -1,9 +1,7 @@
 """A database key whose value names a file, not a directory holding files.
 
-Every check of a configured database asked "is this a directory". GUNC takes ``--db_file`` and nothing
-else, so install-db correctly points GUNC_DB at the ``.dmnd`` itself - which meant the one database
-whose correct value cannot be a directory was reported as missing for as long as it existed, in
-`doctor` and anywhere else that described a database.
+Database checks only accepted directories. GUNC takes ``--db_file``, so install-db points GUNC_DB at
+the ``.dmnd`` file, and `doctor` and other database reports showed it as missing.
 """
 
 from __future__ import annotations
@@ -19,12 +17,12 @@ def test_a_file_valued_database_pointing_at_a_file_is_usable(tmp_path):
     assert described["files"] == 1
     assert described["key_file_bytes"] == db.stat().st_size
 
-    # The mistake worth catching is the opposite one: GUNC cannot be given a folder.
+    # GUNC_DB pointing at a folder is reported.
     described = dbcheck.describe(str(tmp_path), "GUNC_DB")
     assert described["status"] == dbcheck.MISSING
     assert described["problem"] == "not a file"
 
-    # The change must not have loosened the rule for every other key.
+    # Other keys still require a directory.
     described = dbcheck.describe(str(db), "CHECKM_DB")
     assert described["status"] == dbcheck.MISSING
     assert described["problem"] == "not a directory"

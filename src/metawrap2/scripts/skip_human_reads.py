@@ -1,7 +1,7 @@
-"""Filter bmtagger-flagged host reads OUT of a FASTQ file (keep the non-host reads).
+"""Remove bmtagger-flagged host reads from a FASTQ file and keep the non-host reads.
 
 Ported from metaWRAP's ``skip_human_reads.py``. Given the bmtagger read-id list and the
-original FASTQ, every read whose id is *not* in the list is written out. Reading is
+original FASTQ, every read whose id is not in the list is written out. Reading is
 gz-transparent via :mod:`metawrap2.io.seqio`.
 
 Run standalone (``python -m metawrap2.scripts.skip_human_reads list.txt reads.fastq``) or

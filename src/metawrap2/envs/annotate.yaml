@@ -1,7 +1,6 @@
 # Gene calling and annotation: Prokka (default) and Bakta.
 #
-# One env: they do the same job and solve together, so choosing between them with --bakta needs no
-# second install.
+# One env: they do the same job and solve together, so --bakta needs no second install.
 name: metawrap2-annotate
 channels:
   - conda-forge
@@ -9,14 +8,13 @@ channels:
 dependencies:
   - prokka >=1.14
   - bakta >=1.9
-  # CAZyme families (`annotate --cazy`). It lives here rather than in its own env because it reads
-  # the proteins this module has already called - the alternative is dbCAN calling its own genes,
-  # and two gene sets over one genome cannot be joined. It solves with prokka and bakta unchanged;
-  # its 7.4 GB database is a separate, explicit download (`metawrap2 install-db dbcan`).
+  # CAZyme families (`annotate --cazy`). Here because it reads the proteins this module has
+  # already called; if dbCAN called its own genes, the two gene sets could not be joined. It solves
+  # with prokka and bakta unchanged; its 7.4 GB database is a separate download
+  # (`metawrap2 install-db dbcan`).
   - dbcan >=5.2
-  # Biosynthetic gene clusters (`annotate --bgc`). GECCO rather than antiSMASH: it is a CRF over
-  # Pyrodigal genes and PyHMMER domains - the two libraries this package already uses in-process -
-  # needs no database at all, and runs in minutes per genome against antiSMASH's tens of minutes
-  # and ~10 GB install. antiSMASH is still the tool to reach for when a cluster is the result
-  # rather than a count; this is what makes counting clusters across 200 MAGs affordable.
+  # Biosynthetic gene clusters (`annotate --bgc`). GECCO instead of antiSMASH: a CRF over Pyrodigal
+  # genes and PyHMMER domains (both already used in-process), no database, and minutes per genome
+  # against antiSMASH's tens of minutes and ~10 GB install. antiSMASH remains the tool for studying
+  # individual clusters; GECCO makes counting clusters across 200 MAGs affordable.
   - gecco >=0.10

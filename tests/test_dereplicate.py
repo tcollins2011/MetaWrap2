@@ -1,8 +1,7 @@
-"""Tests for the dereplicate module's clustering, which is the part that decides the catalogue.
+"""Tests for the dereplicate module's clustering.
 
-skani is a black box here on purpose: everything that turns its table into a set of representative
-genomes is a pure function, so what is asserted is the thing that can be got wrong - which genomes
-end up collapsed, and which copy of a duplicated genome is the one kept.
+skani is stubbed out. The tests check which genomes are collapsed together and which copy of a
+duplicated genome is kept.
 """
 
 import os
@@ -37,16 +36,16 @@ def _stats(path, rows):
 
 
 def test_the_larger_aligned_fraction_decides():
-    """A half-complete bin aligns fully to its complete neighbour; the neighbour does not to it.
+    """Clustering uses the larger of the two aligned fractions.
 
-    Taking the smaller of the two fractions would refuse to collapse exactly the duplicates this
-    module exists for, so the rule is the larger.
+    A half-complete bin aligns fully to its complete neighbour, but not the reverse; the smaller
+    fraction would keep these duplicates apart.
     """
     edges = [_edge("partial", "complete", 99.0, af_ref=98.0, af_query=51.0)]
     assert dereplicate.cluster_genomes(
         ["partial", "complete"], edges, min_aligned_fraction=90.0
     ) == [["partial", "complete"]]
-    # But 99% ANI over 5% of a genome is a shared prophage, not the same organism.
+    # 99% ANI over 5% of a genome (for example a shared prophage) does not cluster.
     edges = [_edge("a", "b", 99.0, af_ref=5.0, af_query=4.0)]
     assert dereplicate.cluster_genomes(["a", "b"], edges, min_aligned_fraction=10.0) == [
         ["a"],
@@ -58,12 +57,12 @@ def test_the_larger_aligned_fraction_decides():
 
 
 def test_the_catalogue_keeps_one_genome_per_cluster(tmp_path, monkeypatch):
-    """End to end over a fake skani table: two samples sharing one genome give three genomes."""
+    """With a fake skani table, three bins, one shared between samples, give two genomes."""
     a = _bins(tmp_path, "sampleA_bins", {"bin_001": 4000, "bin_002": 400})
     b = _bins(tmp_path, "sampleB_bins", {"bin_001": 4000})
     _stats(b, {"bin_001": (95.0, 1.0)})
     out = str(tmp_path / "out")
-    # No conda env, so the test does not need mamba to be on PATH; skani is stubbed anyway.
+    # No conda env, so the test does not need mamba on PATH.
     config = tmp_path / "mw2.toml"
     config.write_text("[settings]\nuse_conda_envs = false\n")
 
@@ -86,11 +85,11 @@ def test_the_catalogue_keeps_one_genome_per_cluster(tmp_path, monkeypatch):
     assert dereplicate.main(argv) == 0
 
     kept = sorted(os.listdir(os.path.join(out, dereplicate.CATALOGUE_DIR)))
-    # The scored copy of the shared genome, not sample A's unscored one.
+    # The shared genome is kept from sample B, which has CheckM scores.
     assert kept == ["sampleA_bins__bin_002.fasta", "sampleB_bins__bin_001.fasta"]
 
     with open(os.path.join(out, dereplicate.CLUSTERS_TABLE)) as fh:
         rows = fh.read().splitlines()
     assert rows[0].split("\t") == list(dereplicate.CLUSTER_COLUMNS)
-    # Every input bin is accounted for, not just the ones that were kept.
+    # Header plus one row per input bin, kept or not.
     assert len(rows) == 4

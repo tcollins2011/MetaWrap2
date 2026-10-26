@@ -1,18 +1,15 @@
-"""Bracken's table, and the four ways an abundance estimate here stops being one.
+"""Tests for reading Bracken tables and the guards around them.
 
-Fixtures are real Bracken 3.0.1 output over hand-written inputs; see
-``tests/fixtures/bracken/SOURCE.md`` for exactly which file came from where. What is tested:
+Fixtures are Bracken 3.0.1 output over hand-written inputs; see
+``tests/fixtures/bracken/SOURCE.md`` for the source of each file. Checked:
 
-* **The column layout**, which Bracken's documentation describes in prose without naming, and the
-  fact that ``fraction_total_reads`` is a fraction in 0-1 rather than a percentage. Established from
-  the one line of ``est_abundance.py`` that writes the header and the one that writes the value;
-  three other tools' tables have already cost this project a percentage-for-fraction confusion.
-* **A rank mismatch**, because ``--resume`` over a directory whose tables were written at a
-  different ``--bracken-rank`` is how a genus table gets read as a species table.
-* **A read-length mismatch**, which Bracken reports and then exits 0 on, so it has to be caught
-  before the call rather than after it.
-* **Redistributing nothing**, which is what a database built from a different Kraken2 database looks
-  like, and which is invisible in every column of the output except ``added_reads``.
+* **Column layout**, taken from ``est_abundance.py`` (the documentation does not name the
+  columns), and that ``fraction_total_reads`` is a fraction in 0-1, not a percentage.
+* **Rank mismatch**: ``--resume`` over tables written at a different ``--bracken-rank`` would read
+  a genus table as a species table.
+* **Read-length mismatch**: Bracken reports it but exits 0, so it is checked before the call.
+* **No redistribution**: a Bracken database built from a different Kraken2 database shows only
+  as ``added_reads`` of 0.
 """
 
 from __future__ import annotations
@@ -53,16 +50,14 @@ def test_column_layout_is_brackens_own():
     assert pneumoniae.kraken_assigned_reads == 150
     assert pneumoniae.added_reads == 151
     assert pneumoniae.new_est_reads == 301
-    # added_reads is what Bracken wrote, and it agrees with the arithmetic it claims.
+    # added_reads as written by Bracken equals new_est_reads - kraken_assigned_reads.
     assert pneumoniae.added_reads == pneumoniae.new_est_reads - pneumoniae.kraken_assigned_reads
 
 
 def test_the_correction_is_large_which_is_why_the_module_exists():
-    """150 of 1,000 reads at its own node, 301 estimated: the species count was off by 2x.
+    """150 of 1,000 reads assigned at the node, 301 estimated: Bracken doubles the species count.
 
-    Kept as an assertion rather than a comment because it is the entire justification for the
-    feature. If a change ever makes the parser read `kraken_assigned_reads` into the abundance
-    column, every number stays plausible and only this ratio moves.
+    Fails if the parser reads `kraken_assigned_reads` into the abundance column.
     """
     rows = br.read_table(fixture("sample1_species.bracken"))
     pneumoniae = next(row for row in rows if row.taxonomy_id == 1313)
@@ -73,9 +68,9 @@ def test_the_correction_is_large_which_is_why_the_module_exists():
 
 
 def test_a_taxon_below_the_threshold_is_absent_not_zero():
-    """S. mutans has a row in sample 1 and none in sample 2, so the two tables differ in length.
+    """S. mutans has a row in sample 1 and none in sample 2, so the tables differ in length.
 
-    A consumer that assumes every sample lists the same taxa in the same order mis-aligns them.
+    Consumers must not assume every sample lists the same taxa in the same order.
     """
     sample1 = {row.name for row in br.read_table(fixture("sample1_species.bracken"))}
     sample2 = {row.name for row in br.read_table(fixture("sample2_species.bracken"))}
@@ -87,25 +82,23 @@ def test_a_taxon_below_the_threshold_is_absent_not_zero():
 
 
 def test_fraction_total_reads_is_a_fraction_in_0_to_1():
-    """Verified in est_abundance.py: it writes new_est_reads / sum_all_reads at five decimals.
+    """est_abundance.py writes new_est_reads / sum_all_reads at five decimals.
 
-    So the column sums to 1 across one sample's table, not to 100. The 0.99894 here is the rounding
-    loss from those five decimals, which is why the parser's tolerance is a band rather than a
-    comparison against exactly 1.
+    The column sums to about 1 per sample, not 100. The 0.99894 here is rounding loss, so the
+    parser checks a range instead of exactly 1.
     """
     rows = br.read_table(fixture("sample1_species.bracken"))
     total = sum(row.fraction_total_reads for row in rows)
     assert total == pytest.approx(0.99894)
     assert all(0.0 <= row.fraction_total_reads <= 1.0 for row in rows)
-    # And the unit travels with the data rather than living in documentation.
+    # The unit is recorded with the data.
     assert br.FRACTION_UNIT == "fraction_total_reads"
 
 
 def test_a_percentage_column_is_refused_rather_than_scaled():
-    """The same table with the last column x100. Nothing may guess a unit it can look up.
+    """The same table with the last column x100 raises instead of being rescaled.
 
-    Guessing is what makes this class of bug expensive: a percentage silently treated as a fraction
-    makes every abundance 100x too large, and the magnitudes of a typical row make it look fine.
+    Treated as a fraction, a percentage would make every abundance 100x too large.
     """
     with pytest.raises(br.BrackenError) as caught:
         br.read_table(fixture("percent_not_fraction.bracken"))
@@ -115,7 +108,7 @@ def test_a_percentage_column_is_refused_rather_than_scaled():
 
 
 def test_the_minus_w_report_is_not_mistaken_for_the_table():
-    """Bracken's two outputs look alike and are not. The header is checked, not assumed."""
+    """Bracken's -w report is rejected by its header."""
     with pytest.raises(br.BrackenError) as caught:
         br.read_table(fixture("sample1_bracken_outreport.kreport"))
     assert "-w report" in str(caught.value)
@@ -125,7 +118,7 @@ def test_the_minus_w_report_is_not_mistaken_for_the_table():
 
 
 def test_rank_mismatch_raises_and_says_both_ranks():
-    """A genus table read as a species table. The message has to name what it found and wanted."""
+    """A genus table read as species raises, naming both ranks and the file."""
     rows = br.read_table(fixture("sample1_genus.bracken"))
     assert [row.taxonomy_lvl for row in rows] == ["G", "G"]
 
@@ -145,7 +138,7 @@ def test_an_unknown_rank_is_rejected_with_the_list_of_real_ones():
     message = str(caught.value)
     assert "D,P,C,O,F,G,S" in message
     assert "S=species" in message
-    # Case and whitespace are normalised rather than rejected; the letter is what matters.
+    # Case and whitespace are normalised.
     assert br.check_rank(" s ") == "S"
 
 
@@ -166,10 +159,10 @@ def _database(tmp_path, *read_lengths, kmer_length=None):
 
 
 def test_read_length_mismatch_is_reported_with_what_the_database_has(tmp_path):
-    """The lengths the standard Kraken2 database actually ships, and a request for one it does not.
+    """A read length the database has no distribution for is reported, with the lengths it has.
 
-    Reported rather than raised: the caller is a module that wants to say which sample it happened
-    on. Bracken prints the same complaint itself and then exits 0, so this must run before the call.
+    Uses the lengths shipped with the standard Kraken2 database. Returned instead of raised so the
+    caller can name the sample. Bracken itself exits 0 in this case, so the check runs first.
     """
     db = _database(tmp_path, 50, 75, 100, 150, 200, 250, 300)
     assert br.available_read_lengths(db) == [50, 75, 100, 150, 200, 250, 300]
@@ -184,7 +177,7 @@ def test_read_length_mismatch_is_reported_with_what_the_database_has(tmp_path):
 
 
 def test_a_database_with_no_distributions_is_a_different_failure(tmp_path):
-    """Never built, versus built for other lengths. One is a missing step, the other a wrong flag."""
+    """A database with no distributions, or a missing path, gives a different message."""
     db = _database(tmp_path)
     problem = br.check_read_length(db, 100)
     assert problem is not None
@@ -196,7 +189,7 @@ def test_a_database_with_no_distributions_is_a_different_failure(tmp_path):
 
 
 def test_a_read_shorter_than_the_databases_k_is_rejected_first(tmp_path):
-    """A 25 bp read against k=35 yields no complete k-mer, so it cannot be classified at all."""
+    """A 25 bp read with k=35 has no complete k-mer, so it is rejected."""
     db = _database(tmp_path, 25, 100, kmer_length=35)
     assert br.database_kmer_length(db) == 35
     problem = br.check_read_length(db, 25)
@@ -209,10 +202,9 @@ def test_a_read_shorter_than_the_databases_k_is_rejected_first(tmp_path):
 
 
 def test_a_mismatched_database_redistributes_nothing_and_is_caught():
-    """added_reads is 0 on every row while the fractions still sum to exactly 1.
+    """added_reads is 0 on every row while the fractions sum to 1, and this is flagged.
 
-    This is the quiet failure the guard exists for: the table is complete, the fractions are
-    well-formed, and the numbers are just Kraken2's assigned counts renormalised.
+    The table is well-formed but holds only Kraken2's assigned counts, renormalised.
     """
     rows = br.read_table(fixture("sample1_mismatched_db.bracken"))
     assert all(row.added_reads == 0 for row in rows)
@@ -226,7 +218,7 @@ def test_a_mismatched_database_redistributes_nothing_and_is_caught():
     assert summary.suspicious
     problem = br.check_redistribution(summary)
     assert problem is not None
-    assert "Almost nothing was redistributed" in problem
+    assert "Almost no reads were redistributed" in problem
     assert "built from a different Kraken2 database" in problem
 
 
@@ -242,10 +234,7 @@ def test_a_matched_database_is_not_flagged():
 
 
 def test_nothing_to_move_is_not_a_failure():
-    """A sample classified cleanly at the rank has nothing above it, and a 0% share is correct.
-
-    Without this the guard would fire on exactly the samples Bracken was least needed for.
-    """
+    """A sample with no reads above the rank is not flagged."""
     rows = br.read_table(fixture("sample1_mismatched_db.bracken"))
     summary = br.redistribution(rows, "S", movable=0)
     assert not summary.suspicious
@@ -253,9 +242,9 @@ def test_nothing_to_move_is_not_a_failure():
 
 
 def test_unclassified_reads_are_not_counted_as_movable():
-    """The report's 50 unclassified reads are absent from the 450. Bracken cannot place them."""
+    """The report's 50 unclassified reads are not counted in the 450 movable reads."""
     assert br.reads_above_rank(fixture("sample1.kreport"), "S") == 450
-    # At genus, the genus nodes' own reads are no longer above the rank, so only the phyla remain.
+    # At genus, the genus nodes' reads are at the rank, so only the phyla's reads remain.
     assert br.reads_above_rank(fixture("sample1.kreport"), "G") == 150
 
 
@@ -263,11 +252,8 @@ def test_unclassified_reads_are_not_counted_as_movable():
 
 
 def test_long_table_has_the_same_shape_as_the_rest_of_the_pipeline(tmp_path):
-    """sample, feature, value, unit - the four columns `catalogue` writes and `diff_abundance` reads.
-
-    Checked as a header equality rather than a description, because the whole value of matching is
-    that no conversion step stands between this module and the statistics one.
-    """
+    """The long table has `catalogue`'s columns (sample, feature, value, unit), which
+    `diff_abundance` reads without conversion."""
     assert br.LONG_COLUMNS == ("sample", "feature", "value", "unit")
 
     per_sample = {
@@ -285,30 +271,29 @@ def test_long_table_has_the_same_shape_as_the_rest_of_the_pipeline(tmp_path):
     rows = [line.split("\t") for line in lines[1:]]
     assert {row[0] for row in rows} == {"sample1", "sample2"}
     assert {row[3] for row in rows} == {"fraction_total_reads"}
-    # The feature is the taxon name, which is what diff_abundance reports back to the user.
+    # The feature is the taxon name, as reported by diff_abundance.
     assert ("sample1", "Escherichia coli") in {(row[0], row[1]) for row in rows}
-    # Values are the fractions, unscaled, and still fractions on the way out.
+    # Values are the unscaled fractions.
     assert all(0.0 < float(row[2]) <= 1.0 for row in rows)
 
 
 def test_long_table_is_byte_stable_across_runs(tmp_path):
-    """A table that reorders itself cannot be diffed, which is how a changed number gets missed."""
+    """The long table is byte-identical across runs, so it can be diffed."""
     per_sample = {"s1": br.read_table(fixture("sample1_species.bracken"))}
     first = tmp_path / "a.tsv"
     second = tmp_path / "b.tsv"
     br.write_long_table(str(first), per_sample)
     br.write_long_table(str(second), dict(per_sample))
     assert first.read_bytes() == second.read_bytes()
-    # Descending by estimate, so the most abundant taxon is the first row a reader sees.
+    # Sorted by descending estimate.
     names = [line.split("\t")[1] for line in first.read_text().splitlines()[1:]]
     assert names == ["Escherichia coli", "Streptococcus pneumoniae", "Streptococcus mutans"]
 
 
 def test_the_read_count_unit_is_available_and_labelled():
-    """Counts rather than fractions, for a caller that wants them - but never silently.
+    """Read counts can be written instead of fractions, labelled on every row.
 
-    The unit is on every row either way; that is the point of having two named units instead of a
-    boolean, and of the writer refusing a unit it does not produce.
+    An unknown unit is rejected.
     """
     rows = br.read_table(fixture("sample1_species.bracken"))
     counts = br.long_rows("s1", rows, br.READS_UNIT)
@@ -317,7 +302,7 @@ def test_the_read_count_unit_is_available_and_labelled():
 
     with pytest.raises(br.BrackenError) as caught:
         br.long_rows("s1", rows, "percent")
-    assert "not one this writer produces" in str(caught.value)
+    assert "is not supported; expected" in str(caught.value)
 
 
 # ── the module's command and flags ────────────────────────────────────────────────────────────
@@ -337,22 +322,20 @@ def test_bracken_command_template_formats_cleanly():
     )
     assert "{" not in cmd
     assert cmd.startswith("bracken -d /db")
-    # -i takes the aggregated report, never the per-read --output file; Bracken exits 1 on the latter.
+    # -i takes the aggregated report, not the per-read --output file (Bracken exits 1 on that).
     assert "-i s.kreport" in cmd
     assert "-r 150" in cmd and "-l S" in cmd and "-t 10" in cmd
 
-    # The report flag is appended to kraken2 only under --bracken, so a run without the flag is
-    # byte-identical to one from before the flag existed.
+    # The report flag is added to kraken2 only under --bracken, so runs without it are unchanged.
     assert kraken2.KRAKEN2_REPORT.format(report="s.kreport") == "--report s.kreport"
     assert "--report" not in kraken2.KRAKEN2_PAIRED
     assert "--report" not in kraken2.KRAKEN2_SINGLE
 
 
 def test_help_renders_with_its_percent_signs_escaped():
-    """A bare `10%` in an argparse help string makes every --help in the package fail.
+    """--help renders; a bare `10%` in a help string would make it fail.
 
-    Rendering the help is the only test that catches it, because argparse interpolates help strings
-    lazily - the module imports and runs fine right up until someone asks for --help.
+    argparse interpolates help strings only when --help is rendered, so the module imports fine.
     """
     import contextlib
     import io

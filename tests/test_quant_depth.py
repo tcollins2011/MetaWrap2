@@ -1,9 +1,9 @@
 """Per-bin abundance by aggregating the depth table the pipeline already built.
 
-The other three quantifiers align the reads a second time to answer a question the binning run already
-answered. They also answer it on a different scale: CoverM's per-contig coverage is twice a jgi-style
-depth on strain-rich data, because jgi discards reads below 97% identity and CoverM does not. This
-quantifier reads the table the binner itself read, so it is both free and on the binner's own scale.
+The other three quantifiers align the reads again. Their scale also differs: on strain-rich data
+CoverM's per-contig coverage is twice a jgi-style depth, because jgi discards reads below 97%
+identity and CoverM does not. This quantifier reads the table the binner read, so it needs no
+alignment and uses the binner's scale.
 """
 
 from __future__ import annotations
@@ -51,9 +51,9 @@ def _read(path):
 def test_abundance_is_length_weighted_not_a_plain_average(tmp_path):
     """A bin of one 1 kb contig at 10x and one 3 kb at 6x is 7x, not 8x.
 
-    The length-weighted mean is "total bases over total length", which is what "how much of this genome
-    was in the sample" means. A plain average answers a question about contigs instead, and the gap
-    widens exactly when a bin is one long contig plus a tail of short ones - which is most bins.
+    The length-weighted mean (total bases over total length) measures how much of the genome was
+    in the sample. A plain average describes contigs, and differs most for a bin of one long
+    contig plus short ones, which is typical.
     """
     args, table = _setup(tmp_path, {"binA": ["c1", "c2"]})
     quant_bins._quantify_depth(args, [], table, None, None)

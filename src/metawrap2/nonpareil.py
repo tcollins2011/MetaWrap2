@@ -1,40 +1,30 @@
-"""Diversity coverage from a read set: can these samples be compared at all?
+"""Diversity coverage of a read set, estimated with Nonpareil.
 
-Sequencing depth is not the same thing as how much of a community was seen. Two samples at the
-same depth can sit at 90% and 40% coverage of their own diversity, and every cross-sample
-comparison drawn from them - richness, abundance, presence of a function - is then comparing a
-well-described community with a glimpse of one. Nonpareil (Rodriguez-R & Konstantinidis 2014;
-Rodriguez-R et al. 2018) estimates that coverage from the reads themselves, with no reference
-database and no assembly, by measuring how often a read is redundant with the reads already seen
-and extrapolating the curve.
+Two samples at the same depth can have 90% and 40% coverage of their own diversity, which affects
+any cross-sample comparison of richness, abundance or presence of a function. Nonpareil
+(Rodriguez-R & Konstantinidis 2014; Rodriguez-R et al. 2018) estimates coverage from the reads,
+without a reference or assembly, by measuring how often a read is redundant with reads already
+seen and extrapolating the curve.
 
-Three numbers come out of it:
+It gives three numbers:
 
-* **C**, abundance-weighted average coverage at the depth actually sequenced. 0 to 1.
-* **Nd**, the Nonpareil sequence-diversity index: the log-scale diversity of the dataset, which is
-  comparable across samples in a way that a richness estimate from unassembled reads is not.
+* **C**, abundance-weighted average coverage at the depth sequenced. 0 to 1.
+* **Nd**, the Nonpareil sequence-diversity index: log-scale diversity, comparable across samples
+  (unlike richness estimated from unassembled reads).
 * **LRstar**, the sequencing effort in base pairs projected to reach a target coverage (95% by
-  default) - the answer to "how much more would I have to sequence".
+  default).
 
-The redundancy curve comes from the `nonpareil` binary. The model fit does not: upstream it lives
-in an R package, and the fit is a weighted non-linear least squares of a gamma CDF with a documented
-fallback sequence of weightings. That is ported here (see :func:`fit_model`) rather than shelled out
-to, because the estimates are wanted *in* the pipeline - a coverage figure decides what the run can
-say about cross-sample comparison, and reaching that conclusion should not involve parsing a PDF
-report. The port follows Nonpareil 3.5.5's ``utils/Nonpareil/R/Nonpareil.R`` closely enough that
-the parameter names match, deliberately: anyone checking a number here against the R package should
-be able to read the two side by side.
+The redundancy curve comes from the `nonpareil` binary. The model fit, a weighted non-linear least
+squares fit of a gamma CDF with a fallback sequence of weightings, is in Nonpareil's R package and
+is ported here (:func:`fit_model`) so the pipeline can use the estimates directly. The port follows
+Nonpareil 3.5.5's ``utils/Nonpareil/R/Nonpareil.R`` and keeps its parameter names.
 
-Bioconda's `nonpareil` brings the R package with it, so the original is available as a cross-check,
-and it was used as one: on Nonpareil's three bundled datasets (HumanGut, IowaSoil, LakeLanier) this
-code reproduces R's C, kappa, Nd, LRstar, model r and both gamma parameters to six significant
-figures. The comparison is pinned as a test; the fixtures carry the R invocation that produced the
-expected values.
+On Nonpareil's three bundled datasets (HumanGut, IowaSoil, LakeLanier) this code reproduces R's C,
+kappa, Nd, LRstar, model r and both gamma parameters to six significant figures. A test checks
+this; the fixtures record the R invocation that produced the expected values.
 
-What this does not do: Nonpareil's coverage is of the *community*, abundance-weighted. A sample at
-C=0.95 has 95% average coverage of the sequences present in proportion to their abundance, which is
-not 95% of its species - the rare tail is systematically the part that is missing. That caveat
-travels with the number.
+Coverage is abundance-weighted. C=0.95 means 95% average coverage of the sequences weighted by
+abundance, not 95% of the species; the missing part is the rare tail.
 """
 
 from __future__ import annotations
@@ -44,39 +34,31 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-#: Coverage considered "nearly complete", as a percentage. Nonpareil's own default, and the value
-#: its published figures use, so a projected effort reported here means the same thing as one
-#: reported in a paper.
+#: Target coverage in percent. Nonpareil's default, as used in its publications.
 STAR = 95.0
 
-#: Weight exponents tried in order until the fit converges, applied to each point's standard
-#: deviation. Two sequences because the curve's shape differs between log and linear subsampling.
-#: These are Nonpareil's own, kept in its order: the first that converges wins, so changing the
-#: order changes which fit a borderline dataset gets.
+#: Weight exponents applied to each point's standard deviation, tried in order until the fit
+#: converges. Separate sequences for log and linear subsampling. Nonpareil's values and order.
 WEIGHTS_LOG: Tuple[float, ...] = (0.0, 1.0, -1.0, 1.3, -1.1, 1.5, -1.5, 3.0, -3.0)
 WEIGHTS_LINEAR: Tuple[float, ...] = (-1.1, -1.2, -0.9, -1.3, -1.0)
 
-#: Printed beside every coverage figure. The number is abundance-weighted, and read as a fraction
-#: of species it overstates what was seen by the amount that matters most.
+#: Printed with every coverage figure, since coverage is abundance-weighted.
 COVERAGE_CAVEAT = (
-    "Nonpareil coverage is abundance-weighted average coverage of the community, not the fraction "
-    "of its species that were seen: the uncovered remainder is the rare tail, so C=0.95 does not "
+    "Nonpareil coverage is the abundance-weighted average coverage of the community, not the "
+    "fraction of its species seen. The uncovered part is the rare tail, so C=0.95 does not "
     "mean 95% of the lineages are present in the data"
 )
 
-#: Printed when coverage is low enough that cross-sample comparison is the thing at risk, rather
-#: than any particular estimate. Nonpareil's own guidance for well-covered data.
+#: Coverage below which a sample is flagged as not comparable. From Nonpareil's guidance.
 LOW_COVERAGE = 0.5
 
 
-#: Default k for the k-mer kernel, which is also the binary's. Reads shorter than this are fatal to
-#: that kernel: `nonpareil -T kmer` exits with "Reads are required to have a minimum length of kmer
-#: size" rather than skipping them.
+#: Default k for the k-mer kernel (the binary's default). `nonpareil -T kmer` exits on reads shorter
+#: than this ("Reads are required to have a minimum length of kmer size").
 DEFAULT_K = 24
 
-#: Below this many multiples of k, the k-mer kernel has little to work with per read - a 37 bp read
-#: yields 14 24-mers - and Nonpareil's own guidance is the alignment kernel for short reads. Not a
-#: hard refusal: it is a warning, because the user may know their data better than a ratio does.
+#: Mean read length, in multiples of k, below which the alignment kernel is advised (a 37 bp read
+#: yields 14 24-mers). Nonpareil recommends the alignment kernel for short reads. Only a warning.
 SHORT_READ_K_MULTIPLE = 2.0
 
 
@@ -86,7 +68,7 @@ class NonpareilUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class ReadLengths:
-    """What a scan of the first reads of a file found. Used to choose a kernel and to warn."""
+    """Read-length statistics from the first reads of a file, used to choose a kernel."""
 
     scanned: int
     minimum: int
@@ -100,12 +82,10 @@ class ReadLengths:
 
 
 def scan_read_lengths(path: str, k: int = DEFAULT_K, limit: int = 400_000) -> ReadLengths:
-    """Read lengths from the first *limit* reads: enough to decide, cheap enough to always do.
+    """Return read-length statistics for the first *limit* reads.
 
-    A scan rather than a full pass. The decisions it feeds - which kernel suits this data, whether
-    a filtering pass is needed at all - do not become different decisions on read 400,001, and a
-    full pass over every read file would double the module's runtime to answer a question the head
-    of the file already answers. The filtering pass itself, when it happens, sees every read.
+    The head of the file is enough to choose a kernel and decide whether to filter; a full pass
+    would double the module's runtime. The filtering pass itself reads every read.
     """
     lengths_seen = 0
     total = 0
@@ -142,9 +122,8 @@ def _open_maybe_gzip(path: str):
 def _iter_reads(path: str):
     """Yield (header, sequence) from fastq or fasta, gzipped or not.
 
-    Written here rather than reused from :mod:`metawrap2.io.seqio` because that module's reader is
-    a fasta reader, and this has to handle fastq - where a line starting with ``@`` can also be a
-    quality line, so records are counted in fours rather than detected by their first character.
+    :mod:`metawrap2.io.seqio` reads only fasta. Fastq records are read in groups of four lines,
+    since a quality line can also start with ``@``.
     """
     with _open_maybe_gzip(path) as handle:
         first = handle.readline()
@@ -177,7 +156,7 @@ def _iter_reads(path: str):
 
 @dataclass(frozen=True)
 class FilterReport:
-    """What a minimum-length filter removed. Every field is reported, none is inferred."""
+    """Counts of reads and bases kept and removed by a minimum-length filter."""
 
     path: str
     kept_reads: int
@@ -200,18 +179,12 @@ class FilterReport:
 def filter_short_reads(path: str, output: str, minimum_length: int = DEFAULT_K) -> FilterReport:
     """Write *path* to *output* as gzipped fasta, without reads shorter than *minimum_length*.
 
-    Needed because the k-mer kernel refuses a file containing a single read shorter than k, and
-    trimmed reads routinely contain them - 4.7% of one real QC'd gut sample. Dropping them is the
-    only way to run that kernel at all, so it is done here and counted, rather than left as a
-    fatal error with a manual fix.
+    The k-mer kernel rejects a file with any read shorter than k, and trimmed reads often have them
+    (4.7% of one QC'd gut sample). Output is fasta because Nonpareil reads only the sequence, and
+    gzipped to keep the temporary copy small.
 
-    Fasta, not fastq: Nonpareil reads only the sequence, so carrying the quality lines would double
-    the size of a file that is already a copy of the input. Gzipped for the same reason - the input
-    is gigabytes and this is a temporary copy of most of it.
-
-    The counts matter for interpretation, not just for reassurance. Sequencing effort is in base
-    pairs, so an effort axis built from the filtered file is shorter than the library really was,
-    and the projected effort to reach a target coverage is quoted against the filtered total.
+    Effort is in base pairs, so effort and the projection are relative to the filtered total;
+    the returned counts let the caller report this.
     """
     import gzip
 
@@ -238,33 +211,30 @@ def filter_short_reads(path: str, output: str, minimum_length: int = DEFAULT_K) 
 
 
 def kernel_advice(lengths: ReadLengths, kernel: str, k: int = DEFAULT_K) -> List[str]:
-    """What the measured read lengths say about the chosen kernel. Lines to print, or none.
+    """Return warnings about the chosen kernel given the measured read lengths, or none.
 
-    The k-mer kernel is the right default for modern read lengths and the wrong one for heavily
-    trimmed short reads, and the file itself says which it is - so this is measured rather than
-    left to the user to know.
+    The k-mer kernel suits typical read lengths but not heavily trimmed short reads.
     """
     lines: List[str] = []
     if kernel != "kmer":
         return lines
     if lengths.mean and lengths.mean < SHORT_READ_K_MULTIPLE * k:
         lines.append(
-            "mean read length is %.0f bp against k=%d, so each read yields only ~%d k-mers. The "
-            "alignment kernel (--kernel alignment) is Nonpareil's recommendation for reads this "
-            "short; the k-mer kernel will still run, on the reads long enough to hold a k-mer"
+            "mean read length is %.0f bp against k=%d, so each read yields only ~%d k-mers. "
+            "Nonpareil recommends the alignment kernel (--kernel alignment) for reads this short; "
+            "the k-mer kernel still runs, on the reads long enough to hold a k-mer"
             % (lengths.mean, k, max(0, int(lengths.mean) - k + 1))
         )
     if lengths.shorter_than_k:
         lines.append(
-            "%.1f%% of the first %d reads are shorter than k=%d. The k-mer kernel rejects the "
-            "whole file over one such read, so they are filtered out before it runs"
+            "%.1f%% of the first %d reads are shorter than k=%d. The k-mer kernel rejects a file "
+            "that contains any such read, so they are filtered out before it runs"
             % (lengths.fraction_short * 100, lengths.scanned, k)
         )
     return lines
 
 
-#: Verified against the R package on Nonpareil's own example data, to six significant figures. Kept
-#: here rather than only in the test so that the claim and the numbers travel with the code.
+#: Values from the R package on Nonpareil's example data, matched to six significant figures.
 R_AGREEMENT = {
     "HumanGut": {"C": 0.806352, "kappa": 0.790210, "diversity": 17.260378, "LRstar": 2.62214e09},
     "IowaSoil": {"C": 0.557296, "kappa": 0.527510, "diversity": 22.795958, "LRstar": 6.62396e11},
@@ -276,15 +246,14 @@ R_AGREEMENT = {
 class Curve:
     """One sample's redundancy curve, its metadata, and the estimates fitted to it.
 
-    Attribute names follow the R package's slots rather than being renamed to house style, so that
-    a number here can be checked against a number from `Nonpareil.curve()` without a translation
-    table.
+    Attribute names follow the R package's slots, so values can be checked against
+    `Nonpareil.curve()` directly.
     """
 
     label: str
     #: Sequencing effort as reported in the .npo, in reads.
     x_obs: Tuple[float, ...]
-    #: Observed *redundancy* - what the binary measures.
+    #: Observed redundancy, as measured by the binary.
     y_red: Tuple[float, ...]
     #: Redundancy transformed to coverage, and its spread.
     y_cov: Tuple[float, ...]
@@ -293,14 +262,12 @@ class Curve:
     #: Effort rescaled to base pairs, which is what LRstar is quoted in.
     x_adj: Tuple[float, ...]
     kernel: str
-    #: Mean read length in bp, the .npo's `L`. What was sequenced.
+    #: Mean read length in bp, the .npo's `L`.
     read_length: float
-    #: The length the effort axis is scaled by, the .npo's `AL`, and **not always a length in bp**:
-    #: with the alignment kernel it is the read length, but with the k-mer kernel it is k-mers per
-    #: read (L - k + 1; measured as 17.129 for L=40.129, k=24). So the effort axis - and LRstar with
-    #: it - is in k-mers there, not base pairs. Kept as its own field rather than folded into
-    #: `read_length` because conflating them silently misreports the projected effort by the ratio
-    #: between them, which on short reads is a factor of two.
+    #: Length the effort axis is scaled by, the .npo's `AL`. With the alignment kernel it is the
+    #: read length in bp; with the k-mer kernel it is k-mers per read (L - k + 1; 17.129 for
+    #: L=40.129, k=24), so the effort axis and LRstar are in k-mers. Kept separate from
+    #: `read_length`: mixing them up misreports the projected effort by about 2x on short reads.
     effort_length: float
     reads: float
     overlap: float
@@ -308,13 +275,13 @@ class Curve:
     version: str
     #: Redundancy at full effort.
     kappa: float
-    #: Coverage at full effort - the headline number.
+    #: Coverage at full effort.
     C: float
     star: float = STAR
     has_model: bool = False
     a: Optional[float] = None
     b: Optional[float] = None
-    #: Nd. Zero when the fit put alpha at or below 1, where the index is undefined rather than low.
+    #: Nd. Zero when the fitted alpha is at most 1, where the index is undefined.
     diversity: float = 0.0
     #: Projected effort in bp for `star` coverage. None when it was not reached by extrapolation.
     LRstar: Optional[float] = None
@@ -325,7 +292,7 @@ class Curve:
 
     @property
     def sequenced_bp(self) -> float:
-        """What was actually sequenced, in bp: reads x mean read length."""
+        """Sequenced bases: reads x mean read length."""
         return self.reads * self.read_length
 
     @property
@@ -335,20 +302,16 @@ class Curve:
 
     @property
     def effort_at_full_depth(self) -> float:
-        """Where the observed data ends on the effort axis, in :attr:`effort_unit`.
+        """Return the end of the observed data on the effort axis, in :attr:`effort_unit`.
 
-        This, not :attr:`sequenced_bp`, is what LRstar must be compared against: the two are in
-        different units under the k-mer kernel.
+        Compare LRstar with this, not :attr:`sequenced_bp`; their units differ under the k-mer
+        kernel.
         """
         return self.reads * self.effort_length
 
     @property
     def fold_more_needed(self) -> Optional[float]:
-        """How many times the current effort would reach `star` coverage. None without a model.
-
-        The ratio rather than the absolute projection, because that is the form the answer gets
-        used in: "4x more sequencing" is actionable where "1.2e11 bp" needs dividing first.
-        """
+        """Return the multiple of current effort needed for `star` coverage, or None."""
         if self.LRstar is None or self.effort_at_full_depth <= 0:
             return None
         return self.LRstar / self.effort_at_full_depth
@@ -357,9 +320,8 @@ class Curve:
 def _gamma_cdf(x: float, a: float, b: float) -> float:
     """`pgamma(log1p(x), shape=a, rate=b)` - Nonpareil's model function.
 
-    Written against the shape/rate parameterisation R uses, not scipy's shape/scale, because the
-    published parameters are in rate. Mixing them silently returns a plausible curve with the wrong
-    diversity index.
+    Uses R's shape/rate parameterisation (scipy's scale = 1/rate), as in the published parameters.
+    Using rate as scale gives a plausible curve with the wrong diversity index.
     """
     from scipy.stats import gamma  # local import: scipy is optional at install time
 
@@ -367,16 +329,15 @@ def _gamma_cdf(x: float, a: float, b: float) -> float:
 
 
 def coverage_factor(overlap: float) -> float:
-    """The exponent that turns redundancy into coverage, from Nonpareil's calibration."""
+    """Return the exponent that converts redundancy to coverage, from Nonpareil's calibration."""
     return 1.0 - math.exp(2.23e-2 * overlap - 3.5698)
 
 
 def read_npo(path: str, label: Optional[str] = None, correction: bool = True) -> Curve:
     """Parse a `.npo` file into a :class:`Curve`, with coverage and the adjusted effort axis.
 
-    Does everything the R package's `read_metadata` and `read_data` do and nothing else; the model
-    fit is separate so that a curve can be reported even when the fit fails, which is a real case
-    on shallow data and is more useful than an exception.
+    Equivalent to the R package's `read_metadata` and `read_data`. The model fit is separate, so
+    a curve can still be reported when the fit fails, as it can on shallow data.
     """
     meta: Dict[str, str] = {}
     rows: List[Tuple[float, ...]] = []
@@ -396,8 +357,8 @@ def read_npo(path: str, label: Optional[str] = None, correction: bool = True) ->
         raise ValueError("%s holds no curve: nonpareil produced no rarefaction points" % path)
     rows.sort(key=lambda r: r[0])
 
-    # The kernel is not stated directly; a k-mer size in range is what distinguishes the kmer
-    # kernel's output, and it changes both the overlap and where the read length comes from.
+    # The .npo does not name the kernel; a k-mer size in range indicates the k-mer kernel, which
+    # changes the overlap and the source of the effort length.
     ksize = float(meta.get("ksize", 0) or 0)
     kernel = "kmer" if 0 < ksize < 1001 else "alignment"
     log_sample = float(meta.get("logsampling", meta.get("divide", 0)) or 0)
@@ -420,12 +381,9 @@ def read_npo(path: str, label: Optional[str] = None, correction: bool = True) ->
     kappa = y_red[-1]
     cov = y_cov[-1]
 
-    # Effort is reported in reads but the model is fitted in bp, and the rescaling is coverage
-    # dependent - a poorly covered dataset's curve is stretched differently from a well covered
-    # one's. Straight from the R, including the 0.27 exponent, which is empirical.
-    # The first rarefaction point is usually at zero reads, where R's log(0) is -Inf and the
-    # rescaled effort comes out as exp(-Inf) = 0. Python raises instead, so the zero is written
-    # out directly rather than letting the arithmetic produce it.
+    # Effort is reported in reads but fitted in bp, with a coverage-dependent rescaling taken from
+    # the R code (the 0.27 exponent is empirical). The first point is usually at zero reads; R
+    # gives exp(log(0)) = 0 there, while Python raises, so zero is set directly.
     log_max = max(math.log(x) for x in x_obs if x > 0)
     x_adj = [
         math.exp(log_max + (cov**0.27) * (math.log(x) - log_max)) if x > 0 else 0.0 for x in x_obs
@@ -456,11 +414,9 @@ def read_npo(path: str, label: Optional[str] = None, correction: bool = True) ->
 
 
 def _check_consistency(curve: Curve) -> None:
-    """Record the four ways upstream considers a curve unusable, each with its remedy.
+    """Record upstream's four checks for an unusable curve, each with the parameter to change.
 
-    Reported rather than raised. A curve that fails one of these has a coverage number that should
-    not be quoted, but the run that produced it took hours and the user needs to know which
-    parameter to change, not a traceback.
+    Failures are recorded as warnings, not raised.
     """
     half = 0.5 * curve.x_adj[-1]
     below = [i for i, x in enumerate(curve.x_adj) if x <= half]
@@ -474,19 +430,19 @@ def _check_consistency(curve: Curve) -> None:
     if curve.kappa <= 1e-5:
         curve.consistent = False
         curve.warnings.append(
-            "redundancy is essentially zero at full depth: either the sample is far too diverse "
-            "for this depth to say anything, or -L is too high"
+            "redundancy is close to zero at full depth: the sample is too diverse for this "
+            "sequencing depth, or -L is too high"
         )
     if len(curve.y_cov) > 1 and curve.y_cov[1] >= 1 - 1e-5:
         curve.consistent = False
         curve.warnings.append(
             "the curve saturates at the second point, so there is nothing to fit; re-run with a "
-            "larger -d to spread the subsampling out"
+            "larger -d"
         )
     if sum(1 for y in curve.y_cov if 0 < y < 0.9) <= 10:
         curve.consistent = False
         curve.warnings.append(
-            "fewer than 11 points fall below 90% coverage, which is too few to fit; re-run with a "
+            "fewer than 11 points are below 90% coverage, too few to fit; re-run with a "
             "larger -d"
         )
 
@@ -494,12 +450,11 @@ def _check_consistency(curve: Curve) -> None:
 def fit_model(curve: Curve, weights_exp: Optional[Sequence[float]] = None) -> Curve:
     """Fit the gamma-CDF model and fill in Nd, LRstar and the model's r. Mutates and returns.
 
-    Fitted only to the points below 90% coverage, as upstream does: above that the curve is flat
-    and the points carry no information about the shape, while weighting by their small standard
-    deviations would let them dominate.
+    As upstream, only points below 90% coverage are used: above that the curve is flat, and their
+    small standard deviations would dominate the weighting.
 
-    Each weighting in `weights_exp` is tried until one converges. That is not a heuristic added
-    here - it is Nonpareil's own behaviour, and on real data the first choice does fail.
+    Each weighting in `weights_exp` is tried until one converges, as Nonpareil does; the first
+    often fails on real data.
     """
     try:
         from scipy.optimize import curve_fit
@@ -507,14 +462,14 @@ def fit_model(curve: Curve, weights_exp: Optional[Sequence[float]] = None) -> Cu
     except ImportError as exc:  # pragma: no cover - exercised by the module, not the unit tests
         raise NonpareilUnavailable(
             "scipy is needed to fit the Nonpareil model: pip install scipy, or install the "
-            "metawrap2-reads environment, which has it"
+            "metawrap2-reads environment, which includes it"
         ) from exc
 
     sel = [i for i, y in enumerate(curve.y_cov) if 0 < y < 0.9]
     if len(sel) < 3:
         curve.warnings.append(
             "too few points below 90% coverage to fit a model, so there is no diversity index or "
-            "projected effort; the observed coverage above is still measured, not fitted"
+            "projected effort; the observed coverage above is measured, not fitted"
         )
         return curve
     xs = [curve.x_adj[i] for i in sel]
@@ -525,15 +480,14 @@ def fit_model(curve: Curve, weights_exp: Optional[Sequence[float]] = None) -> Cu
         weights_exp = WEIGHTS_LOG if curve.log_sample != 0 else WEIGHTS_LINEAR
 
     def model(x: Any, a: float, b: float) -> Any:
-        """The model as curve_fit wants it: vectorised over x, and in shape/scale for scipy."""
+        """The model for curve_fit: vectorised over x, with scipy's shape/scale."""
         import numpy as np
 
         return gamma.cdf(np.log1p(x), a, scale=1.0 / b)
 
     for exponent in weights_exp:
-        # R's nls weights multiply the squared residual; curve_fit divides the residual by sigma.
-        # So sigma = 1/sqrt(w), and a zero standard deviation would divide by zero - those points
-        # are dropped from the weighting rather than from the fit.
+        # R's nls weights multiply the squared residual; curve_fit divides the residual by sigma,
+        # so sigma = 1/sqrt(w). If any weight is zero or not finite, the fit is unweighted.
         try:
             weights = [sd**exponent if sd > 0 else 0.0 for sd in sds]
             if any(w <= 0 for w in weights) or any(not math.isfinite(w) for w in weights):
@@ -556,16 +510,15 @@ def fit_model(curve: Curve, weights_exp: Optional[Sequence[float]] = None) -> Cu
             continue
         curve.has_model = True
         curve.a, curve.b = a, b
-        # Nd is undefined at alpha <= 1 rather than small, so it is left at zero and said to be
-        # absent. Reporting (a-1)/b there would give a negative diversity.
+        # Nd is undefined at alpha <= 1, so it is left at zero; (a-1)/b would be negative.
         curve.diversity = (a - 1.0) / b if a > 1.0 else 0.0
         try:
             curve.LRstar = float(math.exp(gamma.ppf(curve.star / 100.0, a, scale=1.0 / b)) - 1.0)
         except OverflowError:
             curve.LRstar = None
             curve.warnings.append(
-                "the projected effort for %g%% coverage overflowed, which means this sample is far "
-                "from it; the diversity index is still usable" % curve.star
+                "the projected effort for %g%% coverage overflowed (the sample is far from that "
+                "coverage); the diversity index is still usable" % curve.star
             )
         predicted = [_gamma_cdf(x, a, b) for x in xs]
         curve.model_r = _pearson(ys, predicted)
@@ -591,7 +544,7 @@ def _pearson(a: Sequence[float], b: Sequence[float]) -> Optional[float]:
 
 
 def curve_from_npo(path: str, label: Optional[str] = None, star: float = STAR) -> Curve:
-    """Read a `.npo` and fit it in one call, which is what every caller wants."""
+    """Read a `.npo` file and fit the model."""
     curve = read_npo(path, label=label)
     curve.star = star
     return fit_model(curve)
@@ -621,7 +574,7 @@ SUMMARY_COLUMNS: Tuple[str, ...] = (
 
 
 def summary_row(curve: Curve) -> Dict[str, str]:
-    """One table row per sample. Everything unfitted is empty rather than zero."""
+    """Return the summary row for one sample. Values that were not fitted are empty."""
 
     def num(value: Optional[float], places: int = 4) -> str:
         if value is None:
@@ -634,8 +587,7 @@ def summary_row(curve: Curve) -> Dict[str, str]:
         "reads": "%d" % curve.reads,
         "read_length_bp": num(curve.read_length, 1),
         "sequenced_bp": "%.4g" % curve.sequenced_bp,
-        # Stated in every row rather than left to the reader to infer from the kernel: with the
-        # k-mer kernel the next column and the projection are in k-mers, not base pairs.
+        # With the k-mer kernel, effort and the projection are in k-mers, not base pairs.
         "effort_unit": curve.effort_unit,
         "effort_at_full_depth": "%.4g" % curve.effort_at_full_depth,
         "redundancy": num(curve.kappa),
@@ -662,11 +614,9 @@ def write_summary(curves: Sequence[Curve], path: str) -> str:
 
 
 def write_curve_points(curves: Sequence[Curve], path: str) -> str:
-    """Every rarefaction point of every sample, long format - the input for plotting the curves.
+    """Write every rarefaction point of every sample in long format, for plotting the curves.
 
-    Written because the estimates are a model of these points and a reader who wants to see whether
-    the model fits has to have them. The fitted value is in the last column beside the observed
-    one.
+    The last column holds the fitted coverage beside the observed value.
     """
     with open(path, "w") as out:
         out.write(
@@ -695,11 +645,9 @@ def write_curve_points(curves: Sequence[Curve], path: str) -> str:
 
 
 def comparability(curves: Sequence[Curve]) -> List[str]:
-    """What the coverage spread across samples means for comparing them.
+    """Return notes on comparing samples, given their coverage spread.
 
-    This is the reason to run Nonpareil in a pipeline rather than as a one-off: a single sample's
-    coverage is interesting, and the spread across a cohort decides whether any cross-sample
-    statement is safe. Returns lines to print, empty when there is nothing to warn about.
+    Returns lines to print; low-coverage and spread warnings appear only when they apply.
     """
     lines: List[str] = []
     fitted = [c for c in curves if c.C > 0]
@@ -708,8 +656,8 @@ def comparability(curves: Sequence[Curve]) -> List[str]:
     low = [c for c in fitted if c.C < LOW_COVERAGE]
     if low:
         lines.append(
-            "%d of %d samples are below %.0f%% coverage (%s). Diversity and the presence of rare "
-            "features are not comparable between these and the rest: what looks absent may be "
+            "%d of %d samples are below %.0f%% coverage (%s). Diversity and rare features cannot "
+            "be compared between these and the other samples; a feature that looks absent may be "
             "unsampled."
             % (
                 len(low),
@@ -723,8 +671,8 @@ def comparability(curves: Sequence[Curve]) -> List[str]:
     spread = max(c.C for c in fitted) - min(c.C for c in fitted)
     if spread >= 0.2:
         lines.append(
-            "coverage spans %.0f%% to %.0f%% across samples. Differences in diversity between the "
-            "best- and worst-covered samples are partly differences in how much of them was seen."
+            "coverage ranges from %.0f%% to %.0f%% across samples, so differences in diversity "
+            "between the best- and worst-covered samples partly reflect how much of each was seen."
             % (min(c.C for c in fitted) * 100, max(c.C for c in fitted) * 100)
         )
     lines.append(COVERAGE_CAVEAT)

@@ -1,9 +1,9 @@
-"""A small layer for writing draw.io diagrams from Python and exporting them with draw.io itself.
+"""Write draw.io diagrams from Python and export them with draw.io.
 
 Each diagram in ``flowcharts/diagrams/`` builds a :class:`Diagram`: boxes at grid positions, sized
 from their text, and arrows attached to the boxes they connect so draw.io routes them. ``save()``
-writes the ``.drawio`` file, which opens and edits in draw.io like any other, and ``export()`` renders
-it with the draw.io desktop app's command-line exporter.
+writes an editable ``.drawio`` file and ``export()`` renders it with the draw.io desktop app's
+command-line exporter.
 
 The colours and shapes follow the original metaWRAP figures: red process boxes for modules, green
 for reads and assemblies, yellow for bins, blue ellipses for results, plus white boxes for the steps
@@ -157,7 +157,7 @@ class Diagram:
     # -- writing -----------------------------------------------------------------------------
 
     def _check(self) -> None:
-        """No two boxes may overlap; a diagram that breaks this is a layout bug, not a style."""
+        """Raise SystemExit if any two boxes overlap (a layout bug)."""
         nodes = list(self.nodes.values())
         for i, a in enumerate(nodes):
             for b in nodes[i + 1 :]:
@@ -234,7 +234,7 @@ def drawio_binary() -> Optional[str]:
 
 
 def export(drawio_path: str, png_path: str, scale: float = 2.0) -> None:
-    """Render with draw.io's own exporter, so the PNG is what draw.io shows."""
+    """Render *drawio_path* to *png_path* with draw.io's exporter."""
     binary = drawio_binary()
     if binary is None:
         raise SystemExit("draw.io desktop is needed to export (brew install --cask drawio)")
@@ -249,10 +249,10 @@ def export(drawio_path: str, png_path: str, scale: float = 2.0) -> None:
 
 
 def _shrink(path: str) -> None:
-    """Re-save as a 128-colour palette PNG: a fraction of the size, no visible change.
+    """Re-save as a 128-colour palette PNG to reduce file size.
 
-    The diagrams are flat colours plus anti-aliased edges, so a palette loses nothing a reader can
-    see, and it keeps each image under the repository's 512 KB file limit.
+    The diagrams are flat colours with anti-aliased edges, so the palette has no visible effect.
+    It keeps each image under the repository's 512 KB file limit.
     """
     from PIL import Image
 

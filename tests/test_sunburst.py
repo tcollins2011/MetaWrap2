@@ -1,10 +1,7 @@
-"""The static wheel, which exists because Krona writes no image.
+"""Tests for the static sunburst image of the functional hierarchy (Krona writes only HTML).
 
-`ktImportText` produces an interactive HTML file and nothing else, so until this module there was no
-picture of the functional hierarchy anywhere on disk - not in a report, not in the release notes,
-not in a paper figure. These tests pin the parts that would make such a picture wrong rather than
-ugly: that ring totals are conserved, that the branches KEGG cannot place are still drawn, and that
-a branch keeps its colour between two wheels so they can be compared side by side.
+Checks that ring totals are conserved, that branches KEGG cannot place are drawn, and that a branch
+keeps its colour between wheels so they can be compared.
 """
 
 from __future__ import annotations
@@ -34,7 +31,7 @@ def _write(tmp_path, text=KRONA_TEXT):
 
 
 def test_the_wheel_is_drawn_from_the_same_file_krona_is_given(tmp_path):
-    """Read back rather than recomputed, so the picture cannot drift from the wheel beside it."""
+    """The wheel is read from Krona's input file, not recomputed."""
     rows = S.read_krona_text(_write(tmp_path))
     assert len(rows) == 5
     assert rows[0] == (
@@ -45,22 +42,21 @@ def test_the_wheel_is_drawn_from_the_same_file_krona_is_given(tmp_path):
 
 
 def test_a_malformed_line_is_skipped_and_a_zero_is_not_a_wedge(tmp_path):
-    """A zero weight is a statement that a branch is absent; a malformed line is not a zero."""
+    """A zero weight draws no wedge, and a malformed line is skipped."""
     rows = S.read_krona_text(
         _write(tmp_path, "nonsense\tMetabolism\n0\tMetabolism\n5\tMetabolism\n")
     )
     assert rows == [(5.0, ("Metabolism",))]
 
 
-# ── conserving the total, which is what a percentage on this plot depends on ─────────────────
+# ── conserving the total ─────────────────────────────────────────────────────────────────────
 
 
 def test_every_ring_sums_to_the_same_total(tmp_path):
     """A path that stops short of a ring is counted at the depth it reaches.
 
-    Without that, each ring outward would quietly total less than the one inside it and every
-    percentage on the outer rings would be an overestimate - the same failure the hierarchy's own
-    distribution guards against.
+    Otherwise each outer ring would total less than the one inside it, and percentages on the
+    outer rings would be overestimates.
     """
     rows = S.read_krona_text(_write(tmp_path))
     total = sum(weight for weight, _ in rows)
@@ -70,14 +66,14 @@ def test_every_ring_sums_to_the_same_total(tmp_path):
 
 
 def test_the_branches_kegg_cannot_place_are_still_drawn(tmp_path):
-    """Dropping scaffolding to make a prettier wheel inflates every remaining percentage."""
+    """Unplaced (scaffolding) branches are kept, since dropping them inflates the percentages."""
     ring = dict(S.collapse_ring(S.read_krona_text(_write(tmp_path)), 1))
     assert ("Not Included in Pathway or Brite",) in ring
     assert ring[("Not Included in Pathway or Brite",)] == 12.0
 
 
 def test_children_are_grouped_under_their_parent_not_sorted_by_weight(tmp_path):
-    """A child wedge has to sit inside the parent it belongs to, or the plot is decorative."""
+    """Child wedges are grouped under their parent."""
     ring = S.collapse_ring(S.read_krona_text(_write(tmp_path)), 2)
     parents = [key[0] for key, _ in ring]
     # Each parent appears in one contiguous run.
@@ -89,7 +85,7 @@ def test_children_are_grouped_under_their_parent_not_sorted_by_weight(tmp_path):
 
 
 def test_a_branch_keeps_its_colour_between_two_wheels():
-    """Two samples' wheels are meant to be read side by side, so colour cannot follow rank."""
+    """Colour depends on the branch name, not its rank, so wheels can be compared."""
     assert S.colour_for("Metabolism") == S.colour_for("Metabolism")
     assert S.colour_for("Metabolism") != S.colour_for("Human Diseases")
     # An unknown branch still gets a stable colour within one plot.
@@ -99,7 +95,7 @@ def test_a_branch_keeps_its_colour_between_two_wheels():
 
 
 def test_level_a_order_is_fixed_rather_than_taken_from_the_data(tmp_path):
-    """KEGG's own order, so the same branch is in the same place in every wheel."""
+    """Level A follows KEGG's order, so a branch is in the same place in every wheel."""
     rows = S.read_krona_text(_write(tmp_path))
     names = [key[0] for key, _ in S.collapse_ring(rows, 1)]
     assert names.index("Metabolism") < names.index("Genetic Information Processing")
@@ -117,7 +113,7 @@ def test_a_png_is_written_beside_the_krona_input(tmp_path):
 
 
 def test_an_empty_distribution_is_no_wheel_rather_than_an_error(tmp_path):
-    """A genome with no KO at all is a real result, not a failure of the plot."""
+    """A genome with no KO gives no wheel and no error."""
     assert S.draw([], str(tmp_path / "x.png")) is None
     assert S.draw_from_krona_text(_write(tmp_path, "0\tMetabolism\n")) is None
 

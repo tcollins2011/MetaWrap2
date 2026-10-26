@@ -1,29 +1,21 @@
-"""eggNOG-mapper's annotations table, and the six ways reading it goes silently wrong.
+"""Parsing eggNOG-mapper's annotations table, and the `annotate --eggnog` step.
 
-Every test here is about a defect that produces a plausible-looking table rather than an error:
+Parser cases, each of which would otherwise give a plausible table instead of an error:
 
-* `-` is eggNOG's absent-value sentinel in *every* column, so parsed as written it becomes a GO term
-  called "-", an EC number "-" and a COG category "-" - the same defect that was found in dbCAN's
-  output, where `-|-` was being reported as the EC number of genes that have none;
-* emapper brackets its rows with `## ` comment lines at both ends, and the footer `## N queries
-  scanned` is a tab-free single field that parses as a gene;
-* `COG_category` is *concatenated*, not comma-joined: `EGP` is three categories, and splitting it
-  the way the other multi-valued columns are split yields one category that does not exist;
-* `KEGG_ko` is `ko:`-prefixed, and `kos.tsv` is not, so the join that justifies running both
-  annotators returns nothing while looking like total disagreement;
-* a renamed column gives a zero-row table, which is indistinguishable from a genome eggNOG placed
-  nothing in;
-* a re-run that reorders the long table makes every diff between two runs meaningless.
+* `-` is the absent-value sentinel in every column and must not become a GO term, EC number or COG
+  category (the same defect as dbCAN's `-|-` EC numbers);
+* `## ` comment lines bracket the rows, and the footer `## N queries scanned` has no tab and would
+  parse as a gene;
+* `COG_category` is concatenated, not comma-joined: `EGP` is three categories;
+* `KEGG_ko` is `ko:`-prefixed and `kos.tsv` is not, so the KOfam join needs the prefix stripped;
+* a renamed column must raise instead of giving a zero-row table;
+* the long table must be byte-identical across runs.
 
-The last group is about the module rather than the parser: that the `--eggnog` block runs *after*
-KOfam, because the overlap summary reads `kos.tsv` off disk and a block ordered above the KOfam one
-would silently report that eggNOG called every KO alone.
+Module cases: the `--eggnog` block runs after KOfam, because the overlap summary reads `kos.tsv`
+from disk.
 
-The fixtures are modelled on eggNOG-mapper 2.1.13's own writer - see
-tests/fixtures/eggnog/SOURCE.md for what was read and what was constructed.
-
-Nothing here runs eggNOG-mapper. ``run`` is replaced, which is the only thing between this module
-and a subprocess.
+The fixtures are modelled on eggNOG-mapper 2.1.13's writer (see tests/fixtures/eggnog/SOURCE.md).
+``run`` is stubbed, so eggNOG-mapper is never launched.
 """
 
 from __future__ import annotations
@@ -53,7 +45,7 @@ def _by_gene():
     return {row.gene: row for row in _rows()}
 
 
-# ── parsing the real shape ───────────────────────────────────────────────────────────────────
+# ── parsing ──────────────────────────────────────────────────────────────────────────────────
 
 
 def test_the_annotations_file_is_parsed():
@@ -70,16 +62,14 @@ def test_the_annotations_file_is_parsed():
 
 
 def test_comment_lines_at_both_ends_are_skipped():
-    """emapper writes four `## ` lines above the header and three below the last row.
+    """The four `## ` lines above the header and the three below the last row are skipped.
 
-    The footers are the dangerous ones: `## 6 queries scanned` has no tab in it, so it parses as a
-    data row whose gene is that whole string. Skipping only a leading comment block would leave
-    three extra "genes" in every genome's table, one of them named after the row count.
+    The footer `## 6 queries scanned` has no tab, so it would otherwise parse as a gene.
     """
     genes = [row.gene for row in _rows()]
     assert not any(gene.startswith("#") for gene in genes)
     assert not any("queries scanned" in gene for gene in genes)
-    # The header line starts with "#" too, and is the one comment line that must be read.
+    # The header line also starts with "#" and must be read.
     assert genes[0] == "k141_100_length_5000_cov_8.0000_1"
 
 
@@ -87,12 +77,7 @@ def test_comment_lines_at_both_ends_are_skipped():
 
 
 def test_the_dash_sentinel_is_never_an_annotation():
-    """A gene emapper placed but could not annotate carries `-` in every annotation column.
-
-    Left alone that gene reports one GO term, one EC number and one COG category, all of them "-",
-    and every downstream count of annotated genes believes it. This is the dbCAN `-|-` defect in a
-    different file.
-    """
+    """A gene with `-` in every annotation column parses as having no annotations."""
     gene = _by_gene()["k141_100_length_5000_cov_8.0000_2"]
     assert gene.gos == ()
     assert gene.ecs == ()
@@ -103,12 +88,12 @@ def test_the_dash_sentinel_is_never_an_annotation():
     assert gene.description == ""
     assert gene.preferred_name == ""
     assert not gene.has_orthogonal_annotation
-    # And it contributes no row at all to the long table, rather than four rows of "-".
+    # It contributes no row to the long table.
     assert not [row for row in eggnog.term_rows(_rows()) if row["gene"] == gene.gene]
 
 
 def test_no_table_this_module_writes_contains_the_sentinel():
-    """The strongest form of the check: `-` must not appear as a whole field anywhere."""
+    """`-` does not appear as a whole field in any written table."""
     rows = _rows()
     cells = []
     for row in rows:
@@ -116,7 +101,7 @@ def test_no_table_this_module_writes_contains_the_sentinel():
     for term in eggnog.term_rows(rows, "5.0.2"):
         cells.extend(term.values())
     assert eggnog.EMPTY not in cells
-    # Nor hidden inside a joined list, which is how `-;peptidoglycan` got through in dbCAN.
+    # Nor inside a joined list (as `-;peptidoglycan` did in dbCAN output).
     assert not any(eggnog.EMPTY in str(cell).split(";") for cell in cells)
 
 
@@ -129,17 +114,17 @@ def test_multi_valued_fields_are_split_and_deduplicated():
     assert gene.kegg_kos == ("K00001", "K00002")
     assert gene.gos == ("GO:0008270", "GO:0016491")
     assert gene.pfams == ("ADH_N", "ADH_zinc_N")
-    # Duplicates collapse, and order is emapper's rather than re-sorted here.
+    # Duplicates collapse; emapper's order is kept.
     assert eggnog._split("b,a,b,,a") == ("b", "a")
     assert eggnog._split("-") == ()
     assert eggnog._split("a,-,b") == ("a", "b")
 
 
 def test_cog_categories_are_concatenated_not_comma_separated():
-    """`EGP` is three categories. Splitting this column on commas invents a category "EGP".
+    """`EGP` is split into three categories.
 
-    It is the one multi-valued-looking column emapper does not comma-join, which is why it is
-    deliberately absent from MULTI_VALUED.
+    COG_category is the one multi-valued column emapper does not comma-join, so it is not in
+    MULTI_VALUED.
     """
     gene = _by_gene()["k141_100_length_5000_cov_8.0000_1"]
     assert gene.cog_category == "EGP"
@@ -147,18 +132,17 @@ def test_cog_categories_are_concatenated_not_comma_separated():
     assert "COG_category" not in eggnog.MULTI_VALUED
     single = _by_gene()["k141_200_length_3000_cov_5.0000_2"]
     assert single.cog_categories == ("S",)
-    # A COG category on its own is still something neither KOfam nor Pfam emits.
+    # A COG category alone counts as orthogonal annotation (neither KOfam nor Pfam emits it).
     assert single.has_orthogonal_annotation
 
 
-# ── the `ko:` prefix, which is the join ──────────────────────────────────────────────────────
+# ── the `ko:` prefix ─────────────────────────────────────────────────────────────────────────
 
 
 def test_the_ko_prefix_is_stripped_so_the_join_against_kos_tsv_works():
-    """eggNOG writes `ko:K00059`; `annotate --kofam` writes `K00059`.
+    """eggNOG's `ko:K00059` is stripped to `K00059`, as `annotate --kofam` writes it.
 
-    Unstripped, the intersection of the two KO sets is empty for every gene, which reads as the two
-    annotators agreeing on nothing - and that comparison is the entire reason for running both.
+    Unstripped, the two KO sets would never intersect.
     """
     gene = _by_gene()["k141_100_length_5000_cov_8.0000_1"]
     assert gene.kegg_kos == ("K00059",)
@@ -168,7 +152,7 @@ def test_the_ko_prefix_is_stripped_so_the_join_against_kos_tsv_works():
 
 
 def test_the_go_prefix_is_kept_because_it_is_part_of_the_accession():
-    """`GO:` and `ko:` look alike and only one is strippable: `GO:0003674` *is* the term's name."""
+    """The `GO:` prefix is kept, since it is part of the accession."""
     gene = _by_gene()["k141_100_length_5000_cov_8.0000_1"]
     assert gene.gos == ("GO:0003674", "GO:0008152", "GO:0016620")
     assert all(go.startswith(eggnog.GO_PREFIX) for go in gene.gos)
@@ -176,7 +160,7 @@ def test_the_go_prefix_is_kept_because_it_is_part_of_the_accession():
     assert gene.kegg_pathways == ("ko00010", "ko01100", "map00010")
 
 
-# ── a header that is not the expected one ────────────────────────────────────────────────────
+# ── unexpected headers ───────────────────────────────────────────────────────────────────────
 
 
 def test_a_renamed_column_is_an_error_that_names_what_it_found():
@@ -188,10 +172,9 @@ def test_a_renamed_column_is_an_error_that_names_what_it_found():
 
 
 def test_a_file_with_no_header_is_an_error_not_a_zero_row_table(tmp_path):
-    """The failure this prevents: a zero-row table and an exit status of 0.
+    """A headerless or comment-only file raises instead of giving a zero-row table.
 
-    That is indistinguishable from a genome eggNOG placed nothing in, and the two want opposite
-    responses from whoever is reading the output.
+    A zero-row table would look the same as a genome in which eggNOG placed nothing.
     """
     path = tmp_path / "headerless.emapper.annotations"
     path.write_text("## emapper-2.1.13\ngene_1\t272563.CD630_02740\t1e-9\t10.0\n")
@@ -205,18 +188,17 @@ def test_a_file_with_no_header_is_an_error_not_a_zero_row_table(tmp_path):
 
 
 def test_the_md5_column_is_accepted():
-    """`--md5` appends a column. A user who passed it should not be told their file is malformed."""
+    """The extra column that `--md5` appends is accepted."""
     rows = eggnog.parse_annotations(WITH_MD5, "bin_md5")
     assert len(rows) == 2
     assert rows[0].kegg_kos == ("K00059",)
 
 
-# ── the overlap with KOfam, which is the measurement ─────────────────────────────────────────
+# ── overlap with KOfam ───────────────────────────────────────────────────────────────────────
 
 
-#: What `--kofam` assigned, as _kofam_kos() reads it off kos.tsv. Chosen so all four cells of the
-#: comparison are non-empty: one gene where the two agree on the KO, one where both call a KO and
-#: disagree about which, two eggNOG-only and two KOfam-only.
+#: KOfam assignments as _kofam_kos() reads them from kos.tsv. Covers every case: one gene where the
+#: two agree on the KO, one where they call different KOs, two eggNOG-only and two KOfam-only.
 KOFAM = {
     "k141_100_length_5000_cov_8.0000_1": ["K00059"],
     "k141_200_length_3000_cov_5.0000_1": ["K09999"],
@@ -230,43 +212,40 @@ def test_ko_overlap_counts_both_sides_and_prefers_neither():
     overlap = eggnog.compare_kos(_rows(), KOFAM)
     # eggNOG calls a KO on 4 genes, KOfam on 4 (the fifth entry is empty and is not a call).
     assert (overlap.both, overlap.eggnog_only, overlap.kofam_only) == (2, 2, 2)
-    # Of the 2 both called, 1 is the same KO. The other is a real disagreement, and is the subset
-    # worth looking at by hand - which is lost if the two are merged.
+    # Of the 2 both called, 1 is the same KO and 1 is a disagreement.
     assert overlap.agreeing == 1
     assert overlap.total == 6
     sentence = overlap.describe()
     assert "2 gene(s) called by both eggNOG and KOfam (1 on the same KO)" in sentence
     assert "2 by eggNOG only, 2 by KOfam only" in sentence
-    # The wording must not pick a winner.
+    # The wording does not prefer either tool.
     assert "neither is preferred" in sentence
 
 
 def test_a_gene_with_no_ko_on_either_side_is_in_no_cell_of_the_overlap():
-    """An empty KO list is not a call. Counting it as one inflates `kofam_only` with genes KOfam
-    also failed to annotate, which would make eggNOG look worse the more genes went unannotated.
-    """
+    """An empty KO list is not counted as a KOfam call."""
     overlap = eggnog.compare_kos(_rows(), KOFAM)
     assert overlap.total == 6
     assert "k141_500_length_1000_cov_2.0000_1" not in KOFAM or overlap.kofam_only == 2
 
 
 def test_the_overlap_survives_a_prefix_on_either_side():
-    """The prefix is stripped on both sides, so a kos.tsv that ever grows one still joins."""
+    """The `ko:` prefix is stripped on both sides of the comparison."""
     bare = eggnog.compare_kos(_rows(), {"k141_100_length_5000_cov_8.0000_1": ["K00059"]})
     prefixed = eggnog.compare_kos(_rows(), {"k141_100_length_5000_cov_8.0000_1": ["ko:K00059"]})
     assert bare == prefixed
     assert prefixed.agreeing == 1
 
 
-# ── coverage, and what it is allowed to claim ────────────────────────────────────────────────
+# ── coverage ─────────────────────────────────────────────────────────────────────────────────
 
 
 def test_coverage_separates_annotated_from_orthogonally_annotated():
-    """ "eggNOG annotated 6 of 8 genes" is not the number this feature is judged on.
+    """Coverage counts placed genes and, separately, genes with GO, EC or COG terms.
 
-    Pfam already covers nearly every gene KEGG covers - 1,578 Pfam-only genes against 13 KEGG-only
-    ones on the bin measured in 2.1.2 - so coverage is not what a third search buys. The GO, EC and
-    COG terms are, and two of these six genes have none of the three.
+    The second count is the relevant one: Pfam already covers nearly every gene KEGG covers (1,578
+    Pfam-only against 13 KEGG-only genes on the bin measured in 2.1.2). Two of the six placed genes
+    here have no GO, EC or COG term.
     """
     genes = [row.gene for row in _rows()] + ["unplaced_1", "unplaced_2"]
     found = eggnog.coverage(_rows(), genes)
@@ -289,10 +268,9 @@ def _write(columns, rows):
 
 
 def test_the_long_table_is_byte_identical_across_runs():
-    """Two parses of one file must write the same bytes, or a diff between runs means nothing.
+    """Two parses of one file write the same bytes.
 
-    This is why neither the split fields nor the long table are re-sorted: the order is emapper's
-    own, so the output depends on the input rather than on a set iteration.
+    Neither the split fields nor the long table are re-sorted; emapper's order is kept.
     """
     first = _write(eggnog.TERM_COLUMNS, eggnog.term_rows(_rows(), "5.0.2"))
     second = _write(eggnog.TERM_COLUMNS, eggnog.term_rows(_rows(), "5.0.2"))
@@ -323,7 +301,7 @@ def test_the_gene_table_carries_the_bare_ko_so_it_joins_kos_tsv():
 
 
 def test_the_column_set_is_pinned_to_the_tools_own_writer():
-    """21 columns, in emapper's order. Drifting from this is what the header check catches."""
+    """ANNOTATION_COLUMNS matches emapper's 21 columns, in order."""
     assert len(eggnog.ANNOTATION_COLUMNS) == 21
     assert eggnog.ANNOTATION_COLUMNS[0] == "query"
     assert eggnog.ANNOTATION_COLUMNS[-1] == "PFAMs"
@@ -332,23 +310,21 @@ def test_the_column_set_is_pinned_to_the_tools_own_writer():
     assert tuple(header.lstrip("#").rstrip("\n").split("\t")) == eggnog.ANNOTATION_COLUMNS
 
 
-# ── the module: the command, the tables, and why the block runs last ─────────────────────────
+# ── the annotate --eggnog step ───────────────────────────────────────────────────────────────
 
 
 GENOME = "bin_006"
 
-#: Two genes emapper placed nothing in, so the step's own coverage number has a real denominator:
-#: emapper writes no line for a gene it could not place, which is why the share has to be computed
-#: against the protein file rather than against the length of the annotations table.
+#: Two genes emapper did not place. emapper writes no line for them, so the coverage share must use
+#: the protein file as its denominator.
 UNPLACED = ("k141_900_length_800_cov_1.0000_1", "k141_900_length_800_cov_1.0000_2")
 
 
 def _said(capsys):
-    """Everything printed, with the banner decoration and its word wrapping flattened.
+    """Everything printed, with banner borders and line wrapping removed.
 
-    ``comm`` wraps each message into a fixed-width banner, so a sentence under test is split across
-    lines with ``-----`` on both sides of each - and a substring assertion against the raw capture
-    passes or fails on where the wrap happened to land.
+    ``comm`` wraps messages in a fixed-width banner, so substring checks on the raw capture would
+    depend on where lines break.
     """
     return " ".join(capsys.readouterr().out.replace("-", " ").replace("*", " ").split())
 
@@ -358,8 +334,7 @@ def _setup(tmp_path, kofam_table=None):
     out = tmp_path / "out"
     genes_dir = out / annotate.GENES_DIR
     genes_dir.mkdir(parents=True)
-    # The proteins emapper was given: the six genes the fixture annotates, plus two it placed
-    # nothing in.
+    # The six genes the fixture annotates, plus two it does not place.
     genes = [row.gene for row in _rows()] + list(UNPLACED)
     with open(genes_dir / (GENOME + ".faa"), "w") as handle:
         handle.writelines(">%s\nMKRISTTITTTITITTGNGAG\n" % gene for gene in genes)
@@ -404,21 +379,19 @@ def fake_emapper(monkeypatch) -> List[str]:
 
 
 def test_the_emapper_command_is_the_one_the_tool_documents(tmp_path, fake_emapper):
-    """Each flag here is load-bearing and was read off emapper 2.1.13's own argument parser."""
+    """The emapper command has the flags required by emapper 2.1.13's argument parser."""
     out, genes_dir, db = _setup(tmp_path)
     annotate._run_eggnog(_namespace(tmp_path, out, db), str(genes_dir), [(GENOME, "x.fa", False)])
     assert len(fake_emapper) == 1
     cmd = fake_emapper[0]
-    # Our own called proteins, not emapper's gene call: with --itype genome it runs Prodigal and
-    # the COG/GO/EC terms belong to genes that are in no other table here.
+    # Our called proteins; with --itype genome emapper would run Prodigal and call its own genes.
     assert "--itype proteins" in cmd
     assert "-m diamond" in cmd
-    # Without --override emapper refuses to start when its outputs exist, which on a re-run is
-    # every time: "Output files detected in disk. Use --resume or --override to continue".
+    # Without --override emapper refuses to start when its outputs exist, as on every re-run.
     assert "--override" in cmd
     assert "--data_dir %s" % db in cmd
     assert "--cpu 2" in cmd
-    # All three directories are type=existing_dir in emapper's parser, so they must exist already.
+    # These are type=existing_dir in emapper's parser, so they must exist beforehand.
     for flag in ("--output_dir", "--temp_dir"):
         directory = cmd.split(flag + " ", 1)[1].split(" ", 1)[0]
         assert os.path.isdir(directory), "%s must exist before emapper is launched" % flag
@@ -436,16 +409,15 @@ def test_both_tables_are_written_with_the_declared_columns(tmp_path, fake_emappe
         terms = list(csv.DictReader(handle, delimiter="\t"))
     assert tuple(terms[0]) == eggnog.TERM_COLUMNS
     assert len(terms) == 22
-    # The sentinel must not have reached disk in either table.
+    # The sentinel is not written to either table.
     assert eggnog.EMPTY not in [value for row in genes + terms for value in row.values()]
 
 
 def test_the_overlap_is_reported_only_when_kofam_ran_first(tmp_path, fake_emapper, capsys):
-    """This is the ordering constraint, pinned.
+    """The KOfam overlap is reported only when kos.tsv exists.
 
-    `--eggnog` placed above the `--kofam` block would find no kos.tsv and print no overlap - and
-    zero is a plausible-looking answer, which is exactly how the Pfam block's increment stayed
-    silently zero when it was ordered before KOfam.
+    Without kos.tsv no overlap line is printed. (The Pfam block once ran before KOfam and its
+    increment was always zero.)
     """
     out, genes_dir, db = _setup(tmp_path)
     args = _namespace(tmp_path, out, db)
@@ -478,7 +450,7 @@ def test_the_overlap_is_reported_only_when_kofam_ran_first(tmp_path, fake_emappe
 
 
 def test_a_genome_emapper_fails_on_is_warned_about_not_fatal(tmp_path, monkeypatch, capsys):
-    """One pathological genome must not cost the others, which is this module's policy throughout."""
+    """A genome emapper fails on is warned about and the others are still written."""
     out, genes_dir, db = _setup(tmp_path)
     (genes_dir / "bin_007.faa").write_text(">bin_007_1\nMKRISTT\n")
     attempts: List[str] = []
@@ -504,7 +476,7 @@ def test_a_genome_emapper_fails_on_is_warned_about_not_fatal(tmp_path, monkeypat
 
 
 def test_every_genome_failing_fails_the_step(tmp_path, monkeypatch, capsys):
-    """The all-failed rule, which is what stops a finished banner over no output at all."""
+    """When every genome fails, the step exits with status 1."""
     out, genes_dir, db = _setup(tmp_path)
     monkeypatch.setattr(annotate, "run", lambda cmd, **kwargs: 1)
     with pytest.raises(SystemExit) as stopped:

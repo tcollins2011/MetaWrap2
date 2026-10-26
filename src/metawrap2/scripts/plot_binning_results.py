@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # USAGE:
-# ./script file1.stats file2.stats file3.stats
+# ./script MIN_COMPLETION MAX_CONTAMINATION file1.stats file2.stats file3.stats
+# Writes binning_results.png in the current directory.
 
 import os
 import sys
@@ -22,9 +23,8 @@ print("Loading completion info....")
 def _bin_set_label(path):
     """Bin-set name from a .stats.tsv path: basename with the suffix removed.
 
-    Both this and the colour assignment below must agree on the label, or a bin set gets no
-    colour. Handles the ".stats.tsv" suffix as one unit rather than stripping a single
-    extension (which would leave "binsA.stats").
+    Also used for the colour assignment below, so both must give the same label. ".stats.tsv" is
+    removed as one suffix, so "binsA.stats.tsv" gives "binsA".
     """
     base = os.path.basename(path)
     for suffix in (".stats.tsv", ".stats"):
@@ -62,7 +62,7 @@ for values in data.values():
     values.sort(reverse=True)
 
 print("Plotting completion data...")
-# MAKING THE PLOT PRETTY!!!!
+# Plot styling.
 # set some color schemes
 tableau20 = [
     (214, 39, 40),
@@ -84,16 +84,13 @@ tableau20 = [
     (158, 218, 229),
 ]
 
-# matplotlib wants 0-1 floats, but the table above is written in 0-255 ints because that is
-# how the palette is published; build a new list rather than rewriting it in place so the
-# element type stays consistent.
+# Convert the published 0-255 palette to the 0-1 floats matplotlib expects.
 palette: List[Tuple[float, float, float]] = [
     (r / 255.0, g / 255.0, b / 255.0) for r, g, b in tableau20
 ]
 plot_colors = {}
-# sys.argv[1] and [2] are the completeness/contamination thresholds, not stats files:
-# enumerating argv[1:] shifted every colour by two and, with more than ~15 bin sets, ran off
-# the end of the palette with an IndexError. Cycling keeps any number of sets plottable.
+# Stats files start at argv[3] (argv[1] and [2] are thresholds). The palette is cycled so any
+# number of bin sets can be plotted.
 for i, label in enumerate(sys.argv[3:]):
     plot_colors[_bin_set_label(label)] = palette[i % len(palette)]
 
@@ -102,7 +99,7 @@ for i, label in enumerate(sys.argv[3:]):
 plt.figure(figsize=(16, 8))
 plt.style.use("ggplot")
 
-# Remove the plot frame lines. They are unnecessary chartjunk.
+# Remove the top, right and left frame lines.
 ax = plt.subplot(121)
 ax.spines["top"].set_visible(False)
 ax.spines["bottom"].set_linewidth(0.5)
@@ -123,7 +120,7 @@ for values in data.values():
     max_x = max(max_x, len(values))
 plt.xlim(0, max_x)
 
-# Make sure your axis ticks are large enough to be easily read.
+# Tick label size.
 plt.yticks(
     range(min_completion, 105, 10),
     [str(x) + "%" for x in range(min_completion, 105, 10)],
@@ -131,13 +128,13 @@ plt.yticks(
 )
 plt.xticks(fontsize=14)
 
-# Provide tick lines across the plot to help your viewers trace along
+# Grid lines.
 for y in range(min_completion, 105, 10):
     plt.axhline(y=y, linestyle="--", lw=0.5, color="black", alpha=0.3)
 for x in range(0, 1000, 20):
     plt.axvline(x=x, linestyle="--", lw=0.5, color="black", alpha=0.3)
 
-# Remove the tick marks; they are unnecessary with the tick lines we just plotted.
+# Hide tick marks; the grid lines replace them.
 plt.tick_params(
     axis="both",
     which="both",
@@ -152,7 +149,7 @@ plt.tick_params(
 
 # PLOTTING THE DATA
 
-# prepare labeles
+# prepare labels
 labels = list(data)
 
 # plot the data and labels
@@ -161,13 +158,14 @@ y_increment = (100 - min_completion) // N // 2
 y_pos = 100 - y_increment
 
 for rank, bin_set in enumerate(labels):
-    # chose a color!
+    # bin set colour
     c = plot_colors[bin_set]
 
     # plot the data
     plt.plot(data[bin_set], lw=2.5, color=c)
 
-    # add bin set label to plot
+    # add bin set label to plot; an empty bin set has no curve, so its label goes at x = 0
+    x_pos = 0
     for x_pos, y in enumerate(data[bin_set]):
         if y < y_pos:
             break
@@ -211,8 +209,8 @@ for bin_set in data:
     data[bin_set].sort(reverse=False)
 
 print("Plotting the contamination data...")
-# MAKING THE PLOT PRETTY!!!!
-# Remove the plot frame lines. They are unnecessary chartjunk.
+# Plot styling.
+# Remove the top, right and left frame lines.
 ax = plt.subplot(122)
 ax.spines["top"].set_visible(False)
 ax.spines["bottom"].set_linewidth(0.5)
@@ -235,7 +233,7 @@ for k in data:
     max_x = max(max_x, len(data[k]))
 plt.xlim(0, max_x)
 
-# Make sure your axis ticks are large enough to be easily read.
+# Tick label size.
 plt.yticks(
     range(-0, max_contamination + 1, 1),
     [str(x) + "%" for x in range(-0, max_contamination + 1, 1)],
@@ -243,14 +241,14 @@ plt.yticks(
 )
 plt.xticks(fontsize=14)
 
-# Provide tick lines across the plot to help your viewers trace along
+# Grid lines.
 for y in range(0, max_contamination + 1, 1):
     plt.axhline(y=y, linestyle="--", lw=0.5, color="black", alpha=0.3)
 for x in range(0, 1000, 20):
     plt.axvline(x=x, linestyle="--", lw=0.5, color="black", alpha=0.3)
 
 
-# Remove the tick marks; they are unnecessary with the tick lines we just plotted.
+# Hide tick marks; the grid lines replace them.
 plt.tick_params(
     axis="both",
     which="both",
@@ -264,7 +262,7 @@ plt.tick_params(
 
 
 # PLOTTING THE DATA
-# prepare labeles
+# prepare labels
 labels = []
 for k in data:
     labels.append(k)
@@ -275,13 +273,14 @@ y_increment = max_contamination // N // 2
 y_pos = y_increment
 
 for rank, bin_set in enumerate(labels):
-    # chose a color!
+    # bin set colour
     c = plot_colors[bin_set]
 
     # plot the data
     plt.plot(data[bin_set], lw=2.5, color=c)
 
-    # add bin set label to plot
+    # add bin set label to plot; an empty bin set has no curve, so its label goes at x = 0
+    x_pos = 0
     for x_pos, y in enumerate(data[bin_set]):
         if y > y_pos:
             break
@@ -291,7 +290,7 @@ for rank, bin_set in enumerate(labels):
 
 # add plot and axis titles and adjust the edges
 plt.title("Bin contamination ranking", fontsize=26)
-plt.xlabel("Acending contamination rank", fontsize=16)
+plt.xlabel("Ascending contamination rank", fontsize=16)
 plt.ylabel("Estimated bin contamination (log scale)", fontsize=16)
 plt.gcf().subplots_adjust(right=0.9)
 

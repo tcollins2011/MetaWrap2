@@ -1,8 +1,7 @@
 """The log filter collapses noise without hiding progress.
 
-Both behaviours come from one heuristic (numbers masked out of the line), so a change that
-fixes one of these is capable of breaking the other, and both are driven here off an injected
-clock rather than real time.
+Both behaviours come from one heuristic (numbers masked out of the line), so they are tested
+together, using an injected clock.
 """
 
 from itertools import pairwise
@@ -12,12 +11,12 @@ from metawrap2.logfilter import LogFilter
 #: A COMEBin training line, one per epoch, 200 of them per run.
 EPOCH = "2026-10-15 00:41:29,011 - NN training: epoch=%d/200, batches=27, loss=3.45, top1=83.06"
 
-#: A blobology search line: 5,773 of these came out of one real run, and they say nothing.
+#: A blobology search line; one run produced 5,773 of these.
 NOISE = "pass %d: searching...%d%%"
 
 
 class FakeClock:
-    """A monotonic clock the test moves by hand, so the throttle is tested without sleeping."""
+    """A monotonic clock advanced by hand, so the throttle is tested without sleeping."""
 
     def __init__(self) -> None:
         self.now = 1000.0
@@ -30,12 +29,12 @@ class FakeClock:
 
 
 def _feed(filt: LogFilter, lines: list) -> list:
-    """Every line the filter chose to write, with the line endings stripped."""
+    """Lines the filter emitted, with line endings stripped."""
     return [out.rstrip("\n") for out in (filt.feed(line) for line in lines) if out is not None]
 
 
 def test_rising_counter_is_refreshed_not_suppressed():
-    """A progress line stays visible. If this breaks, a working step looks hung for minutes."""
+    """A collapsed progress line is still refreshed at least every two epochs."""
     clock = FakeClock()
     filt = LogFilter(clock=clock)
     emitted_at = []
@@ -46,15 +45,14 @@ def test_rising_counter_is_refreshed_not_suppressed():
         clock.advance(27.0)  # COMEBin's real per-epoch time
     assert any("collapsed;" in line for _at, line in emitted_at), "all epochs past 20 hidden"
     gaps = [later - earlier for (earlier, _a), (later, _b) in pairwise(emitted_at)]
-    # A line that only arrives every 27 s cannot be refreshed at exactly 30 s, so two epochs is
-    # the worst silence this can produce - a tenth of the nine-minute gap that was reported.
+    # Lines arrive every 27 s, so with a 30 s refresh the longest gap is two epochs.
     assert max(gaps) <= 54.0
     # 20 verbatim, the notice, then a refresh every other epoch: still fewer lines than epochs.
     assert len(emitted_at) < 100
 
 
 def test_refresh_carries_the_latest_values():
-    """The refresh shows where the step is now. If it breaks, the line is stale and useless."""
+    """A refresh shows the latest line and the number suppressed."""
     clock = FakeClock()
     filt = LogFilter(clock=clock)
     for epoch in range(1, 86):
@@ -67,7 +65,7 @@ def test_refresh_carries_the_latest_values():
 
 
 def test_noisy_message_is_still_collapsed():
-    """The 5,773-line case stays collapsed. If this breaks, run.stderr is unreadable again."""
+    """A 5,773-line noisy message is collapsed, and every occurrence is counted."""
     clock = FakeClock()
     filt = LogFilter(clock=clock)
     written = []
@@ -83,7 +81,7 @@ def test_noisy_message_is_still_collapsed():
 
 
 def test_suppressed_count_is_reported_when_the_stream_ends():
-    """The closing summary still totals what was hidden, so a quiet log is never a silent one."""
+    """The closing summary reports the number of suppressed lines."""
     clock = FakeClock()
     filt = LogFilter(clock=clock)
     for i in range(1, 501):
@@ -93,7 +91,7 @@ def test_suppressed_count_is_reported_when_the_stream_ends():
 
 
 def test_summary_keeps_the_last_value_of_a_progress_message():
-    """A step killed mid-progress still says how far it got, not just how much was hidden."""
+    """The summary includes the last value of a progress message."""
     clock = FakeClock()
     filt = LogFilter(clock=clock)
     for epoch in range(1, 86):  # no clock advance: every one after the cap is suppressed
@@ -104,7 +102,7 @@ def test_summary_keeps_the_last_value_of_a_progress_message():
 
 
 def test_refresh_interval_is_respected():
-    """Nothing is emitted between refreshes. If this breaks, the filter stops filtering."""
+    """Nothing is emitted between refreshes."""
     clock = FakeClock()
     filt = LogFilter(refresh_seconds=30.0, clock=clock)
     _feed(filt, [NOISE % (i, i) + "\n" for i in range(1, 22)])  # 20 verbatim + the notice
@@ -126,7 +124,7 @@ def test_a_date_before_the_counter_does_not_hide_it():
 
 
 def test_verbose_logs_passes_everything_through():
-    """--verbose-logs stays an exact escape hatch: no collapsing, no refreshes, no summary."""
+    """With --verbose-logs, every line passes through and there is no summary."""
     filt = LogFilter(enabled=False, clock=FakeClock())
     lines = [EPOCH % epoch + "\n" for epoch in range(1, 201)]
     assert _feed(filt, lines) == [line.rstrip("\n") for line in lines]

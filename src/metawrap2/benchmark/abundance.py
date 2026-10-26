@@ -1,38 +1,29 @@
 """Scoring a ``bin_abundance_table.tsv`` against a per-sample abundance truth.
 
-This is the counterpart to :mod:`metawrap2.benchmark.assess` for the quantifiers. Binning is scored
-by asking which contigs went in which bin, and AMBER does that; a quantifier is scored by asking how
-much of each sample each bin accounted for, which is a different question with a different truth
-file. CAMI2 ships one: ``reads/reads_mapping.tsv.gz`` says which genome every read came from, per
-sample, which is a read fraction per genome and therefore an abundance per genome.
+The quantifier counterpart to :mod:`metawrap2.benchmark.assess`, which scores binning with AMBER.
+A quantifier is scored on how much of each sample each bin accounted for. The truth comes from
+CAMI2's ``reads/reads_mapping.tsv.gz``, which gives the source genome of every read per sample, and
+so a read fraction per genome.
 
-Turning that into a truth per *bin* takes one more step, and it is the step worth reading carefully.
-A bin is not a genome: it is part of one, and usually a large part of one plus a little of another.
-So the sequence a bin should account for in a sample is
+A bin holds part of a genome (often most of one plus a little of another), so its expected share of
+a sample is
 
-    the read fraction of the genome it mostly is  x  how much of that genome's assembly it holds
+    read fraction of its majority genome  x  fraction of that genome's assembly the bin holds
 
-because reads from the parts of the genome that did not make it into the bin cannot be attributed to
-the bin by any quantifier, however good. Skipping the second factor scores a 60%-complete bin as
-though it should have reported the whole genome's abundance, which penalises the quantifier for the
-binner's incompleteness.
+Reads from parts of the genome outside the bin cannot be attributed to it. Without the second
+factor a 60%-complete bin would be scored against the whole genome's abundance.
 
-**Three quantifiers, three units, and what that means for the metrics.** salmon reports a
-length-weighted median contig coverage, CoverM a percentage of the sample, sylph a k-mer-derived
-percentage. Only the last two are on the same scale as the truth at all, so the metric that decides
-anything has to be one that does not care about scale:
+salmon reports length-weighted median contig coverage, CoverM a percentage of the sample, sylph a
+k-mer-derived percentage. The metrics are chosen to be independent of scale:
 
-* ``abundance_spearman`` and ``abundance_pearson`` are rank and linear correlation across bins,
-  within a sample, averaged over samples. Both are invariant to the unit, so all three quantifiers
-  are compared on the same footing. Spearman is the one to lean on - it asks whether the quantifier
-  ordered the bins correctly, which is what an abundance table is usually read for.
-* ``abundance_l1`` is the L1 distance between the estimate and the truth after both have been
-  renormalised to sum to 1, which makes a coverage table and a percentage table comparable as
-  *compositions*. Lower is better, so it is reported as ``1 - l1/2`` under
-  ``abundance_l1_similarity`` as well, for the ranker, which assumes bigger is better.
+* ``abundance_spearman`` and ``abundance_pearson``: rank and linear correlation across bins within
+  a sample, averaged over samples. Spearman measures whether the bins are in the right order and is
+  the main metric.
+* ``abundance_l1``: L1 distance between estimate and truth after both are renormalised to sum to 1.
+  Lower is better, so ``1 - l1/2`` is also reported as ``abundance_l1_similarity`` for the ranker,
+  which assumes bigger is better.
 
-No scipy: the correlations are short enough to write out, and the benchmark harness already avoids
-pulling a numerical stack into an env that does not otherwise need one.
+The correlations are written out here to avoid a scipy dependency in the benchmark env.
 """
 
 from __future__ import annotations
@@ -58,10 +49,8 @@ _READ_ID, _READ_GENOME = 0, 1
 def read_fractions(mapping: str) -> Dict[str, float]:
     """The fraction of *mapping*'s reads coming from each genome: the per-sample abundance truth.
 
-    Only forward mates are counted. Both mates of a pair come from the same genome, so counting both
-    would give the same fractions - but a truth file that has lost some mates would then weight those
-    pairs differently from complete ones, and counting pairs is what "how much of this sample is this
-    organism" means.
+    Only forward mates are counted, so each pair counts once even when the truth file is missing
+    some mates.
     """
     counts: Dict[str, int] = {}
     total = 0
@@ -80,8 +69,7 @@ def read_fractions(mapping: str) -> Dict[str, float]:
             total += 1
     if not total:
         raise AbundanceError(
-            "No forward reads found in %s, so there is no abundance truth to score against"
-            % mapping
+            "No forward reads found in %s; cannot build the abundance truth" % mapping
         )
     return {genome: n / total for genome, n in counts.items()}
 
@@ -91,9 +79,8 @@ def bin_composition(
 ) -> Dict[str, Dict[str, int]]:
     """For each bin, how many base pairs it holds of each genome, keyed by :func:`bin_label`.
 
-    Lengths come from the truth's own contig lengths rather than from the bin file, so that a bin and
-    the genome it came from are measured with one ruler; a contig the truth does not know is counted
-    against no genome at all, which is the honest thing to do with sequence nobody can attribute.
+    Lengths come from the truth's contig lengths, so bins and genomes are measured the same way.
+    Contigs the truth does not know are not counted against any genome.
     """
     from ..io.seqio import fasta_files
 
@@ -117,14 +104,10 @@ def expected_fractions(
     genome_bp: Dict[str, int],
     genome_fraction: Dict[str, float],
 ) -> Dict[str, float]:
-    """What each bin should account for in one sample: its genome's abundance, times its share of it.
+    """Expected fraction of one sample per bin: genome abundance x the bin's share of the genome.
 
-    The bin's genome is the one it holds most base pairs of. A bin holding a little of a second
-    genome is not given credit for that second genome's abundance: a quantifier cannot be expected to
-    separate the two, and a bin that is mostly genome A is read as genome A by everybody downstream.
-
-    A bin whose genome is absent from this sample expects zero, which is a real expectation and not a
-    missing value - a quantifier reporting a genome that is not there is wrong in a way that matters.
+    The bin's genome is the one it holds most base pairs of; minor genomes in the bin get no credit.
+    A bin whose genome is absent from the sample expects 0.0, which is scored like any other value.
     """
     expected: Dict[str, float] = {}
     for label, by_genome in composition.items():
@@ -141,10 +124,8 @@ def expected_fractions(
 def read_abundance_table(path: str) -> Tuple[List[str], Dict[str, List[float]]]:
     """Read a ``bin_abundance_table.tsv`` into its sample names and one row of values per bin.
 
-    Whichever quantifier wrote it: the whole point of the shared table is that this function does not
-    have to know. A cell that is not a number - salmon writes ``nan`` for a bin it could attribute
-    nothing to - is read as zero, because "no abundance detected" is what it means here and a NaN
-    would poison every statistic computed from the column.
+    The format is the same for every quantifier. Non-numeric cells (salmon writes ``nan`` for a bin
+    with nothing attributed to it) are read as zero so they do not turn the statistics into NaN.
     """
     with open(path) as fh:
         header = fh.readline().rstrip("\n").split("\t")
@@ -178,10 +159,9 @@ def build_truth(
 ) -> Dict[str, Dict[str, float]]:
     """Assemble the whole truth: expected fraction per bin, per sample.
 
-    The four inputs are the four things the truth is made of - the bins being scored, the assembly
-    they were binned from (for contig lengths), the dataset's contig-to-genome mapping, and one
-    read-to-genome mapping per sample. Each is a file a CAMI2-shaped dataset already ships; nothing
-    here is computed from a quantifier's output, which is the point.
+    Inputs: the bins being scored, the assembly they came from (for contig lengths), the dataset's
+    contig-to-genome mapping, and one read-to-genome mapping per sample. All are files shipped with
+    a CAMI2-style dataset; no quantifier output is used.
     """
     from . import assess
 
@@ -189,7 +169,7 @@ def build_truth(
     contig_genome, _missing = assess.contig_to_genome(contig_mapping, lengths)
     if not contig_genome:
         raise AbundanceError(
-            "%s named no contig that %s contains, so there is no abundance truth to build"
+            "%s names no contig that is in %s; cannot build the abundance truth"
             % (contig_mapping, assembly)
         )
     genome_bp: Dict[str, int] = {}
@@ -203,7 +183,7 @@ def build_truth(
 
 
 def _ranks(values: Sequence[float]) -> List[float]:
-    """Ranks with ties averaged, which is what makes the rank correlation Spearman's."""
+    """Ranks with ties averaged, as Spearman's correlation requires."""
     order = sorted(range(len(values)), key=lambda i: values[i])
     ranks = [0.0] * len(values)
     i = 0
@@ -233,7 +213,7 @@ def pearson(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
 
 
 def spearman(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
-    """Rank correlation: did the quantifier put the bins in the right order?"""
+    """Spearman rank correlation, or None where it is undefined."""
     if len(xs) < 2 or len(xs) != len(ys):
         return None
     return pearson(_ranks(xs), _ranks(ys))
@@ -250,13 +230,12 @@ def _l1(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
 def score(table: str, expected_by_sample: Dict[str, Dict[str, float]]) -> Dict[str, float]:
     """Score an abundance table against a truth per sample, averaged over the samples.
 
-    *expected_by_sample* maps a sample name - as the table's own header spells it - to the expected
-    fraction for every bin. Bins are matched by label, which is why every quantifier's table goes
-    through :func:`metawrap2.constants.bin_label`: the row names agree by construction.
+    *expected_by_sample* maps a sample name, as spelled in the table header, to the expected
+    fraction for every bin. Bins are matched by label; every quantifier's table names rows with
+    :func:`metawrap2.constants.bin_label`.
 
-    A sample the truth says nothing about is skipped rather than scored as zero, because a missing
-    truth file is not a quantifier's mistake. A sample where the metric is undefined - one genome, or
-    every estimate identical - is skipped for that metric alone.
+    Samples absent from the truth are skipped. A sample where a metric is undefined (one genome, or
+    all estimates identical) is skipped for that metric only.
     """
     samples, rows = read_abundance_table(table)
     unknown = [s for s in samples if s not in expected_by_sample]
@@ -269,22 +248,17 @@ def score(table: str, expected_by_sample: Dict[str, Dict[str, float]]) -> Dict[s
         "spearman": [],
         "pearson": [],
         "l1": [],
-        # How many of the sample's bins the quantifier left out of its table, averaged over
-        # samples. Reported rather than silently absorbed: it is scored as zero abundance, and a
-        # reader comparing two quantifiers should see which one declined to answer.
+        # Bins missing from the quantifier's table, averaged over samples. They are scored as zero
+        # abundance and reported here so the omission is visible.
         "missing_bins": [],
     }
     for index, sample in enumerate(samples):
         expected = expected_by_sample.get(sample)
         if expected is None:
             continue
-        # Every bin the truth knows about, not the intersection with what the quantifier wrote.
-        # A bin absent from the table is one the quantifier attributed nothing to, which is a zero
-        # for the same reason salmon's own `nan` cells are read as zero - dropping it instead
-        # scored the tool on a smaller, easier set of bins, and rewarded omitting the hard ones.
-        # It also made two quantifiers incomparable: the CoverM path pre-seeds a row per bin while
-        # the salmon path only writes rows salmon emitted, so salmon could be scored over 40 bins
-        # and CoverM over 200, with nothing in the table saying so.
+        # Score every bin in the truth; bins absent from the table count as zero. Scoring only the
+        # intersection would reward omitting bins, and would compare quantifiers over different
+        # bin sets (CoverM writes a row per bin, salmon only the rows it emitted).
         labels = sorted(expected)
         if len(labels) < 2:
             continue
@@ -305,12 +279,12 @@ def score(table: str, expected_by_sample: Dict[str, Dict[str, float]]) -> Dict[s
         for name, values in collected.items()
         if values
     }
-    # The ranker takes bigger as better, and L1 is the other way round. 2 is the largest an L1
-    # between two compositions can be, so this maps [0, 2] onto [1, 0] without changing the order.
+    # The ranker treats bigger as better. L1 between two compositions is in [0, 2], so this maps it
+    # onto [1, 0].
     if "abundance_l1" in metrics:
         metrics["abundance_l1_similarity"] = 1.0 - metrics["abundance_l1"] / 2.0
     if not metrics:
         raise AbundanceError(
-            "Nothing could be scored: no sample in %s had two bins the truth also knows" % table
+            "Nothing to score: no sample in %s has two bins that are in the truth" % table
         )
     return metrics

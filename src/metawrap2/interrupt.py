@@ -1,20 +1,15 @@
-"""Treat being killed the same as being interrupted.
+"""Handle SIGTERM and SIGHUP the same way as Ctrl-C.
 
-Ctrl-C was already handled: the running step is recorded as ``interrupted`` so ``--resume``
-redoes it rather than trusting half-written outputs. But Ctrl-C is the *rare* case. The common
-one on a cluster is a scheduler sending SIGTERM because the job hit its wall clock or memory
-limit, or SIGHUP because the terminal went away - and those killed the process outright, leaving
-the step recorded as ``running`` forever and nothing to explain why.
+On Ctrl-C the running step is recorded as ``interrupted`` so ``--resume`` redoes it. On a cluster a
+run is more often stopped by SIGTERM (a scheduler enforcing a wall-clock or memory limit) or SIGHUP
+(the terminal closed), which killed the process and left the step recorded as ``running``.
 
-:func:`install_handlers` maps those signals onto :class:`KeyboardInterrupt`, which means every
-piece of interrupt handling already written applies to them unchanged: the ``finally`` blocks
-run, the manifest records ``interrupted``, the history entry is closed out, and the exit code is
-the conventional 128 + signal number.
+:func:`install_handlers` maps these signals onto :class:`KeyboardInterrupt`, so the existing
+interrupt handling applies: ``finally`` blocks run, the manifest records ``interrupted``, the
+history entry is closed, and the exit code is 128 + signal number.
 
-This is deliberately *not* a general signal framework. Only the signals that mean "stop now,
-your outputs are not finished" are touched; SIGINT keeps Python's own behaviour, which already
-raises KeyboardInterrupt - except in the one case where there is no such behaviour to keep, which
-:func:`install_handlers` explains.
+SIGINT keeps Python's own handler, except when it was inherited as ignored; see
+:func:`_inherited_ignored_sigint`.
 """
 
 from __future__ import annotations
@@ -22,12 +17,11 @@ from __future__ import annotations
 import signal
 from typing import Dict, List, Optional
 
-#: Signals that mean "you are being stopped". SIGHUP is included because a dropped SSH session
-#: is how a long run most often dies when it was not started under nohup or a scheduler.
+#: Signals that stop the run. SIGHUP covers a dropped SSH session for a run started without
+#: nohup or a scheduler.
 STOP_SIGNALS: List[str] = ["SIGTERM", "SIGHUP"]
 
-#: Set when a handler fires, so an exit code and a message can name the cause. Read it with
-#: :func:`received`.
+#: The signal number, set when a handler fires. Read it with :func:`received`.
 _received: Optional[int] = None
 
 _installed = False
@@ -36,8 +30,8 @@ _installed = False
 class Stopped(KeyboardInterrupt):
     """Raised in place of a fatal signal.
 
-    Subclasses KeyboardInterrupt on purpose: every existing ``except KeyboardInterrupt`` keeps
-    working, while code that wants to distinguish a scheduler kill from a user's Ctrl-C can.
+    Subclasses KeyboardInterrupt so ``except KeyboardInterrupt`` handles it, while code can still
+    tell a signal from Ctrl-C.
     """
 
     def __init__(self, signum: int):
@@ -58,22 +52,16 @@ def received() -> Optional[int]:
 
 
 def exit_code(default: int = 130) -> int:
-    """The conventional exit code for how this process was stopped: 128 + signal number."""
+    """Exit code for how this process was stopped: 128 + signal number, else *default*."""
     return 128 + _received if _received is not None else default
 
 
 def _inherited_ignored_sigint() -> List[str]:
     """``["SIGINT"]`` if this process inherited SIGINT as ignored, otherwise ``[]``.
 
-    A shell puts a background job's SIGINT and SIGQUIT to SIG_IGN, and the disposition is
-    inherited; CPython only installs its own SIGINT handler when it finds SIG_DFL, so a run
-    started with ``&`` or under nohup - exactly what a long run is started with - cannot be
-    interrupted by SIGINT at all. "kill -INT" on it does nothing, silently, and the only way left
-    to stop it is SIGTERM.
-
-    Taking SIGINT over in that case restores the behaviour the rest of this module assumes rather
-    than overriding it: where Python's handler exists it is left alone, and where the shell threw
-    it away it is put back.
+    A shell sets SIGINT and SIGQUIT to SIG_IGN for background jobs, and CPython installs its
+    SIGINT handler only when it finds SIG_DFL. A run started with ``&`` or under nohup therefore
+    ignores ``kill -INT``. In that case SIGINT is handled here; otherwise Python's handler is kept.
     """
     if getattr(signal, "SIGINT", None) is None:
         return []
@@ -86,12 +74,9 @@ def _inherited_ignored_sigint() -> List[str]:
 def install_handlers(signals: Optional[List[str]] = None) -> Dict[str, bool]:
     """Route each of *signals* to :class:`Stopped`. Returns which ones were installed.
 
-    SIGINT is added to them only when it was inherited as ignored - see
-    :func:`_inherited_ignored_sigint`.
-
-    Safe to call more than once and on any platform: a signal this OS does not have, or that
-    cannot be handled from the current thread, is skipped rather than raising. Losing the
-    handler must never be the reason a run fails to start.
+    SIGINT is added only when it was inherited as ignored (see :func:`_inherited_ignored_sigint`).
+    Safe to call more than once on any platform: a signal the OS lacks, or that cannot be handled
+    from the current thread, is skipped without raising.
     """
     global _installed
     installed: Dict[str, bool] = {}

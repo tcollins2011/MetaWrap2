@@ -1,48 +1,39 @@
-"""Collapsing the repetitive noise bioinformatics tools emit into their logs.
+"""Collapse repetitive tool output in ``run.stdout`` and ``run.stderr``.
 
-``run.stdout`` / ``run.stderr`` are meant to be the thing you open when something went wrong.
-They stop being that when a tool repeats itself tens of thousands of times. Measured on a
-real 3-sample gut metagenome run, ``INITIAL_BINNING/run.stderr`` was 1.8 MB, of which 23,812
-lines were two metaBAT2 warnings repeated 11,906 times each:
+On a 3-sample gut metagenome run, ``INITIAL_BINNING/run.stderr`` was 1.8 MB, of which 23,812 lines
+were two metaBAT2 warnings repeated 11,906 times each:
 
     WARNING: calculated a huge mean=1.2e+03. correctedLen=456 contigDepth=789
     Please report this bam file to MetaBAT under Issue #48
 
-The signal (which contigs, which sample, what actually failed) is buried. Two filters fix
-this without losing anything a user needs:
+Two filters are applied:
 
-**Progress-bar redraws.** A ``\\r``-updated progress line is one line on screen but hundreds
-of thousands of bytes in a file. Only the final state of each redraw is kept.
+**Progress-bar redraws.** Only the final state of each ``\\r``-updated line is kept.
 
-**Repeated messages.** Lines are reduced to a *signature* with numbers masked out, so
-"huge mean=1.2e+03 ... contigDepth=789" and "huge mean=9.9e+02 ... contigDepth=12" share one
-signature. The first :data:`MAX_REPEATS` occurrences are written verbatim; after that the
-message is *collapsed but refreshed* - one occurrence every :data:`REFRESH_SECONDS`, carrying
-whatever its numbers say at that moment:
+**Repeated messages.** Lines are grouped by a *signature* with numbers masked, so
+"huge mean=1.2e+03 ... contigDepth=789" and "huge mean=9.9e+02 ... contigDepth=12" match. The first
+:data:`MAX_REPEATS` occurrences are written verbatim; after that one occurrence is written every
+:data:`REFRESH_SECONDS`, with its current values:
 
     [metawrap2] NN training: epoch=85/200, loss=2.91, top1=88.4  (collapsed; 64 similar lines
     suppressed)
 
-The refresh is what makes the signature trick safe. Masking numbers cannot tell noise from
-state: COMEBin's 200 training epochs are one log line each, and after number-stripping they
-are indistinguishable from metaBAT2's warning. Suppressing them outright left a nine-minute
-gap in the log of a step that was working perfectly, with no uncollapsed copy anywhere - the
-only way to learn the run had reached epoch 85 of 200 was to find COMEBin's own
-``work_files/comebin_out/comebin_res/training.log``. CheckM's
-``Finished processing 19 of 49 (38.78%) bins.`` had the same problem. Refreshing costs one
-line per 30 s per message, which does not undo the saving: the 11,906 metaBAT2 warnings and
-the 5,773 ``pass <N>: searching...<N>%`` lines from a blobology run are still collapsed to
-roughly one line per 30 s each.
+The refresh is needed because masking numbers also groups progress lines: COMEBin's 200 training
+epochs and CheckM's ``Finished processing 19 of 49 (38.78%) bins.`` share a signature per line.
+Suppressing them outright left a nine-minute gap in the log of a working step. With the refresh,
+the 11,906 metaBAT2 warnings and the 5,773 ``pass <N>: searching...<N>%`` lines from a blobology
+run still collapse to about one line per 30 s each.
 
-A message whose numbers are advancing towards a total (``epoch=20/200``, ``19 of 49``) is also
-recognised as progress, and its *last* value - not just a count of what was dropped - is
-written when the stream ends, so the log says how far the step got even if it died seconds
-after a refresh.
+A message whose counter rises towards a fixed total (``epoch=20/200``, ``19 of 49``) is treated as
+progress, and its last value is written when the stream ends, so the log shows how far the step got.
 
-Nothing here touches a command's *data* output: when a tool's stdout is the result
-(``stdout_path=``, e.g. ``bwa mem > x.sam``) it is written straight to the file and never
-passes through a filter. Filtering applies only to the log/screen stream, and
-``--verbose-logs`` turns it off entirely.
+Some tools print nothing for hours (COMEBin training, SemiBin2 clustering), and a silent screen
+looks the same as a hung process. :class:`Heartbeat` prints one line per :data:`HEARTBEAT_SECONDS`
+of silence with the step's elapsed time and the tool's last line. It goes to the screen only, so
+the captured log is the same with or without it.
+
+Data output is not filtered: when a tool's stdout is the result (``stdout_path=``, e.g.
+``bwa mem > x.sam``) it goes straight to the file. ``--verbose-logs`` turns filtering off.
 """
 
 from __future__ import annotations
@@ -57,15 +48,18 @@ MAX_REPEATS = 20
 
 #: Seconds between refreshes of a collapsed message.
 #:
-#: The interval has to satisfy two things at once. A user watching a long step must not mistake
-#: it for hung: COMEBin trains for 200 epochs at roughly 27 s each, so at 30 s every refresh
-#: moves the epoch counter, and the silence between refreshes is never long enough to look like
-#: a stall (the defect this replaced left nine minutes of nothing). And a pathological repeat
-#: must stay cheap: 11,906 copies of one metaBAT2 warning in a 40-minute step come to about 80
-#: refresh lines rather than 11,906, which is the same order of saving as suppressing them
-#: entirely. Anything much shorter starts to reproduce the noise; much longer and a step that
-#: emits one line a minute looks dead between refreshes.
+#: COMEBin trains at about 27 s per epoch, so at 30 s each refresh shows a new epoch. 11,906
+#: copies of one metaBAT2 warning in a 40-minute step become about 80 lines. A much shorter
+#: interval brings back the noise; a much longer one makes slow steps look stalled.
 REFRESH_SECONDS = 30.0
+
+#: Seconds of silence before a heartbeat line is printed. 0 turns heartbeats off.
+#:
+#: Twice :data:`REFRESH_SECONDS`: a collapsed message still gets a refresh line every 30 s, so 60 s
+#: with nothing shown means the tool has stopped printing. It is also long enough that a step
+#: printing about one line a minute (metaSPAdes between stages, CheckM between bins) does not get a
+#: heartbeat after each line.
+HEARTBEAT_SECONDS = 60.0
 
 #: Numbers, hex addresses and timings carry the variation between otherwise-identical lines.
 _NUMBER_RE = re.compile(
@@ -76,8 +70,8 @@ _NUMBER_RE = re.compile(
     re.VERBOSE,
 )
 
-#: An ``n/total`` or ``n of total`` pair - the shape a counted-progress line has in every tool
-#: seen so far (COMEBin's ``epoch=20/200``, CheckM's ``Finished processing 19 of 49``).
+#: An ``n/total`` or ``n of total`` pair, as in COMEBin's ``epoch=20/200`` and CheckM's
+#: ``Finished processing 19 of 49``.
 _PROGRESS_RE = re.compile(r"(\d+)\s*(?:/|\bof\b)\s*(\d+)")
 
 _PREFIX = "[metawrap2]"
@@ -86,6 +80,92 @@ _PREFIX = "[metawrap2]"
 def signature(line: str) -> str:
     """A form of *line* with the varying numeric parts masked, for grouping repeats."""
     return _NUMBER_RE.sub("<N>", line.strip())
+
+
+def duration(seconds: float) -> str:
+    """An elapsed time as ``2h05m``, ``1m15s`` or ``45s``."""
+    seconds = max(0.0, seconds)
+    if seconds >= 3600:
+        return "%dh%02dm" % (int(seconds) // 3600, (int(seconds) % 3600) // 60)
+    if seconds >= 60:
+        return "%dm%02ds" % (int(seconds) // 60, int(seconds) % 60)
+    return "%ds" % int(seconds)
+
+
+class Heartbeat:
+    """One line per interval of silence, so a working step can be told apart from a hung one.
+
+    Fed every line the tool produces (:meth:`note`) and polled from a separate thread (:meth:`due`,
+    :attr:`tick_seconds`), because the readers are blocked on the tool's pipe while it is silent.
+
+    *clock* is injectable for tests and must be monotonic, as in :class:`LogFilter`.
+
+    Heartbeats are printed whether or not the output is a terminal, as the collapser's refresh
+    lines are. Each is a new line; a ``\\r`` rewrite would be overwritten by the next line the pumps
+    write.
+    """
+
+    def __init__(
+        self,
+        step: str = "",
+        interval: float = HEARTBEAT_SECONDS,
+        enabled: bool = True,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.step = step
+        self.interval = interval
+        #: An interval of 0 turns heartbeats off.
+        self.enabled = enabled and interval > 0
+        self._clock = clock
+        self._started = clock()
+        #: The last line the tool produced, and when. The time is None until the first line, so
+        #: the heartbeat can say the tool has printed nothing.
+        self._last_line = ""
+        self._last_line_at: Optional[float] = None
+        #: Start of the current interval: the last line or the last heartbeat. Separate from
+        #: ``_last_line_at`` so a heartbeat restarts the interval but the reported silence keeps
+        #: growing.
+        self._counting_from = self._started
+
+    @property
+    def tick_seconds(self) -> float:
+        """How often a watcher should call :meth:`due`.
+
+        At most 5 s. Polling once per interval could delay a heartbeat by up to a second interval.
+        """
+        return min(self.interval, 5.0) if self.enabled else 5.0
+
+    def note(self, line: str) -> None:
+        """Record a line the tool produced. Blank lines do not count as output."""
+        text = line.strip()
+        if not text:
+            return
+        self._last_line = text
+        self._last_line_at = self._clock()
+        self._counting_from = self._last_line_at
+
+    def due(self) -> Optional[str]:
+        """The heartbeat line to show now, or None if the step has not been silent long enough."""
+        if not self.enabled:
+            return None
+        now = self._clock()
+        if now - self._counting_from < self.interval:
+            return None
+        self._counting_from = now
+        subject = "%s is" % self.step if self.step else "this step is"
+        if self._last_line_at is None:
+            return "%s %s still running, %s elapsed, and has printed nothing at all yet\n" % (
+                _PREFIX,
+                subject,
+                duration(now - self._started),
+            )
+        return "%s %s still running, %s elapsed, silent for %s; last line: %s\n" % (
+            _PREFIX,
+            subject,
+            duration(now - self._started),
+            duration(now - self._last_line_at),
+            self._last_line[:160],
+        )
 
 
 def collapse_redraws(text: str) -> str:
@@ -106,10 +186,9 @@ def counter_positions(line: str) -> Tuple[Tuple[int, int], ...]:
 def _is_rising(before: Tuple[Tuple[int, int], ...], after: Tuple[Tuple[int, int], ...]) -> bool:
     """True if some counter kept its total and raised its count between two occurrences.
 
-    Compared position by position rather than only on the first pair, because the leading
-    numbers of a log line are often a slash-formatted date or a time, which never moves - and
-    on ``2026/10/15 ... epoch=21/200`` the first pair would hide the one that matters. The total
-    has to match so that two unrelated lines sharing a signature are not read as one counter.
+    All positions are compared because the first pair is often a date, as in
+    ``2026/10/15 ... epoch=21/200``. The total must match so that unrelated lines with the same
+    signature are not taken for one counter.
     """
     return any(old[1] == new[1] and new[0] > old[0] for old, new in zip(before, after))
 
@@ -119,13 +198,12 @@ class _Repeat:
     """What is known about one message signature while the stream is being read."""
 
     count: int = 0
-    #: The most recent occurrence, verbatim - this is what a refresh carries.
+    #: The most recent occurrence, verbatim, written by a refresh.
     latest: str = ""
     positions: Tuple[Tuple[int, int], ...] = ()
     progress: bool = False
-    #: Occurrences dropped over the whole stream, and since the last line emitted for this
-    #: signature. The first is the honest total for the closing summary; the second is what a
-    #: refresh line reports, since the total at that point says nothing about the gap.
+    #: Occurrences dropped over the whole stream (for the closing summary), and since the last
+    #: line emitted for this signature (for refresh lines).
     suppressed: int = 0
     since_emit: int = 0
     last_emit: float = 0.0
@@ -134,9 +212,12 @@ class _Repeat:
 class LogFilter:
     """Streaming filter: pass lines through, collapsing redraws and refreshing repeats.
 
-    *clock* is injected so the throttle can be tested without sleeping; it must be monotonic,
-    because a wall clock stepped by NTP or a DST change can make the interval negative (no
-    refresh ever again) or enormous (a refresh on every line).
+    *clock* is injectable for tests and must be monotonic; a wall clock stepped by NTP can make
+    the interval negative or very large.
+
+    *heartbeat* is told about every line. A command's stdout and stderr filters share one
+    :class:`Heartbeat`, so output on either stream counts, and a quiet minute gives one heartbeat,
+    not two.
     """
 
     def __init__(
@@ -145,15 +226,21 @@ class LogFilter:
         enabled: bool = True,
         refresh_seconds: float = REFRESH_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        heartbeat: Optional[Heartbeat] = None,
     ):
         self.max_repeats = max_repeats
         self.enabled = enabled
         self.refresh_seconds = refresh_seconds
         self._clock = clock
+        self._heartbeat = heartbeat
         self._seen: Dict[str, _Repeat] = {}
 
     def feed(self, line: str) -> Optional[str]:
         """Return the line to write, or None to suppress it."""
+        # Before the --verbose-logs check: heartbeats are not filtering, so that flag leaves
+        # them on.
+        if self._heartbeat is not None:
+            self._heartbeat.note(line)
         if not self.enabled:
             return line
         if "\r" in line:
@@ -176,8 +263,7 @@ class LogFilter:
         if state.count == self.max_repeats + 1:
             return self._emit(
                 state,
-                # %g, not %d: a sub-second interval (the tests, and anything tuning this) would
-                # otherwise be announced as "every 0s".
+                # %g so a sub-second interval is not shown as "every 0s".
                 "%s further occurrences of this message are collapsed to one line every %gs, "
                 "carrying its latest values: %s\n" % (_PREFIX, self.refresh_seconds, sig[:160]),
             )
@@ -213,9 +299,7 @@ class LogFilter:
             if not state.suppressed:
                 continue
             if state.progress:
-                # For a counter, the last value is worth more than the signature: this is the
-                # line that says how far the step got, and a step killed a few seconds after a
-                # refresh would otherwise end its log 29 s short of what it actually reached.
+                # For a counter, write the last value, which shows how far the step got.
                 out.append(
                     "%s %s  (collapsed; %d similar lines suppressed in total)\n"
                     % (_PREFIX, state.latest, state.suppressed)
@@ -228,5 +312,5 @@ class LogFilter:
         return out
 
     def stats(self) -> Tuple[int, int]:
-        """(distinct messages, total suppressed lines) - for tests and reporting."""
+        """(distinct messages, total suppressed lines), for tests and reporting."""
         return len(self._seen), sum(state.suppressed for state in self._seen.values())

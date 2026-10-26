@@ -1,9 +1,7 @@
-"""What built this catalogue: the strategy `run` and `cohort` record in the study manifest.
+"""The catalogue strategy `run` and `cohort` record in the study manifest.
 
-A co-assembly catalogue and a per-sample one are different objects - different genome counts,
-different redundancy, different per-genome coverage - and nothing in a finished study directory used
-to say which you were holding. These tests pin the record itself, because the whole value of it is
-that it is there to be read later by someone who did not run the study.
+Co-assembly and per-sample catalogues differ in genome count, redundancy and per-genome coverage.
+These tests check that the manifest records which strategy built the catalogue.
 """
 
 from __future__ import annotations
@@ -48,13 +46,9 @@ def _recorded(tmp_path, monkeypatch, coassemble: bool, command=driver.main, *ext
 
 
 def test_a_co_assembly_run_records_co_assembly(tmp_path, monkeypatch, capsys):
-    """`metawrap2 run` says so in the manifest, and `metawrap2 status --json` reads it back.
-
-    Regresses the case this exists for: two studies in two directories, one of each kind, and
-    nothing in either to tell them apart six months later.
-    """
+    """`metawrap2 run` records co-assembly, and `metawrap2 status --json` reads it back."""
     record, out = _recorded(tmp_path, monkeypatch, coassemble=True)
-    # Dereplication is not merely off here, it has nothing to do: one assembly, one bin set.
+    # One assembly and one bin set, so there is nothing to dereplicate.
     assert record == {"strategy": driver.CO_ASSEMBLY, "samples": 2, "dereplicated": False}
 
     capsys.readouterr()
@@ -63,24 +57,23 @@ def test_a_co_assembly_run_records_co_assembly(tmp_path, monkeypatch, capsys):
 
 
 def test_a_per_sample_cohort_records_per_sample(tmp_path, monkeypatch):
-    """`metawrap2 cohort` records the other strategy, and that dereplication collapsed the bins.
+    """`metawrap2 cohort` records per-sample and that dereplication collapsed the bins.
 
-    Regresses the alias drifting from the driver: `cohort` is `run --no-coassembly`, so the record
-    has to come out of the study the planner settled on rather than out of which command was typed.
+    `cohort` is `run --no-coassembly`, so the record must come from the planned study, not from
+    the command name.
     """
     record, _out = _recorded(tmp_path, monkeypatch, coassemble=False, command=cohort_cmd.main)
     assert record == {"strategy": driver.PER_SAMPLE, "samples": 2, "dereplicated": True}
 
 
 def test_the_strategy_is_recorded_even_when_dereplication_was_skipped(tmp_path, monkeypatch):
-    """A cohort with `dereplicate` skipped still records what it was - and that it did not collapse.
+    """A cohort with `dereplicate` skipped records its strategy and that bins were not collapsed.
 
-    Regresses the worst comparison this feature is meant to prevent: without dereplication the
-    per-sample bin sets are never collapsed, so the catalogue is redundant by construction and its
-    genome count is not comparable with a co-assembly's or with a dereplicated cohort's.
+    Without dereplication the catalogue is redundant, and its genome count is not comparable with
+    a co-assembly's or a dereplicated cohort's.
     """
     record, out = _recorded(tmp_path, monkeypatch, False, driver.main, "--skip", "dereplicate")
     assert record == {"strategy": driver.PER_SAMPLE, "samples": 2, "dereplicated": False}
-    # And recorded before any step ran, so an interrupted study says what it was too.
+    # Recorded before any step ran, so an interrupted study is also labelled.
     with open(os.path.join(out, driver._STATE_DIR, MANIFEST_NAME)) as fh:
         assert json.load(fh)["steps"] == {}

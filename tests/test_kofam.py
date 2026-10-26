@@ -1,11 +1,9 @@
-"""KO assignment, and the threshold policy that is the substance of it.
+"""Tests for KO assignment and its threshold policy.
 
-The policy is where this step's error budget lives. On 396 genomes with identical gene calls,
-MicrobeAnnotator's tool-specific KO calls were 35% contradicted by eggNOG against anvi'o's 7.5%, and
-the difference is entirely in what each tool accepts as a hit. So these tests are about acceptance
-rules rather than about HMMER: that a curated threshold is compared against the score KOfam
-calibrated it on, that a permissive call never displaces a confident one, and that every call says
-how it qualified.
+On 396 genomes with identical gene calls, eggNOG contradicted 35% of MicrobeAnnotator's
+tool-specific KO calls and 7.5% of anvi'o's; the difference comes from what each accepts as a hit.
+Checked: a curated threshold is compared against the score KOfam calibrated it on, a permissive call
+never displaces a curated one, and every call records how it qualified.
 """
 
 from __future__ import annotations
@@ -65,16 +63,16 @@ def test_the_thresholds_are_found_beside_the_profiles(kofam_dir):
 
 
 def test_a_domain_calibrated_threshold_is_compared_against_the_domain_score():
-    """The silent error this guards against: 8,697 profiles calibrate on the best single domain.
+    """Domain-calibrated thresholds (8,697 profiles) are compared against the domain score.
 
-    A multi-domain protein's full score is well above its best domain's, so comparing the full
-    score against a domain-calibrated threshold accepts hits KOfam would reject.
+    A multi-domain protein's full score exceeds its best domain's, so comparing it would accept
+    hits KOfam rejects.
     """
     profile = _profile(threshold=180.0, score_type=kofam.ScoreType.DOMAIN)
     hit = _hit(full=200.0, domain=150.0)
     assert hit.score_for(profile.score_type) == 150.0
     assert kofam.assign_gene([hit], {profile.knum: profile}, kofam.ThresholdPolicy()) == []
-    # And a full-calibrated threshold is compared against the full score.
+    # A full-calibrated threshold is compared against the full score.
     profile = _profile(threshold=180.0, score_type=kofam.ScoreType.FULL)
     calls = kofam.assign_gene([hit], {profile.knum: profile}, kofam.ThresholdPolicy())
     assert [(c.knum, c.score) for c in calls] == [("K00001", 200.0)]
@@ -84,10 +82,10 @@ def test_a_domain_calibrated_threshold_is_compared_against_the_domain_score():
 
 
 def test_a_curated_hit_is_never_displaced_by_a_permissive_one():
-    """The ordering is the policy: permissive options add genes, they do not overwrite calls.
+    """Permissive options add genes but do not replace curated calls.
 
-    A gene with a curated-passing hit must not end up labelled "relative" because some other
-    profile scored higher under the looser rule.
+    A gene with a curated hit keeps it even when another profile scores higher under the looser
+    rule.
     """
     good = _profile("K00001", threshold=100.0)
     tempting = _profile("K00002", threshold=10_000.0)
@@ -104,12 +102,11 @@ def test_a_curated_hit_is_never_displaced_by_a_permissive_one():
 
 
 def test_every_profile_file_is_searched_in_one_pass(tmp_path, monkeypatch):
-    """KOfam ships one file per KO, and hmmsearch parallelises across *queries*, not within one.
+    """All profile files are searched in one hmmsearch call, with the requested threads.
 
-    A loop calling hmmsearch once per file runs 27,930 searches of a single query each: `cpus` has
-    nothing to divide, so the step runs on one core however many threads it was given. Measured on
-    2,339 genes, the per-file loop held 108% CPU and had not finished in ten minutes; batched, the
-    same run sits above 1000%. This pins the batching, not the speed.
+    KOfam has one file per KO, and hmmsearch parallelises across queries. One call per file (27,930
+    single-query searches) used one core: on 2,339 genes it ran at 108% CPU and had not finished in
+    ten minutes, against over 1000% batched.
     """
     import pyhmmer
 
@@ -123,7 +120,7 @@ def test_every_profile_file_is_searched_in_one_pass(tmp_path, monkeypatch):
     faa.write_text(">g1\nMKV\n")
     hmms = []
     for knum in ("K00001", "K00002", "K00003"):
-        # A real profile each, so this exercises HMMFile rather than a stand-in for it.
+        # A real profile file each, so HMMFile is exercised.
         path = tmp_path / ("%s.hmm" % knum)
         path.write_text(_MINIMAL_HMM % knum)
         hmms.append(str(path))

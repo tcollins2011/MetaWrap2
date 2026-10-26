@@ -9,8 +9,8 @@ from metawrap2 import limits
 
 @pytest.fixture(autouse=True)
 def _no_ambient_overrides():
-    # Overrides are process-global by design (they come from flags parsed before any module runs),
-    # so a test that sets one must not leak it into the next. Same for the cached GPU count.
+    # Overrides are process-global (set from flags parsed before any module runs), so clear them
+    # and the cached GPU count around each test.
     limits.clear_overrides()
     limits._count_gpus.cache_clear()
     yield
@@ -48,15 +48,13 @@ def test_fractions_are_applied_to_the_measured_machine(monkeypatch):
     assert budget.threads == 10
     assert budget.memory_gb == pytest.approx(20.0)
 
-    # Absolutes are still clamped to the machine: asking for more than exists is a mistake to
-    # correct, not a request to honour into an OOM.
+    # Absolutes are clamped to the machine.
     machine(cores=8, memory_gb=16, monkeypatch=monkeypatch)
     budget = limits.resolve(limits.LimitsConfig(max_threads=64, max_memory_gb=256))
     assert budget.threads == 8
     assert budget.memory_gb == pytest.approx(16.0)
 
-    # Per-worker shares divide the budget rather than multiplying it: eight workers add up to
-    # the budget, not eight times it.
+    # Per-worker shares divide the budget, so all workers together stay within it.
     machine(cores=96, memory_gb=200, monkeypatch=monkeypatch)
     budget = limits.resolve(limits.LimitsConfig(max_threads=96, max_memory_gb=160))
     worker = budget.per_worker(8)
@@ -98,7 +96,7 @@ def test_resolve_threads_caps_to_the_budget(monkeypatch, tmp_path):
     settings = Settings(limits=limits.LimitsConfig(max_threads=8))
     args = Args(threads=32)
     assert _common.resolve_threads(args, settings) == 8
-    # Modules read args.threads directly after this, so the cap has to land there too.
+    # Modules read args.threads afterwards, so the cap is written back to it.
     assert args.threads == 8
 
     # The memory ceiling is wired the same way.
@@ -107,22 +105,18 @@ def test_resolve_threads_caps_to_the_budget(monkeypatch, tmp_path):
     assert _common.resolve_memory_gb(mem_args, Settings()) == 80
     assert mem_args.memory == 80
 
-    # And the disk ceiling. Unlike the size estimate, which only warns, this one is measured - so
-    # there is nothing to be wrong about and no reason to start a step the monitor would stop
-    # minutes later: a full filesystem stops the step before it starts.
+    # Disk ceiling: unlike the size estimate, which only warns, free space is measured, so a full
+    # filesystem stops the step before it starts.
     fake_usage(monkeypatch, total=1000, free=10)
     with pytest.raises(SystemExit):
         _common.check_disk_space("assembly", Settings(), [], str(tmp_path))
 
 
 def test_a_monitor_stopped_mid_sample_does_not_interrupt_the_next_step(monkeypatch):
-    """stop() has to win against a watcher already inside sample().
+    """A watcher already inside sample() does not interrupt after stop() has been called.
 
-    sample() is two statvfs calls and an os.stat, which on a stalled mount takes seconds. A step
-    that finished in that window has already called stop(), so interrupting afterwards delivers a
-    KeyboardInterrupt into whatever the process does next - under `run` or `cohort`, the following
-    step, which is then aborted and recorded as interrupted while the step that was being watched
-    is reported as a disk stop it never hit.
+    sample() can take seconds on a stalled mount. An interrupt after stop() would abort the next
+    step under `run` or `cohort` and record the watched step as a disk stop.
     """
     import threading
 
@@ -153,7 +147,7 @@ def test_a_monitor_stopped_mid_sample_does_not_interrupt_the_next_step(monkeypat
     monitor.start()
     assert sampling.wait(5), "the watcher never reached sample()"
 
-    # The step finishing, while sample() is still in flight.
+    # The step finishes while sample() is still running.
     stopped = threading.Thread(target=monitor.stop)
     stopped.start()
     release.set()

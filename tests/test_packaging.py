@@ -1,14 +1,10 @@
-"""Tests that the packaging metadata does not drift out of step with pyproject.toml.
+"""Tests that the packaging metadata stays consistent with pyproject.toml.
 
-MetaWrap2 declares its runtime requirements in four places that no tool cross-checks: the wheel
-(`pyproject.toml`), the conda recipe (`conda_pkg/meta.yaml`), the Docker image, and the Apptainer
-definition. Three of them had fallen behind - still asking for Python 3.8 after the floor moved to
-3.10, and the conda recipe still listing only biopython after the plotting stack became a hard
-requirement, which would have produced a conda package that installs and then fails on the first
-figure.
-
-None of that is caught by the test suite, CI, or a wheel build, because each file is only read by
-the tool that consumes it. These tests read them.
+Runtime requirements are declared in four places: `pyproject.toml`, the conda recipe
+(`conda_pkg/meta.yaml`), the Docker image and the Apptainer definition. Each is read only by its own
+tool, so nothing else catches drift. Three had fallen behind: they still required Python 3.8 after
+the minimum became 3.10, and the conda recipe listed only biopython after the plotting stack became
+a hard requirement.
 """
 
 from __future__ import annotations
@@ -52,12 +48,7 @@ def requirement_names(pyproject: Dict) -> List[str]:
 
 
 def test_the_version_is_the_same_in_every_file_that_states_it():
-    """Four files carry it, and a release that bumps three of them ships a lie in the fourth.
-
-    `metawrap2 -v`, the wheel's metadata, the conda recipe and CITATION.cff are all read by
-    somebody - the last one by anybody citing this - so they are checked together rather than by
-    whoever remembers at release time.
-    """
+    """CITATION.cff and the conda recipe state the same version as metawrap2.__version__."""
     import re
 
     from metawrap2 import __version__
@@ -90,12 +81,10 @@ def test_every_env_yaml_sits_inside_the_package():
 
 
 def test_the_pre_commit_hooks_run_the_same_formatter_versions_ci_does(pyproject):
-    """Two CI failures came from this: the hook and CI disagreeing about what is correctly formatted.
+    """The pre-commit hook revs for black, isort and ruff match the dev-extra pins used by CI.
 
-    CI installs the dev extras and runs black/ruff/isort at the versions pinned there; the commit
-    hook fetches its own copy at the `rev` in .pre-commit-config.yaml. When those differ - ruff
-    v0.6.9 against 0.16.8, then black 24.8.0 against 26.5.1 - the hook rewrites a file one way,
-    CI's check wants it the other, and a push that passed every local gate fails remotely.
+    A mismatch (ruff v0.6.9 against 0.16.8, black 24.8.0 against 26.5.1) caused two CI failures on
+    code that passed the local hooks.
     """
     import re
 
@@ -125,8 +114,8 @@ def test_the_pre_commit_hooks_run_the_same_formatter_versions_ci_does(pyproject)
         )
 
 
-#: Imports the dependency check skips: the package itself, and the one version-guarded pair -
-#: tomllib is stdlib from 3.11, tomli its declared stand-in on 3.10.
+#: Imports the dependency check skips: the package itself, and tomllib (stdlib from 3.11) with its
+#: 3.10 stand-in tomli.
 _IMPORT_EXEMPT = ("metawrap2", "tomli", "tomllib")
 
 #: Import name -> distribution name, where they differ.
@@ -139,7 +128,7 @@ _DIST_FOR_IMPORT = {
 
 
 def _module_level_imports(path: str) -> set:
-    """Top-level names imported when *path* is imported - not those deferred into a function."""
+    """Top-level names imported when *path* is imported, excluding imports inside functions."""
     import ast
     import sys
 
@@ -150,8 +139,8 @@ def _module_level_imports(path: str) -> set:
     while pending:
         node = pending.pop()
         if isinstance(node, (ast.Try, ast.If)):
-            # A guarded import (try/except ImportError, or a version check) is still run at import.
-            # The except branch is the fallback, so only the body counts as required.
+            # Guarded imports still run at import time; only the body counts, since the except
+            # branch is the fallback.
             pending.extend(node.body)
             continue
         if isinstance(node, ast.Import):
@@ -162,12 +151,11 @@ def _module_level_imports(path: str) -> set:
 
 
 def test_every_import_that_runs_at_import_time_is_a_declared_dependency(pyproject):
-    """`import metawrap2.genecall` raised ModuleNotFoundError on a clean install.
+    """Every module-level third-party import is listed in [project].dependencies.
 
-    pyrodigal was imported at the top of genecall.py and declared nowhere, so `annotate` worked
-    only on the machine where it had been installed by hand - and the test collecting genecall
-    failed everywhere else. A dependency imported inside a function is a deliberate optional one
-    and is not checked here; one imported at module level is not optional, whatever was meant.
+    Guards against a repeat of pyrodigal, imported at the top of genecall.py but not declared, which
+    made `import metawrap2.genecall` fail on a clean install. Imports inside functions are treated
+    as optional and not checked.
     """
     declared = set(requirement_names(pyproject))
     missing = {}
@@ -184,7 +172,7 @@ def test_every_import_that_runs_at_import_time_is_a_declared_dependency(pyprojec
 
 
 def test_the_conda_recipe_declares_what_pyproject_declares(pyproject):
-    """meta.yaml says to keep the two lists in step; this is what makes that more than a comment."""
+    """The conda recipe's run requirements match pyproject's dependencies."""
     pip_names = set(requirement_names(pyproject)) - {"tomli"}
     with open(os.path.join(REPO, "conda_pkg", "meta.yaml")) as fh:
         run = fh.read().split("  run:", 1)[1].split("\n\n", 1)[0]

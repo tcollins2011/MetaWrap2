@@ -1,10 +1,8 @@
-"""binning --comebin: the command it builds, the input it filters, and the bins it adopts.
+"""Tests for binning --comebin: the command, the input filter, and the adopted bins.
 
-COMEBin's two defaults that cannot be left alone are the opposite kind of problem from VAMB's. It
-seeds nothing unless asked, so two runs over one assembly disagree; and its device default is plain
-``cuda`` rather than SemiBin2's ``auto``, so on a machine without a GPU the default does not degrade
-to the CPU, it fails. The third thing tested here is not a default at all but a missing flag:
-``run_comebin.sh`` never forwards ``--contig_len``, so ``-l`` is honoured by filtering the input.
+COMEBin seeds nothing unless asked, and its device default is ``cuda`` (SemiBin2 uses ``auto``),
+so it fails on a machine without a GPU. Both are set explicitly. ``run_comebin.sh`` does not
+forward ``--contig_len``, so ``-l`` is applied by filtering the input.
 """
 
 import os
@@ -50,11 +48,11 @@ def test_the_command_pins_a_seed_and_the_cpu(tmp_path, monkeypatch):
     binning._run_comebin(_Args(str(tmp_path / "out")), "e", str(work), "asm.fa")
 
     cmd = calls[0][0]
-    # COMEBin forwards --seed only when -s is given, so without this nothing is seeded at all.
+    # COMEBin seeds only when -s is given.
     assert "-s %d" % binning.COMEBIN_SEED in cmd
-    # And its device default is cuda outright, not "a GPU if there is one".
+    # Its device default is cuda, with no CPU fallback.
     assert "-d cpu" in cmd and binning.DEFAULT_LEARNED_DEVICE == "cpu"
-    # The entry point is the shell script; there is no "comebin" executable to call instead.
+    # The entry point is the shell script; there is no "comebin" executable.
     assert cmd.startswith("run_comebin.sh ")
-    # It globs *.bam out of a directory, like VAMB, so work_files goes over whole.
+    # It globs *.bam from a directory, like VAMB, so work_files is passed as a whole.
     assert "-p %s" % work in cmd

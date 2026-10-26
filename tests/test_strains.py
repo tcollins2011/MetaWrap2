@@ -1,9 +1,8 @@
-"""Strain-level comparison: the breadth guard, and the units inStrain stores its identities in.
+"""Tests for strain-level comparison: the breadth floor and the units of inStrain's identities.
 
-Both fixtures are real inStrain 1.10.0 output over three human gut metagenomes and this repo's 26
-refined bins (see tests/fixtures/strains/SOURCE.md). They exist because the first real run of this
-module reported every one of 42 comparisons as "not in both" - two schema mistakes that each look
-like a plausible biological answer.
+Both fixtures are inStrain 1.10.0 output over three human gut metagenomes and this repo's 26
+refined bins (see tests/fixtures/strains/SOURCE.md). The first run of this module reported all 42
+comparisons as "not in both" because of two schema mistakes.
 """
 
 from __future__ import annotations
@@ -18,15 +17,14 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "strains")
 COMPARE = os.path.join(FIXTURES, "genomeWide_compare.tsv")
 
 
-# ── the units, which are the whole trap ──────────────────────────────────────────────────────
+# ── units ────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_identities_are_stored_as_fractions_and_parsed_as_percentages():
     """inStrain's table says 0.99999945; its documentation and paper say 99.999%.
 
-    Parsed literally against the published threshold, every comparison in this fixture is a
-    different strain over too little of the genome to tell - which is exactly what the first real
-    run reported, with no error anywhere.
+    Parsed as written and compared with the published threshold, every comparison in this fixture
+    would be a different strain over too little of the genome, as the first run reported.
     """
     comparisons = {c.genome: c for c in strains.parse_comparison(COMPARE)}
     bin1 = comparisons["bin.1"]
@@ -34,9 +32,8 @@ def test_identities_are_stored_as_fractions_and_parsed_as_percentages():
     assert bin1.percent_compared == pytest.approx(87.33, abs=0.01)
     # Above the threshold and above the breadth floor, so a real same-strain call.
     assert bin1.verdict is strains.StrainVerdict.SAME
-    # `percent_compared`, not `percent_genome_compared` - and the wrong name is not an error: a
-    # missing column parses to None, which reads as "not in both", so the whole table came back as
-    # an absence rather than as a parse failure.
+    # `percent_compared`, not `percent_genome_compared`. A wrong name parses to None, which reads
+    # as "not in both".
     assert strains.COMPARE_COLUMNS["percent_compared"] == "percent_compared"
 
 
@@ -44,10 +41,10 @@ def test_identities_are_stored_as_fractions_and_parsed_as_percentages():
 
 
 def test_a_perfect_popani_over_a_sliver_of_a_genome_is_undetermined():
-    """Two samples sharing 2% of a genome at 100% identity is not evidence of a shared strain.
+    """High popANI over a small fraction of the genome is UNDETERMINED, not a shared strain.
 
-    Measured on this fixture: 13 comparisons have popANI >= 99.999% over 0.1-46.8% of the genome.
-    Without the floor the module would claim 17 shared strains where 4 are supportable.
+    In this fixture 13 comparisons have popANI >= 99.999% over 0.1-46.8% of the genome. Without
+    the breadth floor there would be 17 shared strains instead of 4.
     """
     comparisons = strains.parse_comparison(COMPARE)
     high_identity = [c for c in comparisons if (c.pop_ani or 0) >= strains.SAME_STRAIN_POPANI]
@@ -68,8 +65,7 @@ SAMPLES = ("ERR011347", "ERR011348")
 def test_the_genome_cannot_come_from_the_msa_column():
     """TRACS truncates the reference name at the first dot: `combinedbin` for both bin.1 and bin.4.
 
-    The first version of this parser read that column and returned the genome `bin` for every row -
-    two different genomes collapsed onto one name, with nothing to say so.
+    Reading that column gave the genome `bin` for every row, merging two genomes.
     """
     with open(TRACS) as fh:
         rows = list(__import__("csv").DictReader(fh))

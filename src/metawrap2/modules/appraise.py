@@ -1,23 +1,19 @@
-"""MetaWrap2 appraise: what share of the community the bins represent, and what has no genome at all.
+"""MetaWrap2 appraise: the share of the community the bins represent, and lineages with no genome.
 
-A bin set reports what it found. The question it cannot answer about itself is what it missed, and
-the binned fraction of the assembly - which `bin_refinement` already reports - is not that answer:
-it is a fraction of *assembled base pairs*, and what assembles well and what is abundant are
-different things. A bin set can hold 60% of the assembly and stand for 30% of the cells.
+The binned fraction of the assembly that `bin_refinement` reports is a fraction of assembled base
+pairs, and assembly and abundance differ: a bin set can hold 60% of the assembly and represent 30%
+of the cells.
 
-SingleM answers the per-cell version from the reads directly. It finds single-copy marker genes in
-the unassembled reads, finds the same markers in the genomes, and compares: each marker sequence in
-the reads is either present in a genome (binned), present in the assembly but no genome, or absent
-from both. Weighted by read coverage, that gives the share of the community the genomes represent -
-and, from the leftover, a list of lineages present in the sample with no genomic representation at
-all. The second output is the more useful one for deciding what to do next.
+SingleM finds single-copy marker genes in the unassembled reads and in the genomes and compares
+them. Each marker sequence in the reads is present in a genome (binned), present in the assembly
+but no genome, or absent from both. Weighted by read coverage this gives the share of the
+community the genomes represent, and the remainder gives a list of lineages in the sample with no
+genome.
 
-Three steps, all of them SingleM's: profile the reads, profile the genomes, appraise one against
-the other. The module runs all three because the intermediate OTU tables are not interesting on
-their own, and keeps them anyway - they are expensive and SingleM can do more with them.
+The module runs SingleM's three steps (profile the reads, profile the genomes, appraise) and keeps
+the intermediate OTU tables for further SingleM use.
 
-See :mod:`metawrap2.recovery` for the two caveats this prints, and for the assembled-bp fraction
-that answers the other question.
+See :mod:`metawrap2.recovery` for the two caveats this prints and for the assembled-bp fraction.
 """
 
 from __future__ import annotations
@@ -54,42 +50,40 @@ from ._common import (
 CONDA_ENV = MODULE_ENVS["appraise"]
 
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
-# Markers in the reads. Forward reads only: SingleM treats a pair as two observations of the same
-# cell unless told the library layout, and a marker read and its mate would then count twice.
+# Markers in the reads. Forward reads only: SingleM counts a read and its mate as two observations
+# of one cell unless told the library layout.
 SINGLEM_PIPE_READS = (
     "singlem pipe -1 {reads} --otu-table {out} --metapackage {metapackage} --threads {threads}"
 )
-# The same markers in the genomes. -d/-x rather than a file list because a bin folder is what every
-# other module in this pipeline passes around; SingleM raises its own --min-taxon-coverage and
-# --min-orf-length defaults for genome input, which is why this is not just --forward on a fasta.
+# The same markers in the genomes. -d/-x takes a bin folder, as the other modules pass around.
+# SingleM uses higher --min-taxon-coverage and --min-orf-length defaults for genome input than for
+# --forward on a FASTA.
 SINGLEM_PIPE_GENOMES = (
     "singlem pipe -d {bins} -x {extension} --otu-table {out} --metapackage {metapackage}"
     " --threads {threads}"
 )
-# The comparison. --output-unaccounted-for-otu-table is the output worth having: the markers present
-# in the reads that no genome holds, which is the list of lineages this bin set says nothing about.
+# The comparison. --output-unaccounted-for-otu-table lists the markers in the reads that no genome
+# holds: the lineages the bin set does not represent.
 SINGLEM_APPRAISE = (
     "singlem appraise --metagenome-otu-tables {metagenome} --genome-otu-tables {genomes}"
     " --metapackage {metapackage} --output-unaccounted-for-otu-table {unaccounted}"
     " --output-binned-otu-table {binned} --output-found-in"
 )
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
-#: One row per sample per domain: what share of the community the genomes stand for.
+#: One row per sample per domain: the share of the community the genomes represent.
 APPRAISAL_TABLE = "community_represented" + TSV_SUFFIX
 #: Lineages in the reads with no genome representing them, most abundant first.
 UNREPRESENTED_TABLE = "unrepresented_lineages" + TSV_SUFFIX
-#: SingleM's own tables, kept because they cost minutes and SingleM can do more with them than this.
+#: SingleM's own OTU tables, kept for further SingleM use.
 OTU_DIR = "singlem"
 #: How many lineages to print. The table holds all of them.
 PRINTED_LINEAGES = 10
-#: SingleM compares a fixed 60 bp window of each marker gene, so a read shorter than that cannot
-#: cover one and contributes nothing whatever its quality. Measured, not assumed: the OTU tables
-#: SingleM writes carry 60 bp sequences.
+#: SingleM compares a fixed 60 bp window of each marker gene (its OTU tables carry 60 bp
+#: sequences), so a shorter read contributes nothing.
 #:
-#: This is the difference between the right input and the wrong one. One real gut sample's *trimmed*
-#: reads (mean 34 bp) yielded 10 marker sequences from 12 million reads, which would appraise as a
-#: bin set representing almost nothing; the same sample's raw 75 bp reads are all long enough. So
-#: this module wants reads that are quality-filtered but not length-trimmed below the window.
+#: One gut sample's trimmed reads (mean 34 bp) gave 10 marker sequences from 12 million reads; the
+#: raw 75 bp reads are all long enough. Input reads should be quality-filtered but not trimmed below
+#: the window.
 SINGLEM_WINDOW = 60
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -113,8 +107,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         required=True,
         nargs="+",
         metavar="FILE",
-        help="one read file per sample, forward mate only. SingleM counts a marker read and its "
-        "mate as two observations of one cell, so passing both inflates coverage",
+        help="one read file per sample, forward mate only. SingleM would count a read and its "
+        "mate as two cells, so passing both mates inflates coverage",
     )
     p.add_argument(
         "--metapackage",
@@ -133,10 +127,9 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 def _singlem_label(path: str) -> str:
     """The sample name SingleM will put in its OTU table for *path*.
 
-    It labels rows with the file's basename minus its extensions, so a forward read file becomes
-    ``ERR011347_1`` where every other module in this pipeline calls that sample ``ERR011347``. The
-    mapping is needed, not cosmetic: the appraisal table is joined against bin and function tables
-    on the sample name, and a row labelled ``ERR011347_1`` joins to nothing.
+    SingleM labels rows with the file's basename minus its extensions (``ERR011347_1``), while
+    other modules call the sample ``ERR011347``. The appraisal table is joined to bin and function
+    tables on the sample name, so the labels are mapped back.
     """
     name = os.path.basename(path)
     for extension in (".gz", ".bz2"):
@@ -158,9 +151,8 @@ def _sample_name(path: str) -> str:
 def _infer_extension(folder: str, given: Optional[str]) -> str:
     """The bin extension SingleM should look for, from the folder itself.
 
-    Asked of the folder rather than defaulted, because SingleM's own default is ``fna`` and
-    MetaWrap2 writes ``.fasta`` - so the default silently appraises zero genomes and the appraisal
-    then reports that none of the community is represented, which looks like a result.
+    SingleM's default is ``fna`` and MetaWrap2 writes ``.fasta``; with the default, SingleM finds
+    no genomes and reports none of the community as represented.
     """
     if given:
         return given.lstrip(".")
@@ -187,12 +179,10 @@ def _infer_extension(folder: str, given: Optional[str]) -> str:
 
 
 def _check_read_lengths(reads: List[str]) -> None:
-    """Warn when the reads are too short for SingleM's window, which is silent otherwise.
+    """Warn when most reads are shorter than SingleM's window.
 
-    The failure this prevents does not look like a failure: short reads produce an almost empty
-    marker profile, and an almost empty profile appraises as "these genomes represent none of the
-    community". Reusing nonpareil's scanner rather than writing a second one - it reads the head of
-    the file and answers the same question.
+    Short reads give an almost empty marker profile, which appraises as the genomes representing
+    almost none of the community. Uses nonpareil's read-length scanner on the head of each file.
     """
     from .. import nonpareil as _np
 
@@ -207,10 +197,10 @@ def _check_read_lengths(reads: List[str]) -> None:
         if lengths.fraction_short > 0.5:
             warning(
                 "%s: %.0f%% of its reads are shorter than SingleM's %d bp window and cannot carry "
-                "a marker. The appraisal below will understate what the genomes represent, "
-                "possibly to nothing. Use reads that were quality-filtered but not trimmed below "
-                "%d bp - on one real sample, trimmed reads (mean 34 bp) gave 10 marker sequences "
-                "from 12 million reads where the raw 75 bp reads gave thousands"
+                "a marker, so the appraisal will underestimate what the genomes represent, "
+                "possibly down to zero. Use reads that are quality-filtered but not trimmed below "
+                "%d bp. On one sample, trimmed reads (mean 34 bp) gave 10 marker sequences from 12 "
+                "million reads, and the untrimmed 75 bp reads gave thousands"
                 % (
                     os.path.basename(path),
                     lengths.fraction_short * 100,
@@ -281,9 +271,8 @@ def main(argv: List[str]) -> int:
         else:
             comm("skipping the genome profile (already done; --resume)")
 
-        # One OTU table per sample, concatenated: `pipe` labels rows with the sample name it derives
-        # from the file, and appraise takes several metagenome tables, so this keeps the per-sample
-        # rows distinguishable without relying on how pipe names them.
+        # One OTU table per sample, concatenated afterwards. `pipe` labels rows with a sample name
+        # derived from the file name; `labels` maps those back to MetaWrap2 sample names.
         per_sample: List[str] = []
         labels: dict = {}
         for path in args.reads:
@@ -312,8 +301,8 @@ def main(argv: List[str]) -> int:
             if markers == 0:
                 warning(
                     "%s: no marker genes found. Single-copy markers are about 0.05%% of reads, so "
-                    "a shallow or subsampled file can miss them entirely - this is a depth "
-                    "problem, not an empty community" % sample
+                    "a shallow or subsampled file can have none. Sequence deeper or use the full "
+                    "read file" % sample
                 )
 
         if not per_sample:
@@ -340,12 +329,12 @@ def main(argv: List[str]) -> int:
             env=env,
             tool="singlem appraise",
             check=False,
-            # appraise writes its summary table to stdout; the runner captures it to a file rather
-            # than this command going through a shell for a redirect.
+            # appraise writes its summary table to stdout; the runner captures it to a file, so no
+            # shell redirect is needed.
             stdout_path=summary,
         )
         if rc != 0 or not os.path.isfile(summary):
-            error("singlem appraise failed; its own output above says why")
+            error("singlem appraise failed; see its output above for the cause")
             return 1
 
         appraisals = _recovery.parse_appraisal(summary)

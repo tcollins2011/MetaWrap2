@@ -1,20 +1,16 @@
 """Identifying a database, not just pointing at it.
 
-Provenance used to record a database as a *path*: ``KRAKEN2_DB = /db/kraken2_standard``. A path
-is not an identity. Replace the contents of that directory with a newer build - which is exactly
-what happens when a database is updated in place - and every previous run's record now names
-something that no longer exists, while claiming to describe what produced the data. "Which of my
-analyses used the nt I just replaced?" has no answer.
+Provenance used to record a database only as a path (``KRAKEN2_DB = /db/kraken2_standard``). If
+the directory is updated in place, earlier run records point at contents that no longer exist,
+and there is no way to tell which runs used the old build.
 
-This module gives a database a cheap, stable identity: which of its key files are present, how
-big they are, and when they were last modified, hashed into one short string. That fingerprint
-changes when the database is rebuilt or replaced and not when it is merely re-read, which is what
-makes it worth recording. Only the handful of files that define each database are looked at -
-fingerprinting a 300 GB BLAST database by content would cost more than the analysis.
+This module fingerprints a database cheaply: the presence, size and mtime of its key files,
+hashed into one short string. The fingerprint changes when the database is rebuilt or replaced,
+not when it is read. Only the defining files are looked at; hashing a 300 GB BLAST database by
+content would cost more than the analysis.
 
-The same definitions answer "is this database usable?" for :mod:`metawrap2.commands.doctor`, so
-there is one place that knows what a complete CheckM or Kraken2 database looks like rather than
-two that can disagree.
+The same definitions are used by :mod:`metawrap2.commands.doctor` to check whether a database is
+complete.
 """
 
 from __future__ import annotations
@@ -31,8 +27,7 @@ OK, MISSING, INCOMPLETE = "OK", "MISSING", "INCOMPLETE"
 #:
 #: ``required`` files must all be present. ``any_of`` is satisfied by one match, for databases
 #: whose filenames vary by build (the BLAST database's name is configurable; bmtagger's index is
-#: named after the host genome). A key absent from this table can still be fingerprinted - it is
-#: simply checked for existence only, since nothing here knows what it should contain.
+#: named after the host genome). A key absent from this table is only checked for existence.
 DB_CONTENTS: Dict[str, Dict[str, Sequence[str]]] = {
     "KRAKEN2_DB": {
         "required": ("hash.k2d", "opts.k2d", "taxo.k2d"),
@@ -83,14 +78,13 @@ def key_files(path: str, key: str) -> List[str]:
     """The files/directories that define this database, as absolute paths, sorted.
 
     Empty when *path* is not a directory or holds none of them. Used both for the completeness
-    check and as the input to the fingerprint, so the two can never describe different files.
+    check and as the fingerprint input, so both describe the same files.
     """
     if not path or not os.path.isdir(path):
         return []
     spec = DB_CONTENTS.get(key)
     if spec is None:
-        # Unknown database: its identity is its top-level listing, which is still better than a
-        # bare path and costs one readdir.
+        # Unknown database: use its top-level listing (one readdir).
         try:
             return sorted(os.path.join(path, n) for n in os.listdir(path) if not n.startswith("."))[
                 :50
@@ -119,9 +113,8 @@ def missing_files(path: str, key: str) -> List[str]:
 def fingerprint(path: str, key: str) -> Optional[str]:
     """A short, stable identity for the database at *path*, or None if there is nothing there.
 
-    Built from each defining file's name, size and mtime - not its content. A database rebuilt or
-    re-downloaded changes all three; one that is merely read changes none. That is the exact
-    distinction worth recording, at the cost of a few stat calls rather than hours of hashing.
+    Built from each defining file's name, size and mtime, not its content. A rebuild or
+    re-download changes them; reading does not. This costs a few stat calls instead of hashing.
     """
     files = key_files(path, key)
     if not files:
@@ -139,10 +132,10 @@ def fingerprint(path: str, key: str) -> Optional[str]:
 
 
 def describe(path: str, key: str) -> Dict[str, Any]:
-    """Everything worth recording about one configured database."""
+    """Provenance record for one configured database."""
     entry: Dict[str, Any] = {"path": path}
     if key in NON_PATH_DB_KEYS:
-        # e.g. BLASTDB_NAME is a name, not a location; checking it for existence is meaningless.
+        # e.g. BLASTDB_NAME is a name, not a location, so it is not checked for existence.
         entry["kind"] = "setting"
         entry["status"] = OK if path else MISSING
         return entry
@@ -151,8 +144,7 @@ def describe(path: str, key: str) -> Dict[str, Any]:
         entry["status"] = MISSING
         return entry
     if key in FILE_DB_KEYS:
-        # This key names the database file itself (GUNC's --db_file), so "is it a directory" is the
-        # wrong question and asking it marked every correct install as missing.
+        # This key names the database file itself (GUNC's --db_file), not a directory.
         if not os.path.isfile(path):
             entry["status"] = MISSING
             entry["problem"] = "not a file"
@@ -192,9 +184,8 @@ def describe_all(settings: Settings) -> Dict[str, Dict[str, Any]]:
 def check(settings: Settings, keys: Optional[Iterable[str]] = None) -> List[Tuple[str, str, str]]:
     """``[(key, status, detail), ...]`` for the requested database keys.
 
-    Unlike :func:`describe_all` this includes keys that are *not* configured, reporting them as
-    MISSING - because "you never set KRAKEN2_DB" is the answer a user needs when kraken2 fails,
-    and an absent key cannot report itself.
+    Unlike :func:`describe_all` this includes keys that are not configured, reported as MISSING,
+    so a failing module can be traced to an unset key.
     """
     results: List[Tuple[str, str, str]] = []
     for key in keys if keys is not None else sorted(settings.databases):

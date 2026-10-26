@@ -1,8 +1,7 @@
-"""`metawrap2 history` - what has been run on this machine, and when.
+"""`metawrap2 history`: list MetaWrap2 runs on this machine.
 
-Every module invocation appends to ``~/.metawrap2/history.jsonl`` (see
-:mod:`metawrap2.history`), outside any run's output directory, and stays there for as long as
-MetaWrap2 is installed. This command reads it back.
+Every module invocation appends a record to ``~/.metawrap2/history.jsonl`` (see
+:mod:`metawrap2.history`), outside any output directory. This command reads it.
 
     metawrap2 history                      # the 20 most recent runs
     metawrap2 history -n 100               # more of them
@@ -98,7 +97,7 @@ def _print_stats(rows: List[Dict[str, Any]]) -> None:
     print()
 
 
-#: Fields worth comparing between two runs, in the order a reader wants them.
+#: Fields compared by ``--diff``, in display order.
 _DIFF_FIELDS = (
     ("module", "module"),
     ("version", "MetaWrap2 version"),
@@ -150,8 +149,7 @@ def _print_diff(rows: List[Dict[str, Any]], left: str, right: str) -> int:
             differences += 1
         print("  %s %-18s %-34s %s" % (mark, label, a, b))
 
-    # Databases and the command line are the two things that most often explain a difference in
-    # results, and both are structured, so they are compared per key rather than as blobs.
+    # Databases are compared per key, and the command line as a whole.
     db_one = one.get("databases") or {}
     db_two = two.get("databases") or {}
     for key in sorted(set(db_one) | set(db_two)):
@@ -173,7 +171,7 @@ def _print_diff(rows: List[Dict[str, Any]], left: str, right: str) -> int:
         print("  %d difference(s), marked *." % differences)
     else:
         print("  No differences in anything the history records.")
-    # The history does not hold per-tool versions; those live with the data that used them.
+    # Per-tool versions are not in the history; point to where they are recorded.
     print(
         "  Tool versions and the full package list are per-run, in each output directory's\n"
         "  run_config.json and run_environment.json.\n"
@@ -220,8 +218,7 @@ def main(argv: List[str]) -> int:
         rows = [r for r in rows if r.get("status") in (_history.FAILED, _history.INTERRUPTED)]
 
     if args.diff:
-        # Deliberately before the "no rows" message and the limit: a diff names its runs, so
-        # filters and -n are irrelevant to it.
+        # Handled before filtering and -n, which do not apply to explicitly named runs.
         return _print_diff(_history.runs(args.path), args.diff[0], args.diff[1])
 
     if not rows:

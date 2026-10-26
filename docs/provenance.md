@@ -1,17 +1,17 @@
 # Provenance & reproducibility
 
-MetaWrap2 keeps one record per run, in the output directory, and one per machine.
+MetaWrap2 writes a record of each run to its output directory and appends it to a per-machine history.
 
 ## Per run, in the output directory
 
 | File | Contents |
 |---|---|
 | `run_config.json` | full run record: module, version, all resolved parameters (incl. defaults), config file, conda env, databases, platform, timing, inputs, exact commands, tool versions used, and the complete lineage |
-| `run_environment.json` | what the run used, written *before* any tool runs: the environment's full conda package list, the MetaWrap2 git commit, and each database's content fingerprint |
+| `run_environment.json` | what the run used, written before any tool runs: the environment's full conda package list, the MetaWrap2 git commit, and each database's content fingerprint |
 | `run_commands.txt` | the exact commands run, in order; the first line is the top-level `metawrap2 <module>` reproducer |
 | `provenance.txt` | readable history of every MetaWrap2 step that led to this output |
 | `metawrap2.log` | one timestamped log of MetaWrap2's own messages and every line of every tool (rotates at 256 MB) |
-| `run.stdout` / `run.stderr` | raw tool output (streamed live to the screen *and* captured here) |
+| `run.stdout` / `run.stderr` | raw tool output (streamed live to the screen and captured here) |
 
 `run_environment.json` is written first, so a run that fails early still records its environment.
 
@@ -29,8 +29,8 @@ database you have since replaced. `metawrap2 doctor` reports the same fingerprin
 
 ### Source tree
 
-A version such as `2.1.0` can cover many source trees, including locally edited ones. From a git
-checkout, `run_environment.json` also records the commit, branch, `git describe`, and whether the
+One version string such as `2.1.0` can cover several source trees, including locally edited ones.
+From a git checkout, `run_environment.json` also records the commit, branch, `git describe`, and whether the
 tree was dirty. From an installed wheel it records `{"kind": "installed"}`, and the version string
 is the full description.
 
@@ -93,10 +93,11 @@ Steps are reaped with `os.wait4`, so the manifest records each step's peak memor
 wall time. `metawrap2 calibrate <study>...` compares them with the built-in disk and memory
 estimates.
 
-A step that used a GPU also records `peak_gpu_memory_bytes` and `gpu_devices`: the most VRAM a single
-device held for the step's own processes, sampled every 5 seconds while it ran, since `rusage` does not
-see GPU memory. Other jobs on the same card are not counted, and devices are not summed, so the
-figure says whether the step fits on one card. A step that used no GPU records neither key.
+A step that used a GPU also records `peak_gpu_memory_bytes` and `gpu_devices`. `rusage` does not
+report GPU memory, so the value is the most VRAM a single device held for the step's own
+processes, sampled every 5 seconds while it ran. Other jobs on the same card are not counted and
+devices are not summed, so the value shows whether the step fits on one card. A step that used no
+GPU records neither key.
 
 The output-to-input ratio is a lower bound on the disk multiplier, because scratch is deleted when
 a step finishes and its peak size is not recorded. Peak memory is exact; peak VRAM is a 5-second

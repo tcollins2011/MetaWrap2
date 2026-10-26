@@ -1,14 +1,12 @@
-"""The temp-directory length a unix socket still fits under, and the arithmetic behind it.
+"""Tests for the maximum temp-directory length that still fits a unix socket path.
 
-Several tools MetaWrap2 drives take a temp directory and then set it process-wide - CheckM1 assigns
-``tempfile.tempdir``, SemiBin2 exports ``TMPDIR`` - and Python's ``multiprocessing`` binds its listener
-socket inside whatever that resolves to. Too long, and ``bind()`` fails in the child while the parent
-reports a bare ``EOFError`` that mentions nothing about paths.
+CheckM1 sets ``tempfile.tempdir`` and SemiBin2 exports ``TMPDIR``, and ``multiprocessing`` binds its
+listener socket under that directory. If the path is too long, ``bind()`` fails in the child and the
+parent reports a bare ``EOFError``.
 
-This was fixed once and the fix was too generous by 14 characters, because ``multiprocessing`` creates
-a ``pymp-XXXXXXXX`` *subdirectory* before putting ``listener-XXXXXXXX`` inside it. A 77-character temp
-directory was therefore judged short enough and still failed, taking a whole comparison's metrics with
-it. The boundary is pinned here against the real socket API rather than against the arithmetic.
+The socket goes in a ``pymp-XXXXXXXX`` subdirectory as ``listener-XXXXXXXX``; an earlier limit
+ignored the subdirectory and was 14 characters too high. The boundary is tested against the real
+socket API.
 """
 
 from __future__ import annotations
@@ -51,16 +49,15 @@ def _dir_of_length(root, length: int) -> str:
 
 
 def test_one_character_over_the_limit_cannot(tmp_path):
-    """The assertion that would have caught the off-by-14: 76 has to fail, not merely 90."""
+    """A temp dir of MAX_TMPDIR_LEN binds and one character longer does not."""
     assert MAX_TMPDIR_LEN == SOCKET_PATH_LIMIT - (len("/pymp-") + 8) - (len("/listener-") + 8)
     assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN)) is True
     if sys.version_info < (3, 14):
-        # Python 3.14's multiprocessing falls back to a short temp directory by itself, so the
-        # failure only reproduces before it. The limit still matters: CheckM1 and SemiBin2 run in
-        # their own environments, on older Pythons.
+        # Python 3.14's multiprocessing falls back to a short temp directory itself. The limit
+        # still applies to CheckM1 and SemiBin2, which run on older Pythons in their own envs.
         assert _bind_under(_dir_of_length(tmp_path, MAX_TMPDIR_LEN + 1)) is False
 
-    # The way round it: a path over the budget is symlinked short, and bind() resolves the link.
+    # A path over the limit is replaced by a short symlink, which bind() resolves.
     real = _dir_of_length(tmp_path, MAX_TMPDIR_LEN + 20)
     link = short_tmpdir(real)
     assert len(link) <= MAX_TMPDIR_LEN

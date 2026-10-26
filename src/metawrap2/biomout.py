@@ -1,26 +1,18 @@
-"""Writing feature tables as BIOM, so they can be read by something other than this pipeline.
+"""Writing feature tables as BIOM, for QIIME 2, phyloseq, scikit-bio and MicrobiomeAnalyst.
 
-Every table MetaWrap2 produces is a TSV of its own design. That is fine for reading and terrible for
-onward analysis: a user who wants QIIME 2, phyloseq, scikit-bio or MicrobiomeAnalyst has to write a
-converter first, and will write a slightly different one each time. BIOM is the format all of those
-already read, nothing in the peer set emits it, and it is little code.
+MetaWrap2's own tables are TSVs in its own layout; BIOM is the format those tools read.
 
-Two choices worth stating:
+**BIOM 2.1 (HDF5), not 1.0 (JSON).** The JSON form stores the sparse matrix densely as text, which
+is large for a gene catalogue (hundreds of thousands of features by tens of samples). 2.1 is
+sparse and is what current tools read.
 
-**BIOM 2.1 (HDF5), not 1.0 (JSON).** The JSON form is a dense text representation of a sparse matrix
-and gets large fast - a gene catalogue is hundreds of thousands of features by tens of samples. 2.1
-is what current tools read and is written sparse.
+**Observations are features and samples are samples**, BIOM's convention and the transpose of how
+these tables are usually printed. A transposed abundance table is not obviously wrong, so the
+orientation is set here once.
 
-**Observations are features and samples are samples**, which is BIOM's convention and the opposite
-of how these tables are usually printed. A table with features as columns loaded into a tool
-expecting the convention is silently transposed, and a transposed abundance table is not obviously
-wrong at a glance - it just gives nonsense answers. So the orientation is set here once rather than
-at each call site.
-
-Metadata rides along where there is any: a KO's definition, a module's name and class, the unit a
-value is in. That last one matters most - a BIOM file of relative abundances and one of genome
-equivalents are the same shape and not comparable, and the unit is the only thing that says which
-it is.
+Metadata is attached where available: a KO's definition, a module's name and class, and the unit
+of the values. The unit distinguishes, for example, relative abundances from genome equivalents,
+which have the same shape.
 """
 
 from __future__ import annotations
@@ -28,8 +20,7 @@ from __future__ import annotations
 import os
 from typing import Dict, Iterable, Mapping, Optional
 
-#: What MetaWrap2 writes into the BIOM table's ``generated_by`` field, so a file found later says
-#: what produced it.
+#: Written into the BIOM table's ``generated_by`` field.
 GENERATED_BY = "MetaWrap2"
 
 
@@ -58,9 +49,8 @@ def write_biom(
 ) -> int:
     """Write ``{sample: {feature: value}}`` as a BIOM 2.1 file. Returns the feature count.
 
-    The input is keyed sample-first because that is how the pipeline computes it; the table is built
-    feature-first because that is BIOM's orientation. Doing the transpose here is the point - see the
-    module docstring on why a silently transposed abundance table is the worst outcome.
+    The input is keyed sample-first, as the pipeline computes it; the table is built
+    feature-first, BIOM's orientation. See the module docstring.
     """
     biom = _require_biom()
     import numpy as np
@@ -105,8 +95,8 @@ def long_table_to_values(
 ) -> Dict[str, Dict[str, float]]:
     """Fold a long TSV's rows into ``{sample: {feature: value}}``.
 
-    Rows whose value does not parse are skipped rather than treated as zero: a missing value and a
-    measured zero are different, and BIOM's sparse representation already means absent is zero.
+    Rows whose value does not parse are skipped, not stored as zero; BIOM's sparse representation
+    already treats absent as zero.
     """
     out: Dict[str, Dict[str, float]] = {}
     for row in rows:
@@ -125,9 +115,8 @@ def long_table_to_values(
 def unit_metadata(rows: Iterable[Mapping[str, object]]) -> Dict[str, Dict[str, object]]:
     """Per-sample metadata carrying the unit and what it may be compared across.
 
-    On the sample axis rather than the feature axis because the unit is a property of the whole
-    table: every value in a file produced by `quantify_function` is in one unit, and attaching it to
-    each feature would imply it could vary between them.
+    Stored on the sample axis because the unit applies to the whole table (every value from
+    `quantify_function` has one unit).
     """
     out: Dict[str, Dict[str, object]] = {}
     for row in rows:

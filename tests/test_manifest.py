@@ -1,8 +1,6 @@
-"""Tests for metawrap2.manifest: --resume verifying rather than assuming.
+"""Tests for metawrap2.manifest and --resume.
 
-The old marker-file resume was wrong in two directions, and both are pinned here: a step whose
-outputs are gone must re-run, and a step whose inputs have changed must re-run. Everything else
-in this file supports those two.
+A step re-runs when its outputs are gone or its inputs have changed.
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ def write(path, text="hello"):
     return str(path)
 
 
-# --- can_skip: the whole point ------------------------------------------------------------
+# --- can_skip ------------------------------------------------------------------------------
 
 
 def test_can_skip_an_intact_completed_step(tmp_path):
@@ -30,12 +28,12 @@ def test_can_skip_an_intact_completed_step(tmp_path):
     assert skip is True
     assert "outputs intact" in reason and "inputs unchanged" in reason
 
-    # The second thing marker-file resume got wrong: silently mixing two inputs' results.
+    # Changed input: the step must re-run so results from two inputs are not mixed.
     write(tmp_path / "in.fa", ">c1\nACGTACGTACGT\n")  # re-assembled
     skip, reason = man.can_skip("binning")
     assert skip is False and "has changed since this step ran" in reason
 
-    # The first thing marker-file resume got wrong: a step whose output is gone must re-run.
+    # Missing output: the step must re-run.
     man.finish("binning", man.start("binning", ["c"], [src]), mf.COMPLETED, outputs=[out])
     assert man.can_skip("binning")[0] is True
     os.remove(out)

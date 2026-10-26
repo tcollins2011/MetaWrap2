@@ -1,14 +1,11 @@
-"""`--bams DIR`: bin from alignments that already exist.
+"""Tests for `--bams DIR`: binning from existing alignments.
 
-The gap a user hit: `--depth <table>` is refused for SemiBin2, VAMB, COMEBin and CONCOCT, because
-those read the alignments themselves - and there was no way to hand them alignments either, even
-though `coverage --keep-bams` exists to produce exactly that. Splitting a cohort across a CPU box
-(align) and a GPU box (bin) was inexpressible, and had to be faked by pre-placing BAMs in
-`work_files/` and seeding the checkpoints by hand.
+SemiBin2, VAMB, COMEBin and CONCOCT read alignments themselves and refuse `--depth <table>`.
+`--bams` lets them use BAMs from `coverage --keep-bams`, so alignment and binning can run on
+different machines.
 
-The header check is the other half of the feature. A BAM aligned against a concatenated catalogue
-is as well-formed as the right one, and a BAM binner that matches no contigs produces no bins
-without erroring - so supplied BAMs are compared against the assembly before anything runs.
+A BAM aligned against a concatenated catalogue is well-formed, and a binner that matches no contigs
+produces no bins without an error, so supplied BAM headers are checked against the assembly first.
 """
 
 import os
@@ -50,7 +47,7 @@ def test_bams_from_the_right_assembly_pass(tmp_path, monkeypatch):
 
 
 def test_catalogue_prefixed_bams_are_refused_with_the_reason(tmp_path, monkeypatch):
-    """The silent failure made loud: `coverage -a water=asm --keep-bams` writes these."""
+    """Prefixed names, as written by `coverage -a water=asm --keep-bams`, raise an error."""
     monkeypatch.setattr(
         binning, "capture_in_env", lambda env, argv: _header(["water~k141_1", "water~k141_2"])
     )
@@ -58,13 +55,13 @@ def test_catalogue_prefixed_bams_are_refused_with_the_reason(tmp_path, monkeypat
         binning.check_bam_references(["s.bam"], _assembly(tmp_path), "e")
     message = str(problem.value)
     assert "names none of" in message
-    # Both sides of the mismatch, so the user can see which way round it is.
+    # The message shows names from both sides of the mismatch.
     assert "water~k141_1" in message and "k141_1" in message
     assert "reheader" in message
 
 
 def test_a_partial_overlap_is_reported_not_refused(tmp_path, monkeypatch):
-    """A catalogue slice legitimately covers more contigs than one assembly has."""
+    """A partial overlap is reported but allowed: a catalogue slice can cover extra contigs."""
     said = []
     monkeypatch.setattr(binning, "comm", lambda message: said.append(message))
     monkeypatch.setattr(binning, "capture_in_env", lambda env, argv: _header(["k141_1"]))
@@ -80,7 +77,7 @@ def test_a_file_with_no_sq_lines_is_an_error(tmp_path, monkeypatch):
 
 
 def test_supplied_bams_are_linked_not_copied(tmp_path):
-    """Tens of gigabytes per sample, and this run only reads them."""
+    """Supplied BAMs and their indexes are symlinked; they can be tens of GB per sample."""
     bam_dir = _bam_dir(tmp_path, index=True)
     work = tmp_path / "work_files"
     staged = binning.stage_supplied_bams(bam_dir, str(work))
@@ -88,12 +85,12 @@ def test_supplied_bams_are_linked_not_copied(tmp_path):
     for link in staged:
         assert os.path.islink(link)
         assert os.path.realpath(link).startswith(bam_dir)
-        # An existing index is linked with it; samtools finds it beside the BAM.
+        # An existing index is linked too; samtools looks for it beside the BAM.
         assert os.path.islink(link + ".bai")
 
 
 def test_staging_twice_is_harmless(tmp_path):
-    """A --resume re-enters this path; a second link attempt must not raise."""
+    """Staging a second time (as --resume does) returns the same links without raising."""
     bam_dir = _bam_dir(tmp_path)
     work = tmp_path / "work_files"
     first = binning.stage_supplied_bams(bam_dir, str(work))

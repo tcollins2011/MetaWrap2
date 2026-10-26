@@ -1,8 +1,7 @@
-"""Trees: the support-value forms IQ-TREE writes, and what the alignment's shape says about a tree.
+"""Parsing IQ-TREE support values, model and alignment shape.
 
-Fixtures are a real IQ-TREE 3.1.4 run over a real PPanGGOLiN core-gene alignment of four MAGs from
-a CAMI2 cohort - including the tree file whose `100/100` support the first version of the parser
-counted as zero branches.
+Fixtures are an IQ-TREE 3.1.4 run over a PPanGGOLiN core-gene alignment of four MAGs from a CAMI2
+cohort, including a tree with `100/100` support that an earlier parser counted as zero branches.
 """
 
 from __future__ import annotations
@@ -23,10 +22,10 @@ ALIGNMENT = os.path.join(FIXTURES, "core_genome_alignment.aln")
 
 
 def test_combined_support_values_are_parsed_and_the_bootstrap_is_the_one_read(tmp_path):
-    """With --alrt IQ-TREE writes `)97.5/100:` - SH-aLRT first, ultrafast bootstrap second.
+    """Combined `SH-aLRT/UFBoot` labels (e.g. `)97.5/100:`, written with --alrt) are parsed.
 
-    A pattern matching a single number finds none of them, which is what the first real tree
-    reported: four taxa, one internal branch labelled 100/100, counted as zero branches.
+    A single-number pattern matched none of them, and a four-taxon tree with one 100/100 branch was
+    counted as having zero branches.
     """
     support = phylo.support_summary(TREEFILE)
     assert support.branches == 1
@@ -46,7 +45,7 @@ def test_combined_support_values_are_parsed_and_the_bootstrap_is_the_one_read(tm
 
 
 def test_the_chosen_model_is_read_out_of_iqtrees_report():
-    """Two trees built under different models are not comparable even from the same alignment."""
+    """The model IQ-TREE chose is read from its report and recorded in the summary row."""
     assert phylo.model_from_report(REPORT) == "GTR+F+I"
     alignment = phylo.read_alignment(ALIGNMENT)
     assert (alignment.size, alignment.columns) == (4, 400)

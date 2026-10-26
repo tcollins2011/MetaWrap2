@@ -1,31 +1,30 @@
-"""Pfam domains: the cutoffs, the architecture, and the number worth reporting.
+"""Tests for Pfam domain handling: cutoffs, architecture and coverage reporting.
 
-The search itself needs Pfam-A on disk, so what is tested here is everything around it: how a hit
-becomes a row, how domains become an architecture, and how coverage is reported beside KEGG's.
-Those are where the decisions are. The measured result from a real run is in the release notes:
-6,671 domains over 3,185 of 3,891 genes on one CAMI2 bin.
+The search needs Pfam-A on disk, so these tests cover the code around it: hits to rows, domains to
+architectures, and coverage beside KEGG's. A real run on one CAMI2 bin (in the release notes) gave
+6,671 domains over 3,185 of 3,891 genes.
 """
 
 from __future__ import annotations
 
 from metawrap2 import pfam
 
-# ── the cutoff is Pfam's own ─────────────────────────────────────────────────────────────────
+# ── cutoffs ──────────────────────────────────────────────────────────────────────────────────
 
 
-# ── accessions: versioned for provenance, bare for joins ─────────────────────────────────────
+# ── accessions ───────────────────────────────────────────────────────────────────────────────
 
 
-# ── domains are regions, not labels ──────────────────────────────────────────────────────────
+# ── domain architecture ──────────────────────────────────────────────────────────────────────
 
 
-# ── the number worth reporting is the increment ──────────────────────────────────────────────
+# ── coverage beside KEGG ─────────────────────────────────────────────────────────────────────
 
 
-# ── the release, read from the data ──────────────────────────────────────────────────────────
+# ── release ──────────────────────────────────────────────────────────────────────────────────
 
 
-# ── parsing pyhmmer's results ────────────────────────────────────────────────────────────────
+# ── parsing pyhmmer results ──────────────────────────────────────────────────────────────────
 
 
 class _Domain:
@@ -62,8 +61,7 @@ class _TopHits:
 def test_tophits_are_read_through_the_query_object():
     """pyhmmer 0.11 replaced `query_name`/`query_accession` with `query`.
 
-    The older spelling raises AttributeError, which is how the first real Pfam run failed - caught
-    per genome, so it reported zero domains over zero genes rather than crashing.
+    The old attributes raise AttributeError, which, caught per genome, gave zero domains.
     """
     results = [
         _TopHits("7tm_1", "PF00001.23", [_Hit("gene_1", [_Domain(10, 120, 55.0)])]),
@@ -74,6 +72,6 @@ def test_tophits_are_read_through_the_query_object():
     assert hits[0].accession == "PF00001.23"
     assert hits[0].name == "7tm_1"
     assert hits[0].gene == "gene_1"
-    # No accession on the profile: the name stands in rather than the row being blank.
+    # A profile without an accession uses its name.
     assert hits[1].accession == "HTH"
     assert [h.start for h in hits[1:]] == [5, 120]

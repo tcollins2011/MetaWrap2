@@ -1,15 +1,13 @@
-"""Annotation tables written by other tools: KOfam's ko_list, Pfam's accessions, dbCAN, GECCO, BRITE.
+"""Parsers for other tools' annotation tables: KOfam ko_list, Pfam accessions, dbCAN, GECCO, BRITE.
 
-What these have in common is that an absence in them is indistinguishable from a biological result.
-A KOfam profile with no curated threshold must come back None and not 0.0, because a threshold of
-zero accepts every hit the HMM produced; dbCAN's lone ``-`` must come back empty and not as a
-substrate literally named ``-``; GECCO's placeholder row for a genome with no clusters must not be
-counted as one cluster.
+In these files a missing value can look like a result. A KOfam profile with no curated threshold
+must parse as None, not 0.0 (which accepts every hit); dbCAN's lone ``-`` must parse as empty, not
+a substrate named ``-``; GECCO's placeholder row for a genome with no clusters is not a cluster.
 
-The dbCAN and GECCO fixtures are vendored real output - dbCAN 5.2.9 and GECCO over CAMI2 bins; see
-``tests/fixtures/cazy/SOURCE.md`` and ``tests/fixtures/bgc/SOURCE.md``. KOfam's ko_list and KEGG's
-htext are written out in the test in their own layouts, as ``tests/test_kofam.py`` and
-``tests/test_hierarchy.py`` already do, because the layout is the thing being pinned.
+The dbCAN and GECCO fixtures are real output (dbCAN 5.2.9 and GECCO over CAMI2 bins; see
+``tests/fixtures/cazy/SOURCE.md`` and ``tests/fixtures/bgc/SOURCE.md``). KOfam's ko_list and
+KEGG's htext are written inline in their own layouts, as in ``tests/test_kofam.py`` and
+``tests/test_hierarchy.py``, since the layout is what is tested.
 """
 
 from __future__ import annotations
@@ -26,9 +24,8 @@ from metawrap2 import bgc, cazy, hierarchy, kofam, pfam
 CAZY = os.path.join(os.path.dirname(__file__), "fixtures", "cazy")
 BGC = os.path.join(os.path.dirname(__file__), "fixtures", "bgc")
 
-#: KOfam's ko_list, in its real twelve-column layout. The third row is a profile KOfam publishes no
-#: cutoff for, which it marks with a lone "-" in the threshold, score_type, profile_type and
-#: F-measure columns alike.
+#: KOfam's ko_list in its twelve-column layout. The third row is a profile with no cutoff, marked
+#: with "-" in the threshold, score_type, profile_type and F-measure columns.
 KO_LIST = (
     "knum\tthreshold\tscore_type\tprofile_type\tF-measure\tnseq\tnseq_used\talen\tmlen\teff_nseq"
     "\tre/pos\tdefinition\n"
@@ -64,9 +61,8 @@ def _header(path):
 def test_ko_list_columns_are_read_by_name_from_its_own_header(tmp_path):
     """``knum``, ``threshold``, ``score_type``, ``profile_type``, ``F-measure``, ``definition``.
 
-    ``F-measure`` is hyphenated where everything else is lowercase, and ``definition`` is the last
-    of twelve columns with free text in it. Read positionally, a column added upstream shifts the
-    definition into ``re/pos`` and every KO's description becomes a number.
+    Columns are read by name: ``F-measure`` is hyphenated, and ``definition`` is the last of twelve
+    columns and holds free text. A positional read would break if a column were added upstream.
     """
     path = tmp_path / "ko_list"
     path.write_text(KO_LIST)
@@ -78,11 +74,10 @@ def test_ko_list_columns_are_read_by_name_from_its_own_header(tmp_path):
 
 
 def test_a_profile_with_no_curated_cutoff_has_none_rather_than_a_threshold_of_zero(tmp_path):
-    """KOfam writes a lone ``-``, and a threshold of 0.0 would accept every hit the HMM produced.
+    """A ``-`` threshold parses as None, not 0.0 (which would accept every hit).
 
-    Around 40% of KOfam's profiles have no curated cutoff, so getting this wrong is not a corner
-    case: it admits tens of thousands of uncalibrated profiles at any score at all, each of which
-    looks like a normal KO call in the output.
+    Around 40% of KOfam's profiles have no curated cutoff; parsed as 0.0, each would accept hits
+    at any score that look like normal KO calls.
     """
     path = tmp_path / "ko_list"
     path.write_text(KO_LIST)
@@ -99,11 +94,10 @@ def test_a_profile_with_no_curated_cutoff_has_none_rather_than_a_threshold_of_ze
 
 
 def test_a_pfam_accession_keeps_its_version_and_joins_without_it():
-    """``PF00001.23`` is family ``PF00001`` at version 23, and the two are needed for different jobs.
+    """``PF00001.23`` is family ``PF00001`` at version 23; both forms are kept.
 
-    The version goes into the output because a domain call is only reproducible against the release
-    that made it; it is stripped for joins, because Pfam bumps a family's version without changing
-    what the family is, and a version mismatch at a join silently loses every row.
+    The versioned accession is output for reproducibility. The family is used for joins, since
+    Pfam bumps versions without changing the family and a version mismatch would drop rows.
     """
     hit = pfam.DomainHit(
         gene="k141_1_1",
@@ -118,22 +112,20 @@ def test_a_pfam_accession_keeps_its_version_and_joins_without_it():
     assert hit.accession == "PF00001.23"
     assert hit.family == "PF00001"
     assert hit.length == 250
-    # Both spellings reach the output table side by side, so neither job needs the other's form.
+    # Both forms are in the output table.
     row = pfam.domain_row(hit, "bin_003")
     assert row["pfam_accession"] == "PF00001.23"
     assert row["pfam_family"] == "PF00001"
-    # An unversioned accession is already its own family, and anything that is not a Pfam accession
-    # is passed through rather than mangled into one.
+    # An unversioned accession is its own family; a non-Pfam accession is passed through as is.
     assert dataclasses.replace(hit, accession="PF00001").family == "PF00001"
     assert dataclasses.replace(hit, accession="custom_hmm").family == "custom_hmm"
 
 
 def test_the_pfam_release_is_read_from_pfams_own_relnotes_and_not_from_a_path(tmp_path):
-    """A directory name is whatever the installer called it; ``relnotes.txt`` is what Pfam says.
+    """The Pfam release is read from ``relnotes.txt``, not the directory name.
 
-    An unknown release has to be reported as ``"unknown"`` rather than guessed or left blank: a
-    domain table labelled with the wrong release is worse than one labelled honestly, because
-    Pfam renumbers families between releases.
+    An unknown release is reported as ``"unknown"``, not guessed or left blank, since Pfam
+    renumbers families between releases.
     """
     directory = tmp_path / "pfam-37.4-mislabelled-as-36"
     directory.mkdir()
@@ -149,8 +141,7 @@ def test_dbcan_overview_columns_are_dbcans_own_spelling():
     """``Gene ID``, ``EC#``, ``dbCAN_hmm``, ``dbCAN_sub``, ``DIAMOND``, ``#ofTools``.
 
     Checked against the real header: a ``#`` in one column name, a space in another, and the three
-    method columns named after the methods. ``Recommend Results`` is singular-verb-plural-noun and
-    not something anyone would guess.
+    method columns named after the methods. The header also has ``Recommend Results``.
     """
     header = set(_header(os.path.join(CAZY, "overview.tsv")))
     for key, column in cazy.OVERVIEW_COLUMNS.items():
@@ -160,10 +151,10 @@ def test_dbcan_overview_columns_are_dbcans_own_spelling():
 
 
 def test_a_partly_unmapped_substrate_list_drops_only_the_dash():
-    """Real dbCAN output carries ``-;peptidoglycan`` for a two-domain protein, one domain unmapped.
+    """dbCAN's ``-;peptidoglycan`` (two domains, one unmapped) gives one substrate.
 
-    The lone-dash check is not enough for this, which is the whole reason the list is cleaned member
-    by member: left alone, this one row adds a substrate named ``-`` to the count beside a real one.
+    The list is cleaned member by member, since checking only for a lone dash would count a
+    substrate named ``-``.
     """
     assert cazy._clean_list("-;peptidoglycan") == "peptidoglycan"
     assert cazy._clean_list("-") == ""
@@ -183,9 +174,8 @@ def test_a_partly_unmapped_substrate_list_drops_only_the_dash():
 def test_gecco_cluster_columns_are_geccos_own():
     """``sequence_id``, ``cluster_id``, ``average_p``, ``max_p``, plus one ``*_probability`` per class.
 
-    The per-class probabilities are named from the class list rather than read positionally, because
-    GECCO adds product classes between releases and a positional read would assign one class's
-    probability to another - which is invisible in a table of six plausible numbers.
+    The per-class probabilities are read by name from the class list, not positionally, since GECCO
+    adds product classes between releases.
     """
     header = set(_header(os.path.join(BGC, "clusters.tsv")))
     for key, column in bgc.CLUSTER_COLUMNS.items():
@@ -201,11 +191,9 @@ def test_gecco_cluster_columns_are_geccos_own():
 
 
 def test_a_cluster_on_an_unmeasured_contig_reports_none_rather_than_a_clean_flank():
-    """Without a contig length, "this cluster is complete" is a claim that cannot be made.
+    """Without a contig length, cluster completeness is None.
 
-    None and a number are different claims and only the number can support completeness. A zero
-    here would say "at the contig edge" - the opposite error, but at least the safe one; a large
-    default would call every cluster in the set complete.
+    A zero would mean "at the contig edge", and a large default would mark every cluster complete.
     """
     path = os.path.join(BGC, "clusters.tsv")
     unmeasured = bgc.parse_clusters(path, "bin_006")[0]
@@ -225,10 +213,9 @@ def test_a_cluster_on_an_unmeasured_contig_reports_none_rather_than_a_clean_flan
 def test_the_brite_projection_keeps_its_column_order_and_strips_keggs_tags(tmp_path):
     """One row per (KO, pathway), ten columns in a fixed order, with ``[PATH:ko00010]`` removed.
 
-    Every consumer - the long table, the wide table and the Krona input - joins on this order, so
-    a column inserted in the middle shifts a pathway id into a pathway name. The ``[PATH:]`` and
-    ``[EC:]`` tags are KEGG's markup rather than part of a name, and left in they make a pathway
-    label that no two releases spell the same way.
+    The long table, the wide table and the Krona input all rely on this column order. The
+    ``[PATH:]`` and ``[EC:]`` tags are KEGG markup and are removed so names are stable across
+    releases.
     """
     htext = tmp_path / "ko00001.keg"
     htext.write_text(HTEXT)
@@ -243,18 +230,16 @@ def test_the_brite_projection_keeps_its_column_order_and_strips_keggs_tags(tmp_p
     assert rows["K00844"]["pathway_id"] == "00010"
     assert rows["K00844"]["gene_symbol"] == "HK"
     assert rows["K00844"]["ec"] == "2.7.1.1"
-    # A D line with no "symbol; name" separator is all name and no symbol, not the reverse.
+    # A D line without the "symbol; name" separator is all name, no symbol.
     assert rows["K23479"]["gene_symbol"] == ""
     assert rows["K23479"]["gene_name"].startswith("CCAAT/enhancer binding protein")
 
 
 def test_britess_scaffolding_branches_are_flagged_by_id_not_by_their_display_name(tmp_path):
-    """``09180 Brite Hierarchies`` is BRITE's own bookkeeping, and KEGG is free to reword it.
+    """Non-pathway branches such as ``09180 Brite Hierarchies`` are identified by id.
 
-    Matched on the display string, a rewording upstream turns the largest branch in the file -
-    22,768 of 64,956 rows - back into biology, and every pathway percentage beside it drops. The
-    branches stay in the table either way, because the share of genes KEGG cannot place is a real
-    number; what the flag does is let a pathway view exclude them and say that it did.
+    KEGG may reword display names, and this branch is the largest in the file (22,768 of 64,956
+    rows). The branches stay in the table; the flag lets a pathway view exclude them.
     """
     htext = tmp_path / "ko00001.keg"
     htext.write_text(HTEXT)
@@ -267,7 +252,7 @@ def test_britess_scaffolding_branches_are_flagged_by_id_not_by_their_display_nam
     assert tree.level_a_ids["Brite Hierarchies"] == "09180"
     assert tree.is_pathway_branch("Metabolism") is True
     assert tree.is_pathway_branch("Brite Hierarchies") is False
-    # Both KOs are still in the hierarchy; nothing is dropped for sitting in a scaffolding branch.
+    # Both KOs are still in the hierarchy; KOs in non-pathway branches are not dropped.
     assert "K00844" in tree and "K23479" in tree
-    # A KO KEGG does not place at all gets one Unclassified path rather than none.
+    # A KO that KEGG does not place gets one Unclassified path.
     assert tree.paths_for("K99999") == ((hierarchy.UNCLASSIFIED,) * 3,)

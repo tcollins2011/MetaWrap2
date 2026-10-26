@@ -10,13 +10,14 @@ when it cannot be solved together with the others, or when it is large and optio
 
 ## Default environments
 
-`metawrap2 quickstart` builds these ten, plus `metawrap2-learned` from the next table.
+`metawrap2 quickstart` builds these eleven, plus `metawrap2-learned` from the next table.
 
 | File | Environment | Modules | Main tools |
 |---|---|---|---|
 | `reads.yaml` | `metawrap2-reads` | read_qc, assembly, reassemble_bins, blobology, nonpareil | fastp, trim-galore, fastqc, bmtagger, bowtie2, spades, megahit, flye, quast, blast, minimap2, bwa, bwa-mem2, samtools, nonpareil |
 | `bins.yaml` | `metawrap2-bins` | binning, coverage, dereplicate, quant_bins | metabat2, maxbin2, concoct, minimap2, bwa, bwa-mem2, samtools, skani, sylph, salmon, coverm, fairy |
-| `binqc.yaml` | `metawrap2-binqc` | bin_refinement | checkm-genome (CheckM1), pplacer, gunc, das_tool |
+| `binqc.yaml` | `metawrap2-binqc` | bin_refinement | checkm-genome (CheckM1, for `--checkm1`), pplacer, gunc, das_tool |
+| `checkm2.yaml` | `metawrap2-checkm2` | bin_refinement, reassemble_bins | checkm2, the default bin scorer |
 | `taxonomy.yaml` | `metawrap2-taxonomy` | classify_bins, kraken2, pathways | kraken2, bracken, krona, taxator-tk, blast |
 | `annotate.yaml` | `metawrap2-annotate` | annotate, catalogue, annotate_bins | prokka, bakta, dbcan, gecco |
 | `amr.yaml` | `metawrap2-amr` | amr | ncbi-amrfinderplus, hamronization, argnorm |
@@ -26,16 +27,16 @@ when it cannot be solved together with the others, or when it is large and optio
 | `singlem.yaml` | `metawrap2-singlem` | appraise | singlem |
 
 `strains` has its own environment because inStrain requires Python 3.8. `appraise` has its own
-because SingleM pins a narrow set of dependencies.
+because SingleM pins a narrow set of dependencies. CheckM2 has no common solution with CheckM1, GUNC
+and DAS Tool.
 
 ## Opt-in environments
 
-Built by name, for example `metawrap2 install-env checkm2`, or with all the others by
+Built by name, for example `metawrap2 install-env gtdbtk`, or with all the others by
 `install-env --all`.
 
 | File | Environment | Used by | Why it is separate |
 |---|---|---|---|
-| `checkm2.yaml` | `metawrap2-checkm2` | `bin_refinement --checkm2` | No common solution with CheckM1, GUNC and DAS Tool |
 | `gtdbtk.yaml` | `metawrap2-gtdbtk` | `classify_bins --gtdbtk` | No common solution with taxator-tk; needs 100+ GB of reference data |
 | `learned.yaml` | `metawrap2-learned` | `binning --semibin2`, `--vamb`, `--comebin` | pytorch, about 1.5 GB |
 | `rgi.yaml` | `metawrap2-rgi` | `amr --rgi` | Pins older dependencies than AMRFinderPlus |
@@ -46,8 +47,8 @@ Built by name, for example `metawrap2 install-env checkm2`, or with all the othe
 The default binners include SemiBin2, so `quickstart` also builds `metawrap2-learned`. Its pytorch
 is CUDA-capable, so `binning --device cuda` needs no separate GPU environment.
 
-Scores from an opt-in tool are not interchangeable with the default tool's (CheckM2 and CheckM1, for
-example). Use one of them throughout a study.
+Scores from different tools are not interchangeable (CheckM2 and CheckM1, for example). Use one of
+them throughout a study.
 
 ## Usage
 

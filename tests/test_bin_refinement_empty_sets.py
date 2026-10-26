@@ -1,9 +1,7 @@
 """An empty input bin set is dropped with a warning instead of stopping bin_refinement.
 
-A binner that finds nothing to cluster writes an empty folder and exits 0, so `bin_refinement -A
-metabat2_bins -B semibin2_bins` used to stop on the input check whenever one binner had made no
-bins, even though the other set was worth refining. With every set empty the run now finishes
-with an empty final set and a warning.
+A binner that finds nothing writes an empty folder and exits 0. The other sets are still refined.
+With every set empty the run finishes with an empty final set and a warning.
 """
 
 from metawrap2.modules import bin_refinement
@@ -20,8 +18,11 @@ def test_an_empty_bin_set_is_dropped_and_the_rest_are_kept(tmp_path, capsys):
     full = _bin_set(tmp_path / "semibin2_bins", 2)
     empty = _bin_set(tmp_path / "metabat2_bins", 0)
     assert bin_refinement.drop_empty_bin_sets([empty, full]) == [full]
+    # The banner wraps long lines and pads them with asterisks, so a long tmp_path can split the
+    # phrase. Remove the decoration before matching.
     out = capsys.readouterr()
-    assert "metabat2_bins" in out.out + out.err and "no bins" in out.out + out.err
+    text = " ".join((out.out + out.err).replace("*", " ").split())
+    assert "metabat2_bins" in text and "has no bins in it" in text
 
 
 def test_a_folder_of_other_files_counts_as_empty(tmp_path):
@@ -33,7 +34,7 @@ def test_a_folder_of_other_files_counts_as_empty(tmp_path):
 
 
 def test_a_missing_path_is_left_for_the_input_checks(tmp_path):
-    """A typo is not an empty result, so it is passed through to be reported as missing."""
+    """A nonexistent path is passed through so the input checks report it as missing."""
     full = _bin_set(tmp_path / "a", 1)
     missing = str(tmp_path / "does_not_exist")
     assert bin_refinement.drop_empty_bin_sets([full, missing]) == [full, missing]

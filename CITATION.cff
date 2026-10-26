@@ -3,7 +3,7 @@ message: "If you use MetaWrap2, please cite it using the metadata below."
 title: "MetaWrap2"
 abstract: "A benchmarked pipeline for genome-resolved metagenomics, from reads to MAGs and their functions."
 type: software
-version: "2.1.3"
+version: "2.1.4"
 authors:
   - family-names: "Uritskiy"
     given-names: "Gherman"
