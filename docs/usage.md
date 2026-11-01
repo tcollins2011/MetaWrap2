@@ -55,6 +55,60 @@ metawrap2 cohort samples.toml -o study/ -t 32 -j 4   # assemble and bin each sam
 - The sheet is read once, when the run starts, so edits to it take effect on the next `--resume`;
   `[limits]` in `metawrap2.toml` is re-read by every step.
 
+## Running on Slurm
+
+`--executor slurm` submits each step of a `run` or `cohort` study as one Slurm batch job. The driver
+stays on the login node: it submits a stage's jobs, waits for all of them, then submits the next
+stage. It needs `sbatch`, `squeue`, `sacct` (job accounting on) and `scancel`, and the inputs,
+databases, conda environments and output directory must be on a filesystem the compute nodes see.
+
+```bash
+metawrap2 cohort samples.toml -o study/ --executor slurm -j 8 --slurm-account my_lab
+metawrap2 cohort samples.toml -o study/ --executor slurm -j 8 --dry-run   # print the sbatch commands
+```
+
+Job options go in `[slurm]` in `metawrap2.toml`, with a `[slurm.modules.<module>]` table per module
+that needs something else:
+
+```toml
+[slurm]
+partition = "general"
+account = "my_lab"
+time = "24:00:00"
+threads = 16
+memory_gb = 64
+
+[slurm.modules.assembly]
+partition = "bigmem"
+memory_gb = 500
+time = "72:00:00"
+```
+
+- Keys: `partition`, `account`, `qos`, `constraint`, `time`, `gres`, `gpus`, `threads`,
+  `memory_gb`, `extra_args` (a list of further sbatch options) and `poll_seconds` (default 30,
+  `[slurm]` only). An unset key keeps the cluster's default; unset `threads` and `memory_gb` are 8
+  and 32 GB.
+- The command line wins over the config: `-t` and `-m` set each job's CPUs and memory, and
+  `--slurm-partition`, `--slurm-account`, `--slurm-time`, `--slurm-qos`, `--slurm-constraint`,
+  `--slurm-gres` and `--slurm-gpus` set the sbatch option for every job.
+- Each job gets its full `threads` and `memory_gb`; `-j` only limits how many jobs of a stage are
+  queued at once. The `[limits]` budget of the login node does not cap them, and the global flags
+  (`--max-disk-fraction`, `--heartbeat-seconds` and the rest) reach every job.
+- A binning step on `--device cuda` (the default under `--preset deep`) requests `gres=gpu:1`
+  unless `gres` or `gpus` is set for it. Slurm picks the card, so name no card (`cuda:N`) in the
+  sheet.
+- Each job's output goes to `LOGS/<step>.log`, after the step's command and its sbatch command. The
+  batch scripts are in `.metawrap2/run_steps/slurm/`. The job runs with the driver's environment
+  (`--export=ALL`) in the directory the driver was started from, and each step is given the
+  config file by absolute path.
+- Job IDs are in the manifest. If the driver stops (a closed login session), `--resume` reconnects
+  to jobs that are still queued or running, keeps the results of jobs that finished, and submits a
+  step again only if its job failed. Ctrl-C cancels the study's running jobs with `scancel`.
+- A job fails unless it ends `COMPLETED` with exit code 0, so `TIMEOUT`, `OUT_OF_MEMORY`,
+  `NODE_FAIL`, `CANCELLED` and a preempted job that is not requeued stop the study, as a failed
+  local step does. The wall time, CPU time and peak memory from `sacct` go into the manifest and
+  the study's `provenance.txt`.
+
 ## Functional annotation
 
 The KEGG steps need two downloads, once. `install-db` writes each database's path into your config,
@@ -240,6 +294,8 @@ Resource budget: 16/32 threads, 102.4 GB/128.0 GB memory, disk ceiling 70%, 1/1 
 ```
 
 * The budget is divided: `metawrap2 run -j 4` gives each of four concurrent samples a quarter.
+  With `--executor slurm` each job has its own allocation instead (see
+  [Running on Slurm](#running-on-slurm)).
 * `-t` and `-m` are capped to it, with a message naming the setting to raise. Unset, they resolve
   to the budget.
 * The disk ceiling is a hard stop. A run will not start above it, and a run that crosses it is

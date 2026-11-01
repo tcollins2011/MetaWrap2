@@ -423,6 +423,9 @@ class Settings:
     #: it, and a cohort driver divides it among concurrent samples. See metawrap2.limits.
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     overrides: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    #: The ``[slurm]`` table, for ``run --executor slurm``: job options and per-module
+    #: ``[slurm.modules.<module>]`` overrides. See :func:`slurm_options`.
+    slurm: Dict[str, Any] = field(default_factory=dict)
 
     def db(self, key: str) -> str:
         return self.databases.get(key, "")
@@ -464,7 +467,100 @@ CONFIG_TABLES = {
     "databases": "database paths - see DB_KEYS",
     "limits": "the run's resource budget - see metawrap2.limits.LIMITS_KEYS",
     "modules": "per-module option overrides, e.g. [modules.binning]",
+    "slurm": "Slurm job options for `run --executor slurm` - see SLURM_KEYS",
 }
+
+#: The keys ``[slurm]`` and ``[slurm.modules.<module>]`` understand, with the type each takes.
+SLURM_KEYS = {
+    "partition": "sbatch --partition",
+    "account": "sbatch --account",
+    "qos": "sbatch --qos",
+    "constraint": "sbatch --constraint",
+    "time": 'sbatch --time, e.g. "24:00:00"; unset uses the partition\'s default',
+    "gres": 'sbatch --gres, e.g. "gpu:1"',
+    "gpus": 'sbatch --gpus, e.g. 1 or "a100:1"',
+    "threads": "CPUs per job (--cpus-per-task) and the step's -t",
+    "memory_gb": "memory per job in GB (--mem) and the step's -m",
+    "extra_args": 'a list of further sbatch options, e.g. ["--exclude=node7"]',
+    "poll_seconds": "seconds between job-state checks ([slurm] only)",
+}
+
+#: ``[slurm]`` keys taking a positive whole number.
+_SLURM_INT_KEYS = {"threads", "memory_gb", "poll_seconds"}
+#: ``[slurm]`` keys that apply to the whole study, not to one module's jobs.
+_SLURM_GLOBAL_ONLY = {"poll_seconds"}
+
+
+def _slurm_table_problems(table: Dict[str, Any], label: str, where: str) -> List[str]:
+    """Problems with one ``[slurm]`` or ``[slurm.modules.<module>]`` table."""
+    problems: List[str] = []
+    known = [k for k in SLURM_KEYS if label == "slurm" or k not in _SLURM_GLOBAL_ONLY]
+    for key, value in table.items():
+        if label == "slurm" and key == "modules":
+            continue
+        if key not in known:
+            problems.append(
+                "unknown key '%s.%s'%s%s. Known keys: %s"
+                % (label, key, where, _did_you_mean(key, known), ", ".join(known))
+            )
+        elif key in _SLURM_INT_KEYS:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                problems.append("'%s.%s'%s must be a positive whole number" % (label, key, where))
+        elif key == "extra_args":
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                problems.append("'%s.%s'%s must be a list of strings" % (label, key, where))
+        elif key == "gpus":
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                problems.append("'%s.%s'%s must be a number or a string" % (label, key, where))
+        elif not isinstance(value, str):
+            problems.append("'%s.%s'%s must be a string" % (label, key, where))
+    if "gres" in table and "gpus" in table:
+        problems.append("'%s'%s sets both gres and gpus; use one" % (label, where))
+    return problems
+
+
+def check_slurm(slurm: Any, where: str = "") -> List[str]:
+    """Problems with a ``[slurm]`` table, for :func:`check_config`."""
+    if not isinstance(slurm, dict):
+        return ["[slurm]%s must be a table" % where]
+    problems = _slurm_table_problems(slurm, "slurm", where)
+    modules = slurm.get("modules", {})
+    if not isinstance(modules, dict):
+        return problems + ["[slurm.modules]%s must be a table" % where]
+    for module, table in modules.items():
+        if module not in MODULE_ENVS:
+            problems.append(
+                "unknown module [slurm.modules.%s]%s%s"
+                % (module, where, _did_you_mean(module, MODULE_ENVS))
+            )
+        if not isinstance(table, dict):
+            problems.append("[slurm.modules.%s]%s must be a table" % (module, where))
+            continue
+        problems += _slurm_table_problems(table, "slurm.modules.%s" % module, where)
+    return problems
+
+
+def slurm_options(
+    settings: Settings, module: str, overrides: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """The Slurm options for *module*'s jobs.
+
+    Later sources win: ``[slurm]``, then ``[slurm.modules.<module>]``, then *overrides* (the
+    command line). An override of None is ignored. ``gres`` and ``gpus`` are two forms of one
+    request, so a source that sets one replaces the other as well.
+    """
+    modules = settings.slurm.get("modules") or {}
+    resolved: Dict[str, Any] = {}
+    for layer in (
+        {k: v for k, v in settings.slurm.items() if k != "modules"},
+        dict(modules.get(module) or {}),
+        {k: v for k, v in (overrides or {}).items() if v is not None},
+    ):
+        for key, other in (("gres", "gpus"), ("gpus", "gres")):
+            if key in layer:
+                resolved.pop(other, None)
+        resolved.update(layer)
+    return resolved
 
 
 def _did_you_mean(name: str, known: Iterable[str]) -> str:
@@ -522,6 +618,8 @@ def check_config(data: Dict[str, Any], path: str = "") -> Tuple[List[str], List[
         except LimitsError as exc:
             # The message names the key; put the file name in front of it.
             problems.append("%s%s" % (("%s: " % path) if path else "", exc))
+    if "slurm" in data:
+        problems += check_slurm(data["slurm"], where)
     databases = data.get("databases")
     if isinstance(databases, dict):
         known = set(DB_KEYS) | OPTIONAL_DB_KEYS
@@ -594,6 +692,7 @@ def load_settings(explicit: Optional[str] = None, strict: bool = True) -> Settin
         low_utilisation_fraction=optional_float("low_utilisation_fraction"),
         limits=limits,
         overrides={k: dict(v) for k, v in data.get("modules", {}).items()},
+        slurm=dict(data["slurm"]) if isinstance(data.get("slurm"), dict) else {},
     )
 
 

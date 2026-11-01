@@ -78,3 +78,55 @@ def test_a_study_step_command_carries_the_global_flags():
     head = argv[: argv.index("read_qc")]
     assert "--skip-space-check" in head and "--max-disk-fraction" in head
     assert "-t" in argv and "16" in argv
+
+
+# --- from the tests of pull request #7 ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key,value,flag",
+    [
+        ("max_threads", 32, "--max-threads"),
+        ("max_thread_fraction", 0.8, "--max-thread-fraction"),
+        ("max_memory_gb", 1000, "--max-memory-gb"),
+        ("max_memory_fraction", 0.9, "--max-memory-fraction"),
+        ("max_disk_fraction", 0.9, "--max-disk-fraction"),
+        ("max_gpus", 0, "--max-gpus"),
+        ("disk_check_interval", 30, "--disk-check-interval"),
+    ],
+)
+def test_each_budget_override_is_inherited(key, value, flag):
+    limits.set_override(key, value)
+    inherited = cli.inherited_global_flags()
+    assert inherited[:1] == [flag] and float(inherited[1]) == value and len(inherited) == 2
+
+
+def test_gpu_strict_off_is_not_inherited():
+    # --gpu-strict is a switch; it takes no value.
+    limits.set_override("gpu_strict", False)
+    assert "--gpu-strict" not in cli.inherited_global_flags()
+
+
+def test_a_zero_heartbeat_is_inherited():
+    # 0 turns heartbeats off, so it must not be dropped as if unset.
+    command.set_heartbeat_seconds(0)
+    inherited = cli.inherited_global_flags()
+    assert inherited[:1] == ["--heartbeat-seconds"] and float(inherited[1]) == 0
+
+
+def test_dry_run_and_force_are_inherited():
+    command.set_dry_run(True)
+    command.set_force(True)
+    assert {"--dry-run", "--force"} <= set(cli.inherited_global_flags())
+
+
+def test_a_step_command_keeps_its_module_arguments_after_the_global_flags():
+    from metawrap2.commands import run as run_cmd
+
+    step = run_cmd.Step(name="assembly:A", module="assembly", argv=["-o", "study/ASSEMBLY/A"])
+    argv = step.command(16, "metawrap2.toml", ["--resume"], memory_gb=60)
+    module = argv.index("assembly")
+    assert argv.index("--resume") < module
+    assert argv[argv.index("-t") + 1] == "16"
+    assert argv[argv.index("-m", module) + 1] == "60"
+    assert argv[argv.index("--config") + 1] == "metawrap2.toml"

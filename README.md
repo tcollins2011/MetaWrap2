@@ -23,6 +23,8 @@ MetaWrap2 is the successor to the widely used and cited [metaWRAP](https://githu
   (`metawrap2 doctor`) and runs for you, including tools that cannot share an environment.
 - **Reproducible.** Every run records its commands, tool versions, conda packages and database
   fingerprints, and `--resume` continues from the last finished step.
+- **Slurm.** `run` and `cohort` with `--executor slurm` submit each step as a Slurm job
+  ([Running on Slurm](docs/usage.md#running-on-slurm)).
 
 ## Quick start
 

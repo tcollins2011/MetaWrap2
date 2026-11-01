@@ -13,6 +13,8 @@ MetaWrap2 v=2.1.5
 			typed before the subcommand (--max-disk-fraction, --max-threads, --max-memory-gb, --max-gpus,
 			--skip-space-check, --skip-validation, --verbose-logs, --heartbeat-seconds, --gpu-strict) now
 			reach every step, which still gets its own share of threads and memory. Reported in issue #6.
+		Tests from pull request #7 (Matthew Nguyen) cover each budget flag, a zero heartbeat, both
+			entry points, and the flags' place before the module name in a step's command.
 	Fixed - quickstart and install-env failing intermittently on parallel builds
 		Environments built at once share conda's package cache, and concurrent writes left truncated
 			channel indexes ("Unable to read repo solv file ... unexpected EOF") or missing `.conda` and
@@ -45,6 +47,18 @@ MetaWrap2 v=2.1.5
 		Optional only when a flag allows skipping the database, named in the label. check viruses fails
 			without GENOMAD_DB. check <module> lists only that module's databases; doctor states its scope
 			(--all for every module) and counts what it prints.
+	New - Slurm executor for run and cohort, contributed by Matthew Nguyen (pull request #8)
+		`--executor slurm` submits each step as one sbatch job and waits for every job of a stage before
+			the next stage. Job options come from [slurm] and [slurm.modules.<module>] in metawrap2.toml
+			and from --slurm-partition, --slurm-account, --slurm-time, --slurm-qos, --slurm-constraint,
+			--slurm-gres and --slurm-gpus. -t and -m set each job's CPUs and memory, uncapped by the login
+			node's [limits]; -j sets how many jobs of a stage are queued at once.
+		Job IDs are recorded in the manifest before the driver waits. --resume reconnects to jobs still
+			queued or running, keeps jobs that finished, and resubmits steps whose jobs failed. Ctrl-C
+			cancels the running jobs. A job fails unless it ends COMPLETED with exit code 0; a preempted
+			job that is requeued is followed to its end. squeue and sacct errors are retried for 30 min.
+		Wall time, CPU time and peak memory come from sacct, for the manifest and provenance.txt. A
+			binning step on --device cuda requests gres gpu:1. --dry-run prints each sbatch command.
 	New - run and cohort check databases before the first step
 	Fixed - --dry-run wrote step markers that --resume trusted
 		Markers now record whether they were written by a dry run; dry runs write none, decompress

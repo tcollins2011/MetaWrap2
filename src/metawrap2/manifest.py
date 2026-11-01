@@ -226,10 +226,24 @@ class Manifest:
             # interrupted step (e.g. after an OOM) keeps it. See metawrap2.limits and
             # `metawrap2 calibrate`.
             entry["grant"] = dict(grant)
+            if grant.get("executor"):
+                # Recorded before a Slurm job is submitted, so a resume can tell a step that was
+                # handed to the scheduler from an interrupted local one.
+                entry["executor"] = str(grant["executor"])
         with self._lock:
             self.data["steps"][name] = entry
             self.save()
         return started
+
+    def record_scheduler_job(self, name: str, executor: str, job_id: str) -> None:
+        """Attach the scheduler's job ID to running step *name*, so a resume can reconnect."""
+        with self._lock:
+            entry = self.data["steps"].get(name)
+            if entry is None or entry.get("status") != "running":
+                raise ValueError("step %s is not running; cannot record job %s" % (name, job_id))
+            entry["executor"] = executor
+            entry["scheduler_job_id"] = job_id
+            self.save()
 
     def finish(
         self,

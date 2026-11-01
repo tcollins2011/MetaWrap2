@@ -39,3 +39,54 @@ def test_can_skip_an_intact_completed_step(tmp_path):
     os.remove(out)
     skip, reason = man.can_skip("binning")
     assert skip is False and "is gone" in reason
+
+
+def test_a_slurm_job_id_is_recorded_without_overwriting_step_state(tmp_path):
+    """Recording a scheduler job preserves the step's command and inputs.
+
+    A Slurm job may outlive its controller. The job ID must survive a manifest reload so
+    --resume can reconnect instead of submitting a duplicate job.
+    """
+    from metawrap2.manifest import Manifest
+
+    path = tmp_path / "manifest.json"
+    reads = tmp_path / "reads.fastq"
+    reads.write_text("@read\nACGT\n+\nIIII\n")
+
+    manifest = Manifest(str(path))
+    command = ["python", "-m", "metawrap2.cli", "read_qc"]
+
+    started = manifest.start(
+        "read_qc:sample1",
+        command,
+        [str(reads)],
+        grant={"threads": 8, "executor": "slurm"},
+    )
+
+    manifest.record_scheduler_job(
+        "read_qc:sample1",
+        "slurm",
+        "123456",
+    )
+
+    reloaded = Manifest(str(path))
+    record = reloaded.step("read_qc:sample1")
+
+    assert record is not None
+    assert record.status == "running"
+    assert record.data["executor"] == "slurm"
+    assert record.data["scheduler_job_id"] == "123456"
+    assert record.data["command"] == command
+    assert record.inputs[0]["path"] == str(reads)
+
+    manifest.finish(
+        "read_qc:sample1",
+        started,
+        "completed",
+        outputs=[str(reads)],
+    )
+
+    finished = Manifest(str(path)).step("read_qc:sample1")
+    assert finished is not None
+    assert finished.status == "completed"
+    assert finished.data["scheduler_job_id"] == "123456"

@@ -82,6 +82,11 @@ metawrap2 status study/ --audit          # is every recorded output still presen
 The `--resume` column uses the same check as `--resume`. The audit also runs at the end of every
 run and flags steps that reported success but produced no output.
 
+A step run with `--executor slurm` also records `executor` (`"slurm"`), `scheduler_job_id`, and in
+its `grant` the job's `threads`, `memory_gb`, `job_name` and any `partition`, `gres` or `gpus`. The
+job ID is written before the driver starts waiting, so `--resume` reconnects to a job that is still
+running instead of submitting it twice. See [Running on Slurm](usage.md#running-on-slurm).
+
 ## Reproducing a run
 
 - Re-run the top line of `run_commands.txt`.
@@ -95,7 +100,8 @@ run and flags steps that reported success but produced no output.
 ## Per-step resource use
 
 Steps are reaped with `os.wait4`, so the manifest records each step's peak memory, CPU time and
-wall time. `metawrap2 calibrate <study>...` compares them with the built-in disk and memory
+wall time. Under `--executor slurm` the same keys come from `sacct` (`ElapsedRaw`, `UserCPU`,
+`SystemCPU` and the largest `MaxRSS` of the job's steps). `metawrap2 calibrate <study>...` compares them with the built-in disk and memory
 estimates.
 
 A step that used a GPU also records `peak_gpu_memory_bytes` and `gpu_devices`. `rusage` does not

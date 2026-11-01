@@ -85,6 +85,27 @@ use_conda_envs = true
 # Optional: override any surfaced module constant without editing the source.
 # [modules.binning]
 # MIN_CONTIG_LEN = 2000
+
+# Slurm jobs for `metawrap2 run --executor slurm` and `cohort --executor slurm`. Each step is
+# one job with these options; -t, -m and --slurm-<option> on the command line win over them.
+# Unset options keep the cluster's defaults; unset threads and memory_gb are 8 and 32 GB.
+# [slurm]
+# partition = "general"
+# account = "my_lab"
+# time = "24:00:00"
+# threads = 16
+# memory_gb = 64
+# poll_seconds = 30           # seconds
+# extra_args = ["--mail-type=FAIL"]
+#
+# A [slurm.modules.<module>] table overrides [slurm] for that module's jobs.
+# [slurm.modules.assembly]
+# partition = "bigmem"
+# memory_gb = 500
+# time = "72:00:00"
+# Binning with --preset deep asks for one GPU (gres "gpu:1") unless gres or gpus is set here.
+# [slurm.modules.binning]
+# partition = "gpu"
 """
 
 

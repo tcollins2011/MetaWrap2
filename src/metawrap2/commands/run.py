@@ -11,6 +11,7 @@ independent samples in parallel, and skips steps that are already done.
     metawrap2 run samples.toml -o study/ -t 24
     metawrap2 run samples.toml -o study/ --dry-run     # print the plan, run nothing
     metawrap2 run samples.toml -o study/ --resume      # continue where it stopped
+    metawrap2 run samples.toml -o study/ --executor slurm -j 8   # each step as a Slurm job
 
 Each step is an ordinary ``metawrap2 <module>`` invocation built by :func:`plan_steps`, so every
 step can also be run by hand; each command is the first line of its step's log in ``LOGS/`` and is
@@ -42,7 +43,9 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -53,9 +56,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .. import limits as _limits
 from .. import provenance as _provenance
+from .. import slurm as _slurm
 from .. import usage as _usage
 from ..cliformat import make_parser
-from ..config import load_settings
+from ..config import Settings, find_config, load_settings, slurm_options
 from ..io import reads as _reads
 from ..logfilter import duration as _duration
 from ..logging import announcement, comm, error, warning
@@ -1547,6 +1551,232 @@ def _run_step_process(
     return step, status, log_path
 
 
+# --- the Slurm executor -----------------------------------------------------------------------
+
+#: CPUs and memory of a Slurm job when neither the command line nor ``[slurm]`` sets them.
+DEFAULT_SLURM_THREADS = 8
+DEFAULT_SLURM_MEMORY_GB = 32
+
+
+@dataclass
+class SlurmRun:
+    """The study-wide settings for submitting steps as Slurm jobs."""
+
+    settings: Settings
+    #: Command-line values (``-t``, ``-m``, ``--slurm-*``), which win over ``[slurm]``.
+    overrides: Dict[str, Any]
+    #: Short tag of the output directory, in every job name, so --resume can find a job by name.
+    tag: str
+    #: The working directory jobs start in, so relative paths mean what they meant here.
+    cwd: str
+    #: Set on Ctrl-C. Each waiting step then cancels its job.
+    stop: threading.Event = field(default_factory=threading.Event)
+
+    def resources(self, step: Step) -> Tuple[int, int, _slurm.SlurmJob]:
+        """The CPUs, memory in GB and scheduling options of *step*'s job.
+
+        A step that trains a learned binner on ``--device cuda`` asks for one GPU unless the
+        config already requests GPUs for it.
+        """
+        opts = slurm_options(self.settings, step.module, self.overrides)
+        threads = int(opts.get("threads") or self.settings.threads or DEFAULT_SLURM_THREADS)
+        memory_gb = int(opts.get("memory_gb") or DEFAULT_SLURM_MEMORY_GB)
+        gres = opts.get("gres")
+        gpus = None if opts.get("gpus") is None else str(opts["gpus"])
+        device = step_device(step)
+        if not gres and not gpus and device is not None and device.startswith("cuda"):
+            gres = "gpu:1"
+        job = _slurm.SlurmJob(
+            partition=opts.get("partition"),
+            account=opts.get("account"),
+            qos=opts.get("qos"),
+            constraint=opts.get("constraint"),
+            time=opts.get("time"),
+            gres=gres,
+            gpus=gpus,
+            extra_args=tuple(opts.get("extra_args") or ()),
+            poll_seconds=int(self.settings.slurm.get("poll_seconds") or _slurm.POLL_SECONDS),
+        )
+        return threads, memory_gb, job
+
+    def job_name(self, step: Step) -> str:
+        """E.g. ``mw2-3f9a1c-read_qc_A``: one word, so squeue --name finds it."""
+        return "mw2-%s-%s" % (self.tag, re.sub(r"[^A-Za-z0-9_.-]", "_", step.name))
+
+
+def study_tag(layout: Layout) -> str:
+    """Six hex digits that identify the study directory."""
+    return hashlib.sha1(os.path.abspath(layout.root).encode("utf-8")).hexdigest()[:6]
+
+
+def slurm_script_path(layout: Layout, step: Step) -> str:
+    return os.path.join(layout.state_dir, "slurm", "%s.sh" % step.name.replace(":", "_"))
+
+
+def describe_slurm_job(threads: int, memory_gb: int, job: _slurm.SlurmJob) -> str:
+    """E.g. ``16 CPUs, 64 GB, partition bigmem, gres gpu:1``."""
+    parts = ["%d CPUs" % threads, "%d GB" % memory_gb]
+    parts.append("partition %s" % job.partition if job.partition else "default partition")
+    for label, value in (("gres", job.gres), ("gpus", job.gpus), ("time", job.time)):
+        if value:
+            parts.append("%s %s" % (label, value))
+    return ", ".join(parts)
+
+
+def slurm_job_on_record(state: StepState, step: Step) -> Optional[Dict[str, Any]]:
+    """The manifest record of *step* if an earlier run left it running under Slurm."""
+    record = state.manifest.step(step.name)
+    if record is None or record.status != "running" or record.data.get("executor") != "slurm":
+        return None
+    return record.data
+
+
+def _resume_form(command: Sequence[str]) -> List[str]:
+    """*command* without --resume and --force, which a resumed run adds or drops."""
+    return [arg for arg in command if arg not in ("--resume", "--force")]
+
+
+def _started_epoch(record: Dict[str, Any]) -> float:
+    try:
+        return time.mktime(time.strptime(str(record.get("started")), "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return time.time()
+
+
+def reconnect_slurm_job(
+    step: Step, argv: Sequence[str], state: StepState
+) -> Optional[Tuple[str, float]]:
+    """On --resume, the Slurm job an earlier run left running for *step*, and its start time.
+
+    None when the step must be submitted: there is no such job, or it ran a different command
+    and has finished. Raises :class:`metawrap2.slurm.SlurmError` when a job with a different
+    command is still running, since two jobs would write the same outputs.
+    """
+    record = slurm_job_on_record(state, step) if state.resume else None
+    if record is None:
+        return None
+    job_id = record.get("scheduler_job_id")
+    if not job_id:
+        # The driver stopped between sbatch and recording the ID; look the job up by name.
+        name = (record.get("grant") or {}).get("job_name")
+        job_id = _slurm.find_job(name, since=record.get("started")) if name else None
+        if job_id is None:
+            comm("no Slurm job of %s was found; submitting it again" % step.name)
+            return None
+        state.manifest.record_scheduler_job(step.name, "slurm", job_id)
+    if _resume_form(record.get("command") or []) != _resume_form(argv):
+        if not _slurm.job_finished(job_id):
+            raise _slurm.SlurmError(
+                "Slurm job %s is still running %s with a different command. Wait for it to "
+                "finish or cancel it (scancel %s), then resume." % (job_id, step.name, job_id)
+            )
+        return None
+    comm("reconnecting %s to Slurm job %s" % (step.name, job_id))
+    return job_id, _started_epoch(record)
+
+
+def run_slurm_step(
+    step: Step,
+    layout: Layout,
+    config: Optional[str],
+    global_flags: Sequence[str],
+    dry_run: bool,
+    state: Optional[StepState],
+    slurm: SlurmRun,
+) -> Tuple[Step, str, str]:
+    """Run one step as a Slurm job and wait for it. Returns ``(step, status, log path)``.
+
+    The job ID is recorded in the manifest before the wait, so a driver that stops (a lost
+    login session) leaves the step running with its job; ``--resume`` then waits for that job
+    instead of submitting another. On Ctrl-C (:attr:`SlurmRun.stop`) the job is cancelled and
+    the step recorded as interrupted. Raises :class:`metawrap2.slurm.SlurmError` when the job's
+    outcome cannot be determined; the step then stays running in the manifest.
+    """
+    threads, memory_gb, job = slurm.resources(step)
+    argv = step.command(threads, config, global_flags, memory_gb=memory_gb)
+    log_path = os.path.abspath(step_log_path(layout, step))
+    script = os.path.abspath(slurm_script_path(layout, step))
+    name = slurm.job_name(step)
+    sbatch = _slurm.sbatch_command(
+        script, name=name, threads=threads, memory_gb=memory_gb, log=log_path, job=job
+    )
+    if dry_run:
+        print("[plan] %s" % " ".join(shlex.quote(a) for a in sbatch))
+        print("[plan]   job runs: %s" % " ".join(shlex.quote(a) for a in argv))
+        return step, COMPLETED, log_path
+    if slurm.stop.is_set():
+        return step, INTERRUPTED, log_path
+    os.makedirs(layout.log_dir, exist_ok=True)
+
+    grant: Dict[str, Any] = {
+        "threads": threads,
+        "memory_gb": memory_gb,
+        "executor": "slurm",
+        "job_name": name,
+    }
+    for key in ("partition", "gres", "gpus"):
+        if getattr(job, key):
+            grant[key] = getattr(job, key)
+
+    def on_state(job_state: str) -> None:
+        comm("%s (Slurm job %s): %s" % (step.name, job_id, job_state))
+
+    found = reconnect_slurm_job(step, argv, state) if state is not None else None
+    job_id, started = found if found else (None, time.time())
+    fresh = found is None
+    while True:
+        if job_id is None:
+            started = state.start(step, argv, grant=grant) if state is not None else time.time()
+            with open(log_path, "w") as log:
+                log.write("$ %s\n" % " ".join(shlex.quote(a) for a in argv))
+                log.write("# submitted with: %s\n\n" % " ".join(shlex.quote(a) for a in sbatch))
+            _slurm.write_script(script, _slurm.batch_script(argv, step.name, slurm.cwd, threads))
+            try:
+                job_id = _slurm.submit_job(sbatch)
+            except _slurm.SubmissionRejected as exc:
+                with open(log_path, "a") as log:
+                    log.write("[metawrap2] %s\n" % exc)
+                warning("%s was not submitted: %s" % (step.name, exc))
+                if state is not None:
+                    state.finish(step, started, FAILED, log=log_path)
+                return step, FAILED, log_path
+            # Any other SlurmError leaves the step running with its job name, so a resume can
+            # find the job if sbatch did submit it.
+            if state is not None:
+                state.manifest.record_scheduler_job(step.name, "slurm", job_id)
+            comm("submitted %s as Slurm job %s (%s)" % (step.name, job_id, name))
+            fresh = True
+        try:
+            result = _slurm.wait_for_job(
+                job_id, job.poll_seconds, stop=slurm.stop, on_state=on_state
+            )
+        except _slurm.JobInterrupted:
+            try:
+                _slurm.cancel_job(job_id)
+                comm("cancelled Slurm job %s (%s)" % (job_id, step.name))
+            except _slurm.SlurmError as exc:
+                warning(
+                    "could not cancel Slurm job %s: %s. Cancel it with scancel." % (job_id, exc)
+                )
+            if state is not None:
+                state.finish(step, started, INTERRUPTED, log=log_path)
+            return step, INTERRUPTED, log_path
+        if result.ok or fresh:
+            break
+        # The job an earlier run left behind failed; run the step again, as a resume does.
+        comm("%s; submitting %s again" % (result.describe(), step.name))
+        job_id = None
+    status = COMPLETED if result.ok else FAILED
+    with open(log_path, "a") as log:
+        summary = (", " + _usage.summarise(result.usage)) if result.usage else ""
+        log.write("\n[metawrap2] %s%s\n" % (result.describe(), summary))
+    if not result.ok:
+        warning("%s: %s" % (step.name, result.describe()))
+    if state is not None:
+        state.finish(step, started, status, log=log_path, usage=result.usage)
+    return step, status, log_path
+
+
 def cores_busy(usage: Dict[str, Any]) -> Optional[float]:
     """Return the mean busy cores for a step: CPU seconds over wall seconds.
 
@@ -1594,11 +1824,15 @@ def execute(
     dry_run: bool,
     memory_gb: Optional[int] = None,
     gpus: int = 0,
+    slurm: Optional[SlurmRun] = None,
 ) -> int:
     """Run the planned steps in order, grouping the parallelisable ones. Returns an exit code.
 
     *gpus* is the budget's GPU count. Concurrent GPU steps that do not name a card get one each,
     round-robin over the first *gpus* cards.
+
+    With *slurm*, each step is a Slurm job with its own CPUs, memory and GPUs, and *jobs* is how
+    many jobs of a stage are in the queue at once; *threads*, *memory_gb* and *gpus* are unused.
     """
     index = 0
     completed = 0
@@ -1622,7 +1856,16 @@ def execute(
                 comm("skipping %s - %s" % (s.name, reason))
                 completed += 1
             else:
-                if state.resume and state.manifest.step(s.name) is not None:
+                on_slurm = slurm_job_on_record(state, s) if state.resume else None
+                if on_slurm is not None and slurm is not None:
+                    comm("checking %s - it was left running under Slurm" % s.name)
+                elif on_slurm is not None:
+                    warning(
+                        "%s was submitted to Slurm by an earlier run (job %s). Check that the job "
+                        "has ended (squeue) before this run writes the same outputs."
+                        % (s.name, on_slurm.get("scheduler_job_id") or "ID not recorded")
+                    )
+                elif state.resume and state.manifest.step(s.name) is not None:
                     # Say why --resume is re-running this step.
                     comm("re-running %s - %s" % (s.name, state.rerun_reason(s)))
                 pending.append(s)
@@ -1634,6 +1877,15 @@ def execute(
         _before_group(group[0], layout, study, dry_run)
 
         workers = max(1, min(jobs, len(pending)))
+        if slurm is not None:
+            return_code = _execute_slurm_group(
+                pending, layout, config, global_flags, state, dry_run, workers, slurm
+            )
+            if return_code:
+                return return_code
+            completed += len(pending)
+            _after_group(group[0], layout, study, dry_run)
+            continue
         per_step_threads = max(1, threads // workers)
         # Divide the memory budget like the threads, so N concurrent steps (e.g. SPAdes) do not
         # each request the whole budget.
@@ -1721,6 +1973,97 @@ def execute(
     if not dry_run:
         audit_outputs(state, layout)
     comm("results are under %s" % layout.root)
+    return 0
+
+
+def _execute_slurm_group(
+    pending: List[Step],
+    layout: Layout,
+    config: Optional[str],
+    global_flags: Sequence[str],
+    state: StepState,
+    dry_run: bool,
+    workers: int,
+    slurm: SlurmRun,
+) -> int:
+    """Run one stage's steps as Slurm jobs, *workers* at a time. Returns 0 or an exit code.
+
+    Every job of the stage is waited for before this returns, also when one fails, so no job is
+    left unwatched. A failed step stops the study, as with the local executor.
+    """
+    threads, memory_gb, job = slurm.resources(pending[0])
+    module = pending[0].module
+    if len(pending) > 1:
+        announcement("SUBMITTING %d x %s TO SLURM (%d at a time)" % (len(pending), module, workers))
+    else:
+        announcement("SUBMITTING %s TO SLURM" % pending[0].name.upper())
+    comm("each job: %s" % describe_slurm_job(threads, memory_gb, job))
+    if len(pending) == 1:
+        comm("live log: %s" % step_log_path(layout, pending[0]))
+    else:
+        comm("live logs: %s" % os.path.join(layout.log_dir, "<step>.log"))
+
+    failures: List[Tuple[Step, str]] = []
+    interrupted = False
+    unresolved: List[Tuple[Step, BaseException]] = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            try:
+                futures = {
+                    pool.submit(
+                        run_slurm_step, s, layout, config, global_flags, dry_run, state, slurm
+                    ): s
+                    for s in pending
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        s, status, log_path = future.result()
+                    except (_slurm.SlurmError, OSError) as exc:
+                        unresolved.append((futures[future], exc))
+                        continue
+                    if status == COMPLETED:
+                        record = state.manifest.step(s.name)
+                        cost = (record.data.get("usage") or {}) if record else {}
+                        comm(
+                            "finished %s (%s)" % (s.name, _usage.summarise(cost))
+                            if cost
+                            else "finished %s" % s.name
+                        )
+                    elif status == INTERRUPTED:
+                        interrupted = True
+                    else:
+                        failures.append((s, log_path))
+            except KeyboardInterrupt:
+                # The waiting steps see this, cancel their jobs and record themselves as
+                # interrupted; leaving the pool waits for them to do so.
+                slurm.stop.set()
+                raise
+    except KeyboardInterrupt:
+        interrupted = True
+    if interrupted:
+        warning(
+            "Interrupted. The running Slurm jobs were cancelled and their steps are recorded as "
+            "interrupted. Re-run the same command with --resume to continue: those steps are "
+            "redone and finished steps are skipped."
+        )
+        return 130
+    if unresolved:
+        for s, problem in unresolved:
+            warning("%s: %s" % (s.name, problem))
+        warning(
+            "Slurm execution stopped: the outcome of %d job(s) is unknown. Their steps stay "
+            "recorded as running; once Slurm answers again, re-run the same command with "
+            "--resume to reconnect to the jobs." % len(unresolved)
+        )
+        return 1
+    if failures:
+        for s, log_path in failures:
+            warning("%s failed. Its log is %s" % (s.name, log_path))
+        error(
+            "%d of %d step(s) failed; stopping.\n"
+            "Fix the cause and re-run the same command with --resume to continue from "
+            "this point." % (len(failures), len(pending))
+        )
     return 0
 
 
@@ -1817,7 +2160,8 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         type=int,
         default=None,
         help="total threads to use, divided between concurrent steps "
-        "(default: [settings] threads in metawrap2.toml, else the [limits] budget)",
+        "(default: [settings] threads in metawrap2.toml, else the [limits] budget); "
+        "with --executor slurm, the CPUs of each job",
     )
     ap.add_argument(
         "-j",
@@ -1825,7 +2169,8 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         type=int,
         default=1,
         help="how many independent samples to process at once; the thread budget "
-        "is divided between them (default 1)",
+        "is divided between them (default 1); with --executor slurm, how many jobs "
+        "are submitted at once",
     )
     ap.add_argument(
         "--steps", nargs="+", choices=ALL_STEPS, help="override the steps from the sheet"
@@ -1863,7 +2208,7 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         type=int,
         default=None,
         help="total memory budget in GB, divided between concurrent steps "
-        "(default: the [limits] budget)",
+        "(default: the [limits] budget); with --executor slurm, the memory of each job",
     )
     ap.add_argument(
         "--strict-fingerprints",
@@ -1873,6 +2218,20 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
     )
     ap.add_argument("--config", help="path to metawrap2.toml")
     ap.add_argument("--example", action="store_true", help="print an example sample sheet and exit")
+    ap.add_argument(
+        "--executor",
+        choices=("local", "slurm"),
+        default="local",
+        help="run the steps on this machine (local, the default) or submit each as a Slurm "
+        "job (slurm; options under [slurm] in metawrap2.toml)",
+    )
+    for option, what in SLURM_CLI_OPTIONS:
+        ap.add_argument(
+            "--slurm-" + option,
+            dest="slurm_" + option,
+            metavar=option.upper(),
+            help="sbatch --%s for every job, overriding [slurm] (with --executor slurm)" % what,
+        )
     args = ap.parse_args(argv)
 
     if args.example:
@@ -1928,6 +2287,8 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
     force = bool(args.force or _command.runner.force)
 
     settings = load_settings(args.config)
+    if args.executor == "slurm":
+        return _main_slurm(args, study, settings, dry_run, resume, force)
     # The driver knows how many steps run at once, so it resolves the budget and divides it;
     # otherwise each concurrent module would claim the whole budget. See metawrap2.limits.
     budget = _limits.resolve(settings.limits)
@@ -1958,34 +2319,13 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
     # A dry run only prints the plan: it creates no directory and writes nothing under -o.
     if not dry_run:
         os.makedirs(layout.root, exist_ok=True)
-
-    # Every global flag reaches each step, which runs as its own process; --force, --resume and
-    # --dry-run may also have been given after `run`.
-    from ..cli import inherited_global_flags
-
-    global_flags: List[str] = inherited_global_flags()
-    for wanted, flag in ((force, "--force"), (resume, "--resume"), (dry_run, "--dry-run")):
-        if wanted and flag not in global_flags:
-            global_flags.append(flag)
-
+    global_flags = study_global_flags(force, resume, dry_run)
     steps = plan_steps(study, layout)
-
-    announcement("METAWRAP2 STUDY: %d SAMPLE(S), %d STEP(S)" % (len(study.samples), len(steps)))
-    comm("samples: %s" % ", ".join(s.name for s in study.samples))
-    comm("steps: %s" % " -> ".join(study.steps))
-    comm(
-        "%s assembly; %d threads total, %d job(s) at a time"
-        % ("co-" if study.coassemble else "per-sample", threads, args.jobs)
-    )
-    comm("output: %s" % layout.root)
-    strategy = strategy_record(study)
-    comm(
-        "catalogue strategy: %s, %d sample(s), dereplication %s"
-        % (
-            strategy["strategy"],
-            strategy["samples"],
-            "on" if strategy["dereplicated"] else "off",
-        )
+    announce_study(
+        study,
+        layout,
+        steps,
+        "%d threads total, %d job(s) at a time" % (threads, args.jobs),
     )
     comm("Resource budget: %s" % budget.describe())
     overrides = _limits.overrides()
@@ -1996,14 +2336,14 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         )
 
     state = StepState(layout, resume=resume, strict_fingerprints=args.strict_fingerprints)
-    # Steps a --resume will skip need no databases now.
-    preflight_databases([s for s in steps if state.skip_reason(s) is None], settings, dry_run)
-    # Written before the first step, so a failed or interrupted study still records its strategy.
-    # Not written under --dry-run.
-    if not dry_run:
-        record_strategy(state, study)
-    try:
-        return execute(
+    return run_study(
+        study,
+        layout,
+        steps,
+        state,
+        settings,
+        dry_run,
+        lambda: execute(
             steps,
             layout,
             study,
@@ -2015,7 +2355,61 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
             dry_run,
             memory_gb=memory_gb,
             gpus=budget.gpus,
+        ),
+    )
+
+
+def study_global_flags(force: bool, resume: bool, dry_run: bool) -> List[str]:
+    """The global flags every step's process gets.
+
+    Every global flag reaches each step, which runs as its own process; --force, --resume and
+    --dry-run may also have been given after `run`.
+    """
+    from ..cli import inherited_global_flags
+
+    global_flags: List[str] = inherited_global_flags()
+    for wanted, flag in ((force, "--force"), (resume, "--resume"), (dry_run, "--dry-run")):
+        if wanted and flag not in global_flags:
+            global_flags.append(flag)
+    return global_flags
+
+
+def announce_study(study: Study, layout: Layout, steps: Sequence[Step], resources: str) -> None:
+    """Print the study banner: samples, steps, mode, resources, output and strategy."""
+    announcement("METAWRAP2 STUDY: %d SAMPLE(S), %d STEP(S)" % (len(study.samples), len(steps)))
+    comm("samples: %s" % ", ".join(s.name for s in study.samples))
+    comm("steps: %s" % " -> ".join(study.steps))
+    comm("%s assembly; %s" % ("co-" if study.coassemble else "per-sample", resources))
+    comm("output: %s" % layout.root)
+    strategy = strategy_record(study)
+    comm(
+        "catalogue strategy: %s, %d sample(s), dereplication %s"
+        % (
+            strategy["strategy"],
+            strategy["samples"],
+            "on" if strategy["dereplicated"] else "off",
         )
+    )
+
+
+def run_study(
+    study: Study,
+    layout: Layout,
+    steps: Sequence[Step],
+    state: StepState,
+    settings: Settings,
+    dry_run: bool,
+    run: Any,
+) -> int:
+    """Check databases, record the strategy, call *run* and write the study's provenance."""
+    # Steps a --resume will skip need no databases now.
+    preflight_databases([s for s in steps if state.skip_reason(s) is None], settings, dry_run)
+    # Written before the first step, so a failed or interrupted study still records its strategy.
+    # Not written under --dry-run.
+    if not dry_run:
+        record_strategy(state, study)
+    try:
+        return int(run())
     finally:
         # Also after a failed or interrupted study, so the cost of the finished steps is kept.
         if not dry_run:
@@ -2023,6 +2417,81 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
                 write_study_provenance(state, layout, study)
             except OSError as exc:
                 warning("could not write the study's provenance.txt: %s" % exc)
+
+
+#: ``--slurm-<option>`` flags of `run`, with the sbatch option each sets.
+SLURM_CLI_OPTIONS = (
+    ("partition", "partition"),
+    ("account", "account"),
+    ("time", "time"),
+    ("qos", "qos"),
+    ("constraint", "constraint"),
+    ("gres", "gres"),
+    ("gpus", "gpus"),
+)
+
+
+def _main_slurm(
+    args: argparse.Namespace,
+    study: Study,
+    settings: Settings,
+    dry_run: bool,
+    resume: bool,
+    force: bool,
+) -> int:
+    """:func:`main` for ``--executor slurm``.
+
+    Each job gets its own CPUs and memory from ``-t``/``-m`` or ``[slurm]``, so this machine's
+    ``[limits]`` budget does not cap them; the budget flags still reach every step.
+    """
+    if not dry_run:
+        missing = _slurm.missing_commands()
+        if missing:
+            error(
+                "--executor slurm needs the Slurm client commands on PATH; not found: %s"
+                % ", ".join(missing)
+            )
+    for value, flag in ((args.threads, "-t"), (args.memory, "-m"), (args.jobs, "-j")):
+        if value is not None and value < 1:
+            error("%s must be at least 1" % flag)
+    overrides: Dict[str, Any] = {
+        option: getattr(args, "slurm_" + option) for option, _what in SLURM_CLI_OPTIONS
+    }
+    if overrides["gres"] and overrides["gpus"]:
+        error("give --slurm-gres or --slurm-gpus, not both")
+    overrides.update(threads=args.threads, memory_gb=args.memory)
+    layout = Layout(args.output)
+    if not dry_run:
+        os.makedirs(layout.root, exist_ok=True)
+    slurm = SlurmRun(settings, overrides, tag=study_tag(layout), cwd=os.getcwd())
+    # Jobs may start on a node without this machine's home directory, so each step is given the
+    # config file this driver read, by absolute path.
+    config = find_config(args.config)
+    config = os.path.abspath(config) if config else None
+    global_flags = study_global_flags(force, resume, dry_run)
+    steps = plan_steps(study, layout)
+    announce_study(study, layout, steps, "Slurm executor, up to %d job(s) at a time" % args.jobs)
+    state = StepState(layout, resume=resume, strict_fingerprints=args.strict_fingerprints)
+    return run_study(
+        study,
+        layout,
+        steps,
+        state,
+        settings,
+        dry_run,
+        lambda: execute(
+            steps,
+            layout,
+            study,
+            0,
+            args.jobs,
+            config,
+            global_flags,
+            state,
+            dry_run,
+            slurm=slurm,
+        ),
+    )
 
 
 if __name__ == "__main__":
