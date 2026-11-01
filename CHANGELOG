@@ -1,3 +1,59 @@
+New - Slurm executor for workflow execution
+    `metawrap2 run` and `metawrap2 cohort` support `--executor slurm`, submitting
+    pipeline steps through sbatch and monitoring their completion with squeue
+    and sacct. Local execution remains the default.
+
+    Slurm resources can be configured globally and per module, including CPUs,
+    memory, walltime, partition, account, GPU/GRES, constraints and QoS.
+    Each job receives an independent resource allocation rather than sharing
+    the login node's limits. `-j` controls concurrent Slurm jobs.
+
+    Scheduler job IDs are recorded in the study manifest. Resuming a workflow
+    can reconnect to an existing submitted job, avoiding duplicate execution.
+    Failed jobs and missing outputs stop dependent stages; unresolved scheduler
+    states are retained for investigation.
+
+    The initial implementation uses blocking job monitoring. Job arrays,
+    detached workflow submission and automatic retries are not yet supported.
+New - Slurm executor for workflow execution
+    `metawrap2 run` and `metawrap2 cohort` support `--executor slurm`, submitting
+    pipeline steps through sbatch and monitoring completion using squeue and sacct.
+    Local execution remains the default.
+
+    Slurm resources can be configured globally and per module, including CPUs,
+    memory, walltime, partition, account, GPU/GRES, constraints and QoS.
+    Each job receives an independent resource allocation rather than being
+    limited by the login node's resources. `-j` controls concurrent Slurm jobs
+    while preserving workflow stage ordering.
+
+    Submitted job IDs are recorded in the study manifest. `--resume` can reconnect
+    to existing Slurm jobs instead of submitting duplicates. Failed jobs and
+    missing outputs stop dependent stages, while uncertain scheduler states
+    are preserved for investigation.
+
+    The initial implementation uses blocking job monitoring. Job arrays,
+    detached execution and automatic retries are not yet supported.
+Fix - Global CLI flags not propagated to child modules (#7)
+    The `run` and `cohort` drivers previously applied global CLI overrides
+    only to the parent process. Child module invocations received `--force`,
+    `--resume` and `--dry-run`, but not resource-limit overrides or other
+    execution flags.
+
+    Added `child_global_flags()` to propagate resource overrides such as
+    `--max-threads`, `--max-memory-gb`, `--max-disk-fraction`, `--max-gpus`
+    and `--gpu-strict`, along with execution options including
+    `--skip-space-check`, `--skip-validation`, `--verbose-logs` and
+    `--heartbeat-seconds`.
+
+    This fixes cases where a child module used default resource limits
+    despite explicit overrides on the workflow command. For example, a
+    cohort launched with `--max-disk-fraction 0.9` previously failed
+    read_qc when filesystem usage exceeded the default 70% threshold.
+    Child modules now receive the requested 90% limit while preserving
+    their independently allocated CPU and memory resources.
+
+    Added regression tests covering resource overrides, execution flags,
+    child command construction and both run and cohort entry points.
 MetaWrap2 v=2.1.4
 	`metawrap2 score`, a progress heartbeat, a low-utilisation warning, verified multi-connection
 		downloads, a GPU check before learned binners, benchmark arms that run another pipeline,

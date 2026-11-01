@@ -224,7 +224,7 @@ Each run prints its budget before starting:
 Resource budget: 16/32 threads, 102.4 GB/128.0 GB memory, disk ceiling 70%, 1/1 GPUs
 ```
 
-* The budget is divided: `metawrap2 run -j 4` gives each of four concurrent samples a quarter.
+* With the local executor, the budget is divided: metawrap2 run -j 4 gives each of four concurrent samples a quarter. Slurm execution instead requests the configured resources independently for each job.
 * `-t` and `-m` are capped to it, with a message naming the setting to raise. Unset, they resolve
   to the budget.
 * The disk ceiling is a hard stop. A run will not start above it, and a run that crosses it is
@@ -234,6 +234,123 @@ Per-run global flags: `--max-threads`, `--max-thread-fraction`, `--max-memory-gb
 `--max-memory-fraction`, `--max-disk-fraction`, `--max-gpus` and `--gpu-strict`.
 `disk_check_interval` (seconds between disk checks inside a long step) is a `[limits]` setting;
 `--disk-check-interval` overrides it. The grant is recorded in the manifest, and `metawrap2 calibrate` compares it with the memory used.
+
+## Slurm execution
+
+MetaWrap2 supports Slurm as an alternative executor for the `run` and `cohort` workflow drivers. The default executor is `local`; selecting `slurm` submits individual pipeline steps to the cluster scheduler.
+
+### Running a workflow
+
+```bash
+# Co-assembly workflow
+metawrap2 run samples.toml -o study/ \
+    --executor slurm -j 4
+
+# Per-sample assembly and binning workflow
+metawrap2 cohort samples.toml -o study/ \
+    --executor slurm -j 4
+
+# Resume an interrupted Slurm workflow
+metawrap2 cohort samples.toml -o study/ \
+    --executor slurm -j 4 --resume
+```
+
+The executor uses `sbatch` to submit jobs, `squeue` to monitor active jobs, and `sacct` to determine their final status.
+
+Independent steps within a stage may execute concurrently. The `-j` option controls how many steps are submitted and monitored at once; it does not divide each Slurm job's CPU and memory allocation.
+
+Dependent workflow stages run only after their prerequisites complete successfully.
+
+### Configuration
+
+Slurm settings are specified in the regular MetaWrap2 configuration file, typically `~/.metawrap2/config.toml`.
+
+```toml
+[slurm]
+partition = "compute"
+account = "my_account"
+time = "24:00:00"
+threads = 16
+memory_gb = 64
+poll_seconds = 30
+
+# More resources for assembly
+[slurm.modules.assembly]
+partition = "bigmem"
+threads = 32
+memory_gb = 500
+time = "48:00:00"
+
+# Optional GPU allocation for GPU-enabled binning
+[slurm.modules.binning]
+partition = "gpu"
+threads = 16
+memory_gb = 128
+gres = "gpu:1"
+time = "24:00:00"
+```
+
+Replace the partition and account names with values accepted by your cluster. Resource requirements vary considerably with sample size, sequencing depth and the selected tools.
+
+Global Slurm settings provide defaults. Module-specific settings override the corresponding global settings. Explicit CLI resource overrides take precedence where supported.
+
+Supported scheduler options include partition, account, walltime, CPU and memory allocations, GPU/GRES requests, constraints, QoS, output and error paths, and polling interval.
+
+GPU allocation only reserves hardware; it does not automatically enable GPU execution in a tool. Use the corresponding module options, such as the appropriate binning preset or device selection, when GPU acceleration is required.
+
+### Resource allocation
+
+Local and Slurm executors use different resource-budget models:
+
+| Behavior | Local executor | Slurm executor |
+|---|---|---|
+| CPU allocation | Limited by local resource budget | Requested per scheduled job |
+| Memory allocation | Limited by local resource budget | Requested per scheduled job |
+| `-j N` | Divides the available local budget among concurrent steps | Limits concurrent Slurm jobs |
+| Partition selection | Not applicable | Configurable globally or per module |
+| GPU allocation | Uses local GPUs | Requests scheduler-allocated GPUs |
+
+For example, with `-j 4`, `threads = 32` and `memory_gb = 500`, up to four independent Slurm jobs may be requested concurrently, each with 32 CPUs and 500 GB of memory, subject to cluster limits and availability.
+
+The scheduler may leave jobs pending when resources are unavailable or account limits have been reached.
+
+### Monitoring jobs
+
+Submitted jobs can be inspected using the standard Slurm commands:
+
+```bash
+squeue -u "$USER"
+
+# Inspect a particular job
+scontrol show job 123456
+
+# Inspect final accounting information
+sacct -j 123456 \
+    --format=JobID,State,Elapsed,AllocCPUS,ReqMem,ExitCode
+```
+
+MetaWrap2 records submitted Slurm job IDs in the study manifest, alongside its existing command, input, output and execution-state records.
+
+The executor waits for each job's terminal scheduler state and checks the declared outputs before marking the step complete. A successful Slurm exit code alone does not establish that the expected output files were produced.
+
+### Resume and interruptions
+
+Slurm jobs may continue running after the MetaWrap2 controller exits or loses its connection to the scheduler.
+
+When a workflow is restarted with `--resume`, MetaWrap2 checks the manifest for unfinished scheduler jobs. If a compatible active job ID is recorded, the driver reconnects to it rather than submitting another copy.
+
+If Slurm's final state cannot be determined, MetaWrap2 preserves the unresolved job record instead of assuming that the job has failed. Investigate the job using `squeue` or `sacct` before retrying.
+
+There is a narrow interruption window between successful scheduler submission and persistence of the job ID. If the manifest shows a Slurm submission with no recorded job ID, verify the scheduler state manually before resubmitting to avoid concurrent jobs writing to the same outputs.
+
+### Current limitations
+
+- **Blocking execution:** The driver remains active while monitoring jobs and must be restarted with `--resume` after an interruption.
+- **No job arrays:** Independent sample-level steps are submitted as individual jobs.
+- **No automatic retry policy:** Failed jobs are reported to the workflow driver; automatic resubmission and resource escalation are not yet supported.
+- **No scheduler-managed dependency graph:** MetaWrap2 controls stage ordering rather than submitting the complete workflow as a Slurm dependency DAG.
+
+These restrictions preserve the existing execution model while allowing workflows to use cluster resources.
 
 ## Editing the commands
 

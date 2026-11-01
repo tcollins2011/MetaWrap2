@@ -350,6 +350,21 @@ metawrap2 --force     binning -a asm.fa -o out ...   # overwrite an existing out
 metawrap2 --max-threads 32  ...                      # a thread ceiling for the whole run
 ```
 
+### Running on Slurm
+
+MetaWrap2 can submit `run` and `cohort` workflow stages as Slurm jobs instead of executing them on the local machine. The local executor remains the default.
+
+```bash
+metawrap2 cohort samples.toml -o study/ \
+    --executor slurm -j 4
+```
+
+Each stage runs as a separate Slurm job, with configurable CPUs, memory, walltime, partition and GPU resources. Independent sample-level jobs may execute concurrently, while dependent stages wait for their predecessors to finish. Unlike local execution, Slurm resource requests are allocated per job and are not limited by the login node's available resources.
+
+Configure scheduler defaults and per-module overrides under `[slurm]` in `~/.metawrap2/config.toml`. Submitted job IDs are recorded in the study manifest, allowing `--resume` to reconnect to an unfinished job instead of submitting a duplicate.
+
+The initial Slurm executor is blocking: the MetaWrap2 driver must remain running to submit subsequent stages. See [Slurm execution](docs/usage.md#slurm-execution) for configuration, monitoring and recovery instructions.
+
 ## Modules
 
 | | Module | What it does |

@@ -77,6 +77,18 @@ metawrap2 status study/ --audit          # is every recorded output still presen
 The `--resume` column uses the same check as `--resume`. The audit also runs at the end of every
 run and flags steps that reported success but produced no output.
 
+### Slurm job provenance and recovery
+
+When the Slurm executor is selected, MetaWrap2 records the scheduler type and submitted job ID in the study manifest, in addition to the existing command, resource grant, input fingerprints and output records.
+
+These records allow `--resume` to distinguish an unfinished Slurm job from a step that needs to be submitted again.
+
+A recorded running job can be reattached when its command is unchanged. If the scheduler cannot confirm the final job state, the manifest retains the unresolved execution state rather than treating the job as successfully completed or automatically resubmitting it.
+
+Users should inspect unresolved jobs using `squeue` and `sacct` before manually rerunning or cancelling them.
+
+Slurm scheduling metadata describes the job allocation; it should not be confused with measured resource consumption. The local executor's CPU and memory usage measurements are not automatically equivalent to Slurm accounting statistics.
+
 ## Reproducing a run
 
 - Re-run the top line of `run_commands.txt`.
