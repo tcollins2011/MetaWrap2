@@ -29,6 +29,7 @@ from ..constants import FASTA_EXTENSIONS, TSV_SUFFIX
 from ..io.seqio import contig_id, iter_fasta
 from ..progress import bar
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     check_fasta,
@@ -37,6 +38,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     list_bins,
     make_checkpoint,
@@ -180,10 +182,17 @@ def _inputs(args) -> List[Tuple[str, str]]:
     ]
 
 
-def _database(path: Optional[str], settings, key: str, what: str) -> str:
+def _database(
+    path: Optional[str], settings, key: str, what: str, flag: str, install: str, skip: str = ""
+) -> str:
+    """The database path from *flag* or the config; stops with how to get one if neither is set."""
     db = path or settings.db(key)
     if not db:
-        error("no %s database: pass the flag or set %s in metawrap2.toml" % (what, key))
+        error(
+            "no %s database. Install it with 'metawrap2 install-db %s', which sets %s in "
+            "metawrap2.toml, or pass %s%s."
+            % (what, install, key, flag, (", or pass %s" % skip) if skip else "")
+        )
     return db
 
 
@@ -255,7 +264,8 @@ def _cluster_votus(args, env, viral_fasta: str, contigs: List[_viruses.ViralCont
         out.writelines(path + "\n" for path in paths)
     matrix = os.path.join(work, "ani.tsv")
     rc = run(
-        SKANI_VIRAL.format(
+        fill_command(
+            SKANI_VIRAL,
             genome_list=listing,
             output=matrix,
             threads=args.threads,
@@ -364,7 +374,8 @@ def _crispr_host_links(args, env, viral_fasta: str) -> None:
         host = os.path.splitext(name)[0]
         outdir = os.path.join(root, host)
         rc = run(
-            CCTYPER.format(
+            fill_command(
+                CCTYPER,
                 input=os.path.join(args.crispr_hosts, name),
                 outdir=outdir,
                 threads=args.threads,
@@ -440,9 +451,21 @@ def main(argv: List[str]) -> int:
     validate_inputs("viruses", checks)
 
     env = env_for("viruses", settings)
-    genomad_db = _database(args.genomad_db, settings, "GENOMAD_DB", "geNomad")
+    genomad_db = _database(
+        args.genomad_db, settings, "GENOMAD_DB", "geNomad", "--genomad-db DIR", "genomad"
+    )
     checkv_db = (
-        None if args.skip_checkv else _database(args.checkv_db, settings, "CHECKV_DB", "CheckV")
+        None
+        if args.skip_checkv
+        else _database(
+            args.checkv_db,
+            settings,
+            "CHECKV_DB",
+            "CheckV",
+            "--checkv-db DIR",
+            "checkv",
+            skip="--skip-checkv to run geNomad only",
+        )
     )
     rec = start_run("viruses", args, env, settings, inputs=[source])
 
@@ -462,9 +485,10 @@ def main(argv: List[str]) -> int:
         if ckpt.todo("genomad"):
             for name, path in bar(todo, desc="genomad", unit=" input", total=len(todo)):
                 rc = run(
-                    GENOMAD.format(
+                    fill_command(
+                        GENOMAD,
                         threads=args.threads,
-                        score=score,
+                        score=Raw(score),
                         input=path,
                         outdir=os.path.join(genomad_root, name),
                         db=genomad_db,
@@ -531,7 +555,8 @@ def main(argv: List[str]) -> int:
             checkv_out = os.path.join(args.output, CHECKV_DIR)
             if ckpt.todo("checkv"):
                 rc = run(
-                    CHECKV.format(
+                    fill_command(
+                        CHECKV,
                         input=viral_fasta,
                         outdir=checkv_out,
                         threads=args.threads,

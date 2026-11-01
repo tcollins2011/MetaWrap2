@@ -10,15 +10,29 @@
 # `<base_url><checksum_manifest>`). They are pinned here instead of read at fetch time, so a later
 # re-fetch is verified against the bytes this benchmark was built on, and a re-publication
 # upstream shows up as a checksum failure.
+#
+# Fetched files go under the data directory (`benchmark fetch --dest`, `benchmark run --data`),
+# flattened to their file names. An archive is downloaded to archives/ and unpacked into
+# extracted/. A data file that is not an archive, such as a plain FASTQ, is downloaded straight
+# into extracted/. Gold-standard files go to gold/. `benchmark run` reads only extracted/
+# (`reads_glob` is relative to it), so files staged by hand go there too.
+#
+# `files[].sample` does not set the sample labels in results. The registry checks it against
+# `samples` (every file's sample is listed, and every listed sample has a file), and for an archive
+# fetch uses it to find the unpacked `*_sample_<n>` directory. `benchmark run` takes labels from
+# the paths: the `sample_<n>` directory for interleaved reads, otherwise the read file name without
+# its mate suffix (`_1`/`_2`). `benchmark run --samples` takes those labels.
 
 schema = 1
 
-# Known gap. Every arm in benchmarks/configurations.toml runs on simulated CAMI2 reads, which are
-# uniformly high quality, while fastp and trim-galore differ mainly on low-quality data. On 75 bp
-# reads from around 2010 (MetaHIT ERR011347-9), fastp's defaults discarded 58.5% of one library
-# while trim-galore trimmed and kept 95%, which changed nonpareil's effort projection five-fold.
-# Registering a low-quality dataset here would let `benchmark run <dataset> trimmer` measure this;
-# until then `read_qc` reports retention and warns below 70%.
+# Trimmer comparison. Every CAMI2 arm in benchmarks/configurations.toml runs on simulated reads,
+# which are uniformly high quality, while fastp and trim-galore differ mainly on low-quality data.
+# On 75 bp reads from around 2010 (MetaHIT ERR011347-9), fastp's defaults discarded 58.5% of one
+# library while trim-galore trimmed and kept 95%, which changed nonpareil's effort projection
+# five-fold. `scn_bioreactor` (below) is a real dataset for `benchmark run scn_bioreactor trimmer`.
+# On its three samples of 2x251 bp reads a tester measured trim-galore keeping 32.6% more reads and
+# 17.9% more Q30 bases than fastp, using 21% less CPU. The default trimmer is still fastp;
+# `read_qc` reports retention and warns below 70%.
 
 # --------------------------------------------------------------------------------------------
 # CAMI2's human gastrointestinal body site: ten samples of simulated short reads with a known
@@ -357,3 +371,77 @@ path = "assembly.fa"
 [[tiny.gold_standard]]
 role = "binning"
 path = "gold_standard_binning.tsv"
+
+# --------------------------------------------------------------------------------------------
+# Real reads for the `trimmer` comparison: 2x251 bp, HiSeq 2500, with quality falling along the
+# read. fastp discards a pair when more than 40% of its bases are below Q15, so on long reads with
+# a low-quality tail it drops whole pairs that trim-galore trims and keeps. Read pairs kept, as a
+# tester measured them with MetaWrap2 2.1.4:
+#
+#   run (sample)                pairs in     fastp kept           trim-galore kept
+#   SRR3901694 (T0_BF)          16,746,252   11,396,187 (68.1%)   15,535,965 (92.8%)
+#   SRR3901708 (SCN_T1_BF)      13,076,948    8,321,294 (63.6%)   -
+#   SRR3901701 (NH4SO4_T1_BF)   31,254,715   23,607,081 (75.5%)   -
+#
+# On SRR3901694 the mean output read length was 249.9 bp with fastp (reads untrimmed, losses are
+# whole pairs) and 189.2 bp with trim-galore (tails trimmed, pairs kept).
+#
+# The three are biofilm samples from laboratory bioreactors degrading thiocyanate: the shared
+# inoculum and one sample from each of two reactors fed differently (thiocyanate, ammonium
+# sulfate). A low-diversity community at deep coverage. There is no gold standard.
+# --------------------------------------------------------------------------------------------
+[scn_bioreactor]
+title = "Thiocyanate bioreactor consortia - real 2x251 bp reads with quality decay"
+description = """Three biofilm metagenomes from laboratory bioreactors degrading thiocyanate: one shared inoculum and two reactors fed differently (thiocyanate, ammonium sulfate). Registered for the `trimmer` comparison. The reads are 2x251 bp with quality falling along the read, and fastp's defaults discard 24-36% of pairs. There is no gold standard, so this dataset measures read retention and its downstream effect, not binning correctness."""
+citation = "Kantor RS, et al. Genome-resolved meta-omics ties microbial dynamics to process performance in biotechnology for thiocyanate degradation. Environ Sci Technol 51:2944-2953 (2017). Reads: BioProject PRJNA279279."
+doi = "10.1021/acs.est.6b04477"
+license = "INSDC - free to use"
+base_url = "https://ftp.sra.ebi.ac.uk/vol1/fastq/"
+checksum = "md5"
+reads_glob = "*_[12].fastq.gz"
+reads_layout = "paired"
+
+# Samples are named by run accession, the label `benchmark run` gives them (see the top of this
+# file); the BioSample names are in the table above. Planktonic fractions and later time points
+# are in the same BioProject; these are the smallest run in each arm.
+samples = ["SRR3901694", "SRR3901708", "SRR3901701"]
+
+# md5 and byte counts are ENA's published values for these runs, checked against the downloaded
+# files with md5sum -c.
+disk_note = "22 GB download; read_qc decompresses to about 60 GB before trimming, so budget ~90 GB"
+
+[[scn_bioreactor.files]]
+sample = "SRR3901694"
+path = "SRR390/004/SRR3901694/SRR3901694_1.fastq.gz"
+md5 = "c65beae2144c60a663edcaed44d8a751"
+bytes = 3264031016
+
+[[scn_bioreactor.files]]
+sample = "SRR3901694"
+path = "SRR390/004/SRR3901694/SRR3901694_2.fastq.gz"
+md5 = "a7d5d7a57cc2d8623f7f8c5b875af1cc"
+bytes = 3231032011
+
+[[scn_bioreactor.files]]
+sample = "SRR3901708"
+path = "SRR390/008/SRR3901708/SRR3901708_1.fastq.gz"
+md5 = "d7387b9ad3ca25437befd2b6dcdc1425"
+bytes = 2530197108
+
+[[scn_bioreactor.files]]
+sample = "SRR3901708"
+path = "SRR390/008/SRR3901708/SRR3901708_2.fastq.gz"
+md5 = "eeee098789dae98157804497390cae20"
+bytes = 2516505088
+
+[[scn_bioreactor.files]]
+sample = "SRR3901701"
+path = "SRR390/001/SRR3901701/SRR3901701_1.fastq.gz"
+md5 = "490f08b0cc7574a0ea423a4255aa262b"
+bytes = 5850613557
+
+[[scn_bioreactor.files]]
+sample = "SRR3901701"
+path = "SRR390/001/SRR3901701/SRR3901701_2.fastq.gz"
+md5 = "7ce01d2fbb15c54bcbda59bd92b3eade"
+bytes = 5952911894

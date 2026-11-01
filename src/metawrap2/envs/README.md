@@ -26,7 +26,8 @@ when it cannot be solved together with the others, or when it is large and optio
 | `comparative.yaml` | `metawrap2-comparative` | pangenome, phylogeny | ppanggolin, iqtree, fasttree, mafft |
 | `singlem.yaml` | `metawrap2-singlem` | appraise | singlem |
 
-`strains` has its own environment because inStrain requires Python 3.8. `appraise` has its own
+`strains` has its own environment because inStrain's dependencies solve to an older Python (3.8
+when last solved) that the other tools cannot share. `appraise` has its own
 because SingleM pins a narrow set of dependencies. CheckM2 has no common solution with CheckM1, GUNC
 and DAS Tool.
 
@@ -77,8 +78,12 @@ The files are inside the package so they ship with the wheel, and `install-env` 
 ## Lockfiles
 
 The YAML files set minimum versions, so they keep solving as tools are updated, and a solve today
-can differ from one a year ago. For an exact rebuild, `locks/` holds one linux-64 lockfile per
-environment, the output of `conda list --explicit --md5` (every package's URL and checksum).
+can differ from one a year ago. Where a dependency the tool does not cap has broken it, the yaml caps
+that dependency too, with the reason beside the pin (Python and numpy for GTDB-Tk, pandas for
+argNorm and cctyper). For an exact rebuild, `locks/` holds linux-64 lockfiles for the `annotate`,
+`binqc`, `bins`, `checkm2`, `gtdbtk`, `learned`, `reads` and `taxonomy` environments, the output of
+`conda list --explicit --md5` (every package's URL and checksum). `tests/test_env_locks.py` checks
+that each lockfile has every package its yaml lists, at a version the yaml allows.
 
 ```bash
 metawrap2 install-env --all --from-lock     # build from the committed lockfiles

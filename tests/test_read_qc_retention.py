@@ -29,9 +29,6 @@ def _run_read_qc(tmp_path, monkeypatch, extra_argv=(), report=None, fastqc=False
     Returns (commands, said, warned): the commands that would have run, the ``comm`` lines and the
     ``warning`` lines. *report* is a fixture filename (or raw text) dropped at ``fastp.json`` in
     place of the report fastp would have written.
-
-    The "<dir> already exists" warning is dropped from *warned*: the disk-space check creates the
-    output directory first, so every run emits it.
     """
     calls, said, warned = [], [], []
 
@@ -75,7 +72,7 @@ def _run_read_qc(tmp_path, monkeypatch, extra_argv=(), report=None, fastqc=False
     if not fastqc:
         argv += ["--skip-pre-qc-report", "--skip-post-qc-report"]
     assert read_qc.main(argv + list(extra_argv)) == 0
-    return calls, said, [m for m in warned if not m.endswith("already exists.")]
+    return calls, said, warned
 
 
 def test_retention_line_is_read_out_of_fastps_own_json(tmp_path, monkeypatch):
@@ -94,14 +91,18 @@ def test_retention_line_is_read_out_of_fastps_own_json(tmp_path, monkeypatch):
 def test_low_retention_warns_and_names_the_trimmer_that_trims(tmp_path, monkeypatch):
     """The low-retention warning gives the fraction and suggests the alternatives.
 
-    It names --trimmer trim-galore and --fastp-quality-trim and mentions lower-quality data.
+    It names --trimmer trim-galore and --fastp-quality-trim, and says the loss is common on
+    longer reads whose quality decays along the read, as well as on older data.
     """
     _, _, warned = _run_read_qc(tmp_path, monkeypatch, report="fastp_low_retention.json")
     (message,) = warned
     assert "41.5%" in message and "5,243,141 of 12,621,104" in message
     assert "--trimmer trim-galore" in message
     assert "--fastp-quality-trim" in message
-    assert "lower-quality data" in message
+    assert "longer reads (2x150 bp and above)" in message
+    assert "quality decays along the read" in message
+    assert "older data" in message
+    assert "2010" not in message
 
 
 def test_high_retention_does_not_warn(tmp_path, monkeypatch):

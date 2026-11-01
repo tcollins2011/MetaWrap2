@@ -35,6 +35,7 @@ from ..progress import bar
 from ._common import (
     ALIGN_SORT,
     SORT_THREADS,
+    Raw,
     absolutize_paths,
     announcement,
     comm,
@@ -42,10 +43,12 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     list_bins,
     make_checkpoint,
     optional_env_for,
+    quoted_words,
     require_file,
     require_nonempty_dir,
     resolve_threads,
@@ -241,15 +244,18 @@ def _map_sample(args, env, fasta: str, sample: str, reads: List[str], work: str)
     spec = _aligners.ALIGNERS[args.aligner]
     index = _aligners.index_path(fasta, args.aligner)
     if len(reads) == 2:
-        align = spec["paired"].format(threads=args.threads, index=index, r1=reads[0], r2=reads[1])
+        align = fill_command(
+            spec["paired"], threads=args.threads, index=index, r1=reads[0], r2=reads[1]
+        )
     else:
-        align = spec["single"].format(threads=args.threads, index=index, reads=reads[0])
+        align = fill_command(spec["single"], threads=args.threads, index=index, reads=reads[0])
     rc = run(
         [
             "bash",
             "-c",
-            ALIGN_SORT.format(
-                align=align,
+            fill_command(
+                ALIGN_SORT,
+                align=Raw(align),
                 tmp=os.path.join(work, "tmp-samtools"),
                 threads=min(args.threads, SORT_THREADS),
                 bam=bam,
@@ -263,7 +269,7 @@ def _map_sample(args, env, fasta: str, sample: str, reads: List[str], work: str)
         warning("mapping failed for %s; that sample is left out" % sample)
         return None
     run(
-        INDEX_BAM.format(threads=args.threads, bam=bam),
+        fill_command(INDEX_BAM, threads=args.threads, bam=bam),
         env=env,
         tool="samtools index",
         check=False,
@@ -284,7 +290,7 @@ def _run_tracs(args, settings, samples, work: str) -> List[_strains.TracsDistanc
     genomes = [os.path.join(args.bins, name) for name in list_bins(args.bins)]
     db = os.path.join(work, "tracs_db")
     rc = run(
-        TRACS_BUILD_DB.format(genomes=" ".join(genomes), db=db, threads=args.threads),
+        fill_command(TRACS_BUILD_DB, genomes=quoted_words(genomes), db=db, threads=args.threads),
         env=env,
         tool="tracs build-db",
         check=False,
@@ -303,7 +309,8 @@ def _run_tracs(args, settings, samples, work: str) -> List[_strains.TracsDistanc
         for sample, reads in samples:
             inputs_writer.writerow([sample, *reads])
     rc = run(
-        TRACS_PIPE.format(
+        fill_command(
+            TRACS_PIPE,
             inputs=listing,
             db=database,
             refs=args.bins,
@@ -418,8 +425,10 @@ def main(argv: List[str]) -> int:
                 # minimap2's template uses {index}; bwa's only {assembly}, since its index files
                 # sit beside it. Both are supplied so no branch is needed.
                 rc = run(
-                    _aligners.ALIGNERS[args.aligner]["index_cmd"].format(
-                        assembly=fasta, index=_aligners.index_path(fasta, args.aligner)
+                    fill_command(
+                        _aligners.ALIGNERS[args.aligner]["index_cmd"],
+                        assembly=fasta,
+                        index=_aligners.index_path(fasta, args.aligner),
                     ),
                     env=env,
                     tool="%s index" % args.aligner,
@@ -440,7 +449,8 @@ def main(argv: List[str]) -> int:
         for sample, bam in bar(bams, desc="profiling", unit=" sample", total=len(bams)):
             outdir = os.path.join(args.output, PROFILE_DIR, sample)
             rc = run(
-                INSTRAIN_PROFILE.format(
+                fill_command(
+                    INSTRAIN_PROFILE,
                     bam=bam,
                     fasta=fasta,
                     outdir=outdir,
@@ -490,8 +500,9 @@ def main(argv: List[str]) -> int:
             )
         compare_out = os.path.join(args.output, PROFILE_DIR, "compare")
         rc = run(
-            INSTRAIN_COMPARE.format(
-                profiles=" ".join(outdir for _sample, outdir in profile_dirs),
+            fill_command(
+                INSTRAIN_COMPARE,
+                profiles=quoted_words([outdir for _sample, outdir in profile_dirs]),
                 outdir=compare_out,
                 threads=args.threads,
                 stb=stb,

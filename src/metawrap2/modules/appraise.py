@@ -35,6 +35,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     make_checkpoint,
     require_file,
@@ -253,7 +254,8 @@ def main(argv: List[str]) -> int:
 
         if ckpt.todo("genomes"):
             rc = run(
-                SINGLEM_PIPE_GENOMES.format(
+                fill_command(
+                    SINGLEM_PIPE_GENOMES,
                     bins=args.bins,
                     extension=extension,
                     out=genome_table,
@@ -282,7 +284,8 @@ def main(argv: List[str]) -> int:
             if ckpt.todo("reads:%s" % sample):
                 comm("%s: finding marker genes in the reads" % sample)
                 rc = run(
-                    SINGLEM_PIPE_READS.format(
+                    fill_command(
+                        SINGLEM_PIPE_READS,
                         reads=path,
                         out=table,
                         metapackage=metapackage,
@@ -319,7 +322,8 @@ def main(argv: List[str]) -> int:
         binned = os.path.join(otu_dir, "binned.otu" + TSV_SUFFIX)
         summary = os.path.join(otu_dir, "appraise_summary" + TSV_SUFFIX)
         rc = run(
-            SINGLEM_APPRAISE.format(
+            fill_command(
+                SINGLEM_APPRAISE,
                 metagenome=metagenome_table,
                 genomes=genome_table,
                 metapackage=metapackage,

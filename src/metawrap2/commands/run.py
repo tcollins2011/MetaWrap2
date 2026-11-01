@@ -13,7 +13,8 @@ independent samples in parallel, and skips steps that are already done.
     metawrap2 run samples.toml -o study/ --resume      # continue where it stopped
 
 Each step is an ordinary ``metawrap2 <module>`` invocation built by :func:`plan_steps`, so every
-step can also be run by hand; the commands are in the study's ``run_commands.txt``. Step state is
+step can also be run by hand; each command is the first line of its step's log in ``LOGS/`` and is
+recorded in the manifest. Step state is
 kept in ``<output>/.metawrap2/run_steps``, and ``--resume`` uses it to tell which steps finished.
 
 The sample sheet is TOML, or YAML if PyYAML is installed:
@@ -45,15 +46,18 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .. import limits as _limits
+from .. import provenance as _provenance
 from .. import usage as _usage
 from ..cliformat import make_parser
 from ..config import load_settings
 from ..io import reads as _reads
+from ..logfilter import duration as _duration
 from ..logging import announcement, comm, error, warning
 from ..manifest import COMPLETED, FAILED, INTERRUPTED, MANIFEST_NAME, Manifest
 from ..modules import _common
@@ -337,10 +341,12 @@ def study_from_directory(directory: str) -> Study:
 
 
 #: The sheet `--example` prints. The binning tier comes from the binning module's default (the
-#: sheet once listed the `fast` tier's binners as the default), and `coassemble` matches the
-#: command that printed it.
+#: sheet once listed the former `fast` preset's binners as the default), and `coassemble` matches
+#: the command that printed it.
 EXAMPLE_SHEET = """\
 # MetaWrap2 sample sheet. Run it with:  metawrap2 %(command)s samples.toml -o study/ -t 24
+# The sheet is read once, when the run starts: edits take effect on the next --resume. [limits]
+# in metawrap2.toml is re-read by every step.
 
 [settings]
 # Co-assemble all samples together (true) or assemble each sample separately (false).
@@ -354,8 +360,8 @@ coassemble = %(coassemble)s
 
 # Extra options passed through to a module, exactly as you would type them. `binning` names the
 # default tier instead of spelling out its binners, so it still means the default if the tiers
-# change; `metawrap2 binning -h` lists them (--preset fast is cheaper, --preset gpu wants a
-# GPU). Naming a binner (--metabat2 --semibin2 --concoct) replaces the tier rather than adding
+# change; `metawrap2 binning -h` lists them (--preset deep adds COMEBin and wants a GPU).
+# Naming a binner (--metabat2 --semibin2 --concoct) replaces the tier rather than adding
 # to it. The refinement thresholds are bin_refinement's own, written out because every MAG count
 # this project reports uses them.
 [modules]
@@ -586,6 +592,137 @@ def step_log_path(layout: Layout, step: Step) -> str:
     Used by the runner and by the opening and failure banners.
     """
     return os.path.join(layout.log_dir, "%s.log" % step.name.replace(":", "_"))
+
+
+# --- GPUs for concurrent steps -------------------------------------------------------------
+
+#: Binners that train on the device ``--device`` names. The others never use a GPU.
+LEARNED_BINNERS = frozenset({"semibin2", "vamb", "comebin"})
+
+
+def _option_value(argv: Sequence[str], flag: str) -> Optional[str]:
+    """The value of the last ``flag X`` or ``flag=X`` in *argv*, or None."""
+    value = None
+    for index, arg in enumerate(argv):
+        if arg == flag and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif arg.startswith(flag + "="):
+            value = arg.split("=", 1)[1]
+    return value
+
+
+def step_device(step: Step) -> Optional[str]:
+    """The ``--device`` a step's learned binners train on, or None if the step uses no GPU.
+
+    Mirrors the binning module's ``_apply_preset``: an explicit ``--device`` wins, otherwise
+    ``--preset deep`` without named binners means ``cuda`` and everything else the CPU.
+    """
+    if step.module != "binning":
+        return None
+    if not LEARNED_BINNERS.intersection(selected_binners(step.argv)):
+        return None
+    device = _option_value(step.argv, "--device")
+    if device is None:
+        named = any("--" + b in step.argv for b in _binning.BINNERS)
+        preset = _binning.resolve_preset(_option_value(step.argv, "--preset"))
+        use_gpu = (preset or _binning.DEFAULT_PRESET) in _binning.GPU_PRESETS and not named
+        device = "cuda" if use_gpu else _binning.DEFAULT_LEARNED_DEVICE
+    return device if device.startswith("cuda") or device == "auto" else None
+
+
+def assignable(step: Step) -> bool:
+    """Whether the driver may choose the card for *step*.
+
+    True for ``--device cuda`` and ``--device auto``; a step that names a card (``cuda:N``) keeps
+    it.
+    """
+    return step_device(step) in ("cuda", "auto")
+
+
+def gpu_cards(count: int) -> List[str]:
+    """The ids of the first *count* cards this process may use, as ``CUDA_VISIBLE_DEVICES`` names
+    them: the entries of an inherited ``CUDA_VISIBLE_DEVICES``, else ``0..count-1``.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        cards = [token.strip() for token in visible.split(",") if token.strip()]
+        if cards == ["-1"]:
+            return []
+        return cards[: max(0, count)]
+    return [str(index) for index in range(max(0, count))]
+
+
+def card_name(card: str) -> str:
+    return "cuda:%s" % card if card.isdigit() else card
+
+
+class CardAllocator:
+    """Gives each concurrent GPU step the least-used card, so N steps on N cards get one each.
+
+    With more steps at a time than cards, cards are shared as evenly as possible.
+    """
+
+    def __init__(self, cards: Sequence[str]):
+        self._users: Dict[str, int] = {card: 0 for card in cards}
+        self._lock = threading.Lock()
+
+    def acquire(self) -> Optional[str]:
+        with self._lock:
+            if not self._users:
+                return None
+            card = min(self._users, key=lambda c: self._users[c])  # first card among ties
+            self._users[card] += 1
+            return card
+
+    def release(self, card: Optional[str]) -> None:
+        if card is None:
+            return
+        with self._lock:
+            if self._users.get(card, 0) > 0:
+                self._users[card] -= 1
+
+
+def pin_to_card(argv: List[str], env: Dict[str, str], device: Optional[str], card: str) -> None:
+    """Point a step at *card*, in place.
+
+    ``--device cuda`` becomes ``--device cuda:N``, so the binning module pins the card itself and
+    its GPU preflight checks that card. ``--device auto`` keeps its CPU fallback, so the card is
+    set through ``CUDA_VISIBLE_DEVICES`` instead, as it is for card ids that are not numbers.
+    """
+    if device == "cuda" and card.isdigit():
+        flag = [i for i, a in enumerate(argv) if a == "--device" or a.startswith("--device=")]
+        if flag and argv[flag[-1]] == "--device":
+            argv[flag[-1] + 1] = "cuda:%s" % card
+        elif flag:
+            argv[flag[-1]] = "--device=cuda:%s" % card
+        else:
+            argv += ["--device", "cuda:%s" % card]
+        return
+    env["CUDA_VISIBLE_DEVICES"] = card
+
+
+def gpu_share(steps: Sequence[Step], workers: int, gpus: int) -> List[str]:
+    """The cards the driver hands out to a group of concurrent steps, or ``[]`` if none.
+
+    Empty unless several steps run at once, at least one leaves the card to the driver, and the
+    budget allows a GPU. With fewer cards than steps at a time, every card is listed and shared.
+    """
+    if workers < 2 or not any(assignable(s) for s in steps):
+        return []
+    return gpu_cards(gpus)[:workers]
+
+
+def group_banner(count: int, module: str, workers: int, threads: int, memory_gb, cards) -> str:
+    """The banner for *count* concurrent steps, e.g. ``RUNNING 2 x binning (2 at a time, 16
+    threads, 60GB and 1 GPU each: cuda:0, cuda:1)``."""
+    shares = ["%d threads" % threads]
+    if memory_gb:
+        shares.append("%dGB" % memory_gb)
+    if cards:
+        shares.append("1 GPU" if len(cards) >= workers else "1 of %d GPUs" % len(cards))
+    each = shares[0] if len(shares) == 1 else "%s and %s" % (", ".join(shares[:-1]), shares[-1])
+    names = ": " + ", ".join(card_name(c) for c in cards) if cards else ""
+    return "RUNNING %d x %s (%d at a time, %s each%s)" % (count, module, workers, each, names)
 
 
 def _qc_output_reads(layout: Layout, sample: Sample) -> List[str]:
@@ -1159,6 +1296,74 @@ def record_strategy(state: StepState, study: Study) -> Dict[str, Any]:
     return record
 
 
+def write_study_provenance(state: StepState, layout: Layout, study: Study) -> str:
+    """Write the study's ``provenance.txt``: the catalogue strategy, each step, and the total cost.
+
+    Totals cover the completed steps in the manifest, including those a ``--resume`` skipped, so
+    they describe the whole study. Wall-clock is the span from the first step's start to the
+    last one's finish; the summed step time is also given, since parallel steps overlap. Peak
+    memory is the largest single step. Each step's own provenance.txt is in its output directory.
+    Returns the path written.
+    """
+    from .. import __version__
+
+    strategy = state.manifest.data.get(STRATEGY_KEY) or strategy_record(study)
+    rows = state.manifest.completed_usage()
+    total = _provenance.total_usage([usage for _name, usage in rows])
+    lines = ["MetaWrap2 study provenance", "=" * 60, ""]
+    lines.append("study:              %s" % layout.root)
+    lines.append("MetaWrap2:          %s" % __version__)
+    lines.append("written:            %s" % time.strftime("%Y-%m-%dT%H:%M:%S"))
+    lines.append(
+        "catalogue strategy: %s, %d sample(s), dereplication %s"
+        % (
+            strategy.get("strategy", "?"),
+            strategy.get("samples", 0),
+            "on" if strategy.get("dereplicated") else "off",
+        )
+    )
+    lines.append("")
+    lines.append("Steps (from %s):" % os.path.join(_STATE_DIR, MANIFEST_NAME))
+    width = max([len(name) for name in state.manifest.data["steps"]] + [4])
+    for record in state.manifest.summary():
+        cost = (
+            _provenance.describe_cost(record.get("usage") or {})
+            if record.get("status") == COMPLETED
+            else ""
+        )
+        row = "  %-*s  %-11s  %s" % (width, record["name"], record.get("status", "?"), cost)
+        lines.append(row.rstrip())
+    lines.append("")
+    if rows:
+        span = state.manifest.completed_span_seconds()
+        lines.append("Total over %d completed step(s):" % len(rows))
+        cpu = _provenance.cpu_seconds(total)
+        if cpu is not None:
+            lines.append("  CPU-hours:    %.2f" % (cpu / 3600.0))
+        if span is not None:
+            lines.append(
+                "  wall-clock:   %s (first step start to last step finish)" % _duration(span)
+            )
+        lines.append(
+            "  step time:    %s (summed over steps)" % _duration(total.get("wall_seconds", 0))
+        )
+        if total.get("peak_rss_bytes"):
+            peak_step = max(rows, key=lambda row: row[1].get("peak_rss_bytes") or 0)[0]
+            lines.append(
+                "  peak memory:  %s (%s)" % (_usage.human(total["peak_rss_bytes"]), peak_step)
+            )
+    else:
+        lines.append("No step has completed yet.")
+    lines.append("")
+    lines.append("Each step's provenance.txt, run_config.json and run_commands.txt are in its")
+    lines.append("output directory; its log is in LOGS/.")
+    lines.append("")
+    path = os.path.join(layout.root, _provenance.PROVENANCE_NAME)
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines))
+    return path
+
+
 # --- the driver ---------------------------------------------------------------------------
 
 
@@ -1253,23 +1458,62 @@ def run_step(
     dry_run: bool,
     state: Optional[StepState] = None,
     memory_gb: Optional[int] = None,
+    cards: Optional[CardAllocator] = None,
 ) -> Tuple[Step, str, str]:
     """Run one step as its own ``metawrap2 <module>`` process.
+
+    With *cards*, a GPU step that leaves the card to the driver gets one for its run (see
+    :func:`pin_to_card`).
 
     Returns ``(step, status, log path)`` where status is one of the manifest's
     ``completed`` / ``failed`` / ``interrupted``. An interrupted step's outputs are in an unknown
     state, so ``--resume`` always re-runs it; a failed step's log may show the reason.
     """
-    os.makedirs(layout.log_dir, exist_ok=True)
-    log_path = step_log_path(layout, step)
+    if not dry_run:
+        os.makedirs(layout.log_dir, exist_ok=True)
     argv = step.command(threads, config, global_flags, memory_gb=memory_gb)
+    step_env = dict(os.environ)
+    card = cards.acquire() if cards is not None and assignable(step) else None
+    try:
+        if card is not None:
+            pin_to_card(argv, step_env, step_device(step), card)
+        return _run_step_process(
+            step, layout, argv, step_env, threads, dry_run, state, memory_gb, card
+        )
+    finally:
+        # A dry run keeps its card, so the printed plan shows the round-robin a real run gets.
+        if cards is not None and not dry_run:
+            cards.release(card)
+
+
+def _run_step_process(
+    step: Step,
+    layout: Layout,
+    argv: List[str],
+    step_env: Dict[str, str],
+    threads: int,
+    dry_run: bool,
+    state: Optional[StepState],
+    memory_gb: Optional[int],
+    card: Optional[str],
+) -> Tuple[Step, str, str]:
+    """:func:`run_step` once the command and environment are final."""
+    log_path = step_log_path(layout, step)
     if dry_run:
-        print("[plan] %s" % " ".join(shlex.quote(a) for a in argv))
+        visible = step_env.get("CUDA_VISIBLE_DEVICES")
+        pinned = (
+            "CUDA_VISIBLE_DEVICES=%s " % visible
+            if visible != os.environ.get("CUDA_VISIBLE_DEVICES")
+            else ""
+        )
+        print("[plan] %s%s" % (pinned, " ".join(shlex.quote(a) for a in argv)))
         return step, COMPLETED, log_path
 
     grant: Dict[str, Any] = {"threads": threads}
     if memory_gb is not None:
         grant["memory_gb"] = memory_gb
+    if card is not None:
+        grant["gpu"] = card_name(card)
     started = state.start(step, argv, grant=grant) if state is not None else time.time()
     status = FAILED
     usage: Dict[str, Any] = {}
@@ -1280,7 +1524,6 @@ def run_step(
             # Measure peak memory and CPU time (see metawrap2.usage), which `calibrate` uses.
             # The driver writes the cost line, so the child is told it runs under `run` and does
             # not print its own. The variable is set only in the child's environment.
-            step_env = dict(os.environ)
             step_env[_common.DRIVEN_BY_RUN_ENV] = "1"
             # Pass threads and step so the utilisation warning names the step, which matters when
             # several samples run at once.
@@ -1350,8 +1593,13 @@ def execute(
     state: StepState,
     dry_run: bool,
     memory_gb: Optional[int] = None,
+    gpus: int = 0,
 ) -> int:
-    """Run the planned steps in order, grouping the parallelisable ones. Returns an exit code."""
+    """Run the planned steps in order, grouping the parallelisable ones. Returns an exit code.
+
+    *gpus* is the budget's GPU count. Concurrent GPU steps that do not name a card get one each,
+    round-robin over the first *gpus* cards.
+    """
     index = 0
     completed = 0
     advised = False  # whether the -j suggestion has already been made for this run
@@ -1390,15 +1638,13 @@ def execute(
         # Divide the memory budget like the threads, so N concurrent steps (e.g. SPAdes) do not
         # each request the whole budget.
         per_step_memory = max(1, memory_gb // workers) if memory_gb else None
+        # Without this, every concurrent learned binner on bare `--device cuda` trains on card 0.
+        cards = gpu_share(pending, workers, gpus)
+        allocator = CardAllocator(cards) if cards else None
         if len(pending) > 1:
             announcement(
-                "RUNNING %d x %s (%d at a time, %d threads%s each)"
-                % (
-                    len(pending),
-                    group[0].module,
-                    workers,
-                    per_step_threads,
-                    " and %dGB" % per_step_memory if per_step_memory else "",
+                group_banner(
+                    len(pending), group[0].module, workers, per_step_threads, per_step_memory, cards
                 )
             )
         else:
@@ -1424,6 +1670,7 @@ def execute(
                         dry_run,
                         state,
                         per_step_memory,
+                        allocator,
                     )
                     for s in pending
                 ]
@@ -1517,6 +1764,30 @@ def _after_group(step: Step, layout: Layout, study: Study, dry_run: bool) -> Non
         collect_clean_reads(layout, study, dry_run)
     if step.module == "read_qc" and study.coassemble:
         concatenate_for_coassembly(layout, study, dry_run)
+
+
+def preflight_databases(steps: Sequence[Step], settings, dry_run: bool) -> None:
+    """Stop before the first step if a planned step needs a database that is not ready.
+
+    Each step's module and flags (the sheet's ``[modules]`` options included) are resolved to the
+    databases they read, as `check` does. Only paths are checked; no tool runs. Under --dry-run a
+    problem is a warning, so the plan is still printed.
+    """
+    from .. import dbcheck as _dbcheck
+
+    errors, warnings = _dbcheck.preflight(settings, [(step.module, step.argv) for step in steps])
+    for message in warnings:
+        warning(message)
+    if not errors:
+        return
+    message = "The planned steps need databases that are not ready:\n    %s" % "\n    ".join(errors)
+    if dry_run:
+        warning(message + "\nA run without --dry-run stops here.")
+        return
+    error(
+        message + "\nInstall them, or remove the steps or sheet flags that need them. "
+        "'metawrap2 check <module>' shows each module's databases."
+    )
 
 
 # --- entry point --------------------------------------------------------------------------
@@ -1684,15 +1955,18 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
             )
         memory_gb = max(1, int(budget.memory_gb))
     layout = Layout(args.output)
-    os.makedirs(layout.root, exist_ok=True)
+    # A dry run only prints the plan: it creates no directory and writes nothing under -o.
+    if not dry_run:
+        os.makedirs(layout.root, exist_ok=True)
 
-    global_flags: List[str] = []
-    if force:
-        global_flags.append("--force")
-    if resume:
-        global_flags.append("--resume")
-    if dry_run:
-        global_flags.append("--dry-run")
+    # Every global flag reaches each step, which runs as its own process; --force, --resume and
+    # --dry-run may also have been given after `run`.
+    from ..cli import inherited_global_flags
+
+    global_flags: List[str] = inherited_global_flags()
+    for wanted, flag in ((force, "--force"), (resume, "--resume"), (dry_run, "--dry-run")):
+        if wanted and flag not in global_flags:
+            global_flags.append(flag)
 
     steps = plan_steps(study, layout)
 
@@ -1722,22 +1996,33 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         )
 
     state = StepState(layout, resume=resume, strict_fingerprints=args.strict_fingerprints)
+    # Steps a --resume will skip need no databases now.
+    preflight_databases([s for s in steps if state.skip_reason(s) is None], settings, dry_run)
     # Written before the first step, so a failed or interrupted study still records its strategy.
     # Not written under --dry-run.
     if not dry_run:
         record_strategy(state, study)
-    return execute(
-        steps,
-        layout,
-        study,
-        threads,
-        args.jobs,
-        args.config,
-        global_flags,
-        state,
-        dry_run,
-        memory_gb=memory_gb,
-    )
+    try:
+        return execute(
+            steps,
+            layout,
+            study,
+            threads,
+            args.jobs,
+            args.config,
+            global_flags,
+            state,
+            dry_run,
+            memory_gb=memory_gb,
+            gpus=budget.gpus,
+        )
+    finally:
+        # Also after a failed or interrupted study, so the cost of the finished steps is kept.
+        if not dry_run:
+            try:
+                write_study_provenance(state, layout, study)
+            except OSError as exc:
+                warning("could not write the study's provenance.txt: %s" % exc)
 
 
 if __name__ == "__main__":

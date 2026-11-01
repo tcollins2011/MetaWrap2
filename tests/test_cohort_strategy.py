@@ -39,6 +39,8 @@ def _sheet(tmp_path, coassemble: bool) -> str:
 def _recorded(tmp_path, monkeypatch, coassemble: bool, command=driver.main, *extra):
     """Plan a study, run nothing, and return the strategy block the driver recorded."""
     monkeypatch.setattr(driver, "execute", lambda *args, **kwargs: 0)
+    # No databases are installed here; tests/test_database_preflight.py covers the check.
+    monkeypatch.setattr(driver, "preflight_databases", lambda *args: None)
     out = tmp_path / "study"
     assert command([_sheet(tmp_path, coassemble), "-o", str(out), *extra]) == 0
     manifest = out / driver._STATE_DIR / MANIFEST_NAME

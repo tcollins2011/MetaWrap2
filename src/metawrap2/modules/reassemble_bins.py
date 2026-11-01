@@ -35,6 +35,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     force,
     fs_replace_dir,
@@ -42,6 +43,7 @@ from ._common import (
     listdir,
     make_checkpoint,
     memory_arg,
+    output_existed,
     require_nonempty_dir,
     resolve_memory_gb,
     resolve_threads,
@@ -384,7 +386,8 @@ def _assemble(
     comm("NOW REASSEMBLING %s" % bin_name)
     if args.nanopore:
         nano = os.path.join(reads_dir, stem.rsplit(".", 1)[0] + ".nanopore.fastq")
-        cmd = SPADES_NANOPORE.format(
+        cmd = fill_command(
+            SPADES_NANOPORE,
             threads=sp_threads,
             mem=args.memory,
             tmp=tmp_dir,
@@ -395,7 +398,8 @@ def _assemble(
             out=asm_dir,
         )
     else:
-        cmd = SPADES.format(
+        cmd = fill_command(
+            SPADES,
             threads=sp_threads,
             mem=args.memory,
             tmp=tmp_dir,
@@ -545,15 +549,19 @@ def _run_checkm_stage(args, out: str, checkm2_env: Optional[str] = None) -> None
         ensure_dir(reassembled)
         stats = _score(args, reassembled, checkm2_env)
         run(
-            CHOOSE_BEST_BIN.format(
-                stats=stats, comp=int(args.completeness), cont=int(args.contamination)
+            fill_command(
+                CHOOSE_BEST_BIN,
+                stats=stats,
+                comp=int(args.completeness),
+                cont=int(args.contamination),
             ),
             env=None,
             tool="choose_best_bin",
             stdout_path=os.path.join(out, "chosen_bins.txt"),
         )
         run(
-            PLOT_REASSEMBLY.format(
+            fill_command(
+                PLOT_REASSEMBLY,
                 out=out,
                 comp=int(args.completeness),
                 cont=int(args.contamination),
@@ -577,8 +585,8 @@ def _run_checkm_stage(args, out: str, checkm2_env: Optional[str] = None) -> None
     ensure_dir(best_dir)
     chosen = os.path.join(out, "chosen_bins.txt")
     run(
-        CHOOSE_BEST_BIN.format(
-            stats=stats, comp=int(args.completeness), cont=int(args.contamination)
+        fill_command(
+            CHOOSE_BEST_BIN, stats=stats, comp=int(args.completeness), cont=int(args.contamination)
         ),
         env=None,
         tool="choose_best_bin",
@@ -621,7 +629,8 @@ def _run_checkm_stage(args, out: str, checkm2_env: Optional[str] = None) -> None
     # check=False: the bins, both .stats.tsv tables and the CheckM output are complete by now, so a
     # plotting failure only warns.
     run(
-        PLOT_REASSEMBLY.format(
+        fill_command(
+            PLOT_REASSEMBLY,
             out=out,
             comp=int(args.completeness),
             cont=int(args.contamination),
@@ -683,7 +692,8 @@ def main(argv: List[str]) -> int:
         out = args.output
         comm("setting up output folder and copying over bins...")
         if os.path.isdir(out):
-            warning("Warning: %s already exists!" % out)
+            if output_existed():
+                warning("%s already exists." % out)
             # Under --force only; --resume keeps the existing folder.
             if force():
                 comm("--force: clearing the previous reassembly out of %s" % out)
@@ -702,7 +712,7 @@ def main(argv: List[str]) -> int:
             _raise_open_file_limit()
             if dry_run() or not os.path.isfile(assembly + ".amb"):
                 comm("Indexing the assembly")
-                run(BWA_INDEX.format(assembly=assembly), env=env, tool="bwa index")
+                run(fill_command(BWA_INDEX, assembly=assembly), env=env, tool="bwa index")
                 shutil.rmtree(reads_out, ignore_errors=True)
                 ensure_dir(reads_out)
                 comm(
@@ -714,7 +724,8 @@ def main(argv: List[str]) -> int:
                         [
                             "bash",
                             "-c",
-                            MINIMAP2_FILTER.format(
+                            fill_command(
+                                MINIMAP2_FILTER,
                                 threads=args.threads,
                                 assembly=assembly,
                                 nanopore=args.nanopore,
@@ -729,7 +740,8 @@ def main(argv: List[str]) -> int:
                     [
                         "bash",
                         "-c",
-                        BWA_MEM_FILTER.format(
+                        fill_command(
+                            BWA_MEM_FILTER,
                             threads=args.threads,
                             assembly=assembly,
                             r1=args.reads_1,
@@ -805,7 +817,7 @@ def main(argv: List[str]) -> int:
                     continue
                 long_scaffolds = os.path.join(asm_dir, "long_scaffolds.fasta")
                 run(
-                    RM_SHORT_CONTIGS.format(min_len=args.min_len, scaffolds=scaffolds),
+                    fill_command(RM_SHORT_CONTIGS, min_len=args.min_len, scaffolds=scaffolds),
                     env=None,
                     tool="rm_short_contigs",
                     log_path=long_scaffolds,

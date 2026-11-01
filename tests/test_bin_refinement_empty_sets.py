@@ -4,6 +4,8 @@ A binner that finds nothing writes an empty folder and exits 0. The other sets a
 With every set empty the run finishes with an empty final set and a warning.
 """
 
+from _banner import unbanner
+
 from metawrap2.modules import bin_refinement
 
 
@@ -18,10 +20,8 @@ def test_an_empty_bin_set_is_dropped_and_the_rest_are_kept(tmp_path, capsys):
     full = _bin_set(tmp_path / "semibin2_bins", 2)
     empty = _bin_set(tmp_path / "metabat2_bins", 0)
     assert bin_refinement.drop_empty_bin_sets([empty, full]) == [full]
-    # The banner wraps long lines and pads them with asterisks, so a long tmp_path can split the
-    # phrase. Remove the decoration before matching.
     out = capsys.readouterr()
-    text = " ".join((out.out + out.err).replace("*", " ").split())
+    text = unbanner(out.out + out.err)
     assert "metabat2_bins" in text and "has no bins in it" in text
 
 
@@ -44,7 +44,7 @@ def test_every_set_empty_leaves_nothing_to_refine_and_warns(tmp_path, capsys):
     empties = [_bin_set(tmp_path / name, 0) for name in ("a", "b")]
     assert bin_refinement.drop_empty_bin_sets(empties) == []
     out = capsys.readouterr()
-    assert "empty final bin set" in out.out + out.err
+    assert "empty final bin set" in unbanner(out.out + out.err)
 
 
 def test_a_run_with_only_empty_sets_finishes_with_an_empty_final_set(tmp_path):

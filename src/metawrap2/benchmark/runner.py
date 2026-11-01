@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from .. import config as _config
 from .. import limits as _limits
 from .. import usage as _usage
+from ..cmdtemplate import quote_value, quoted_words
 from ..command import capture_in_env as _capture_in_env
 from ..command import runner as _runner
 from ..constants import BIN_EXTENSION, bin_label, is_refined_bins_dirname
@@ -440,18 +441,13 @@ def depth_table_for(root: str) -> str:
 
 
 def _inherited_global_flags() -> List[str]:
-    """``--force``, ``--resume`` and ``--gpu-strict`` as typed on the benchmark's command line.
+    """The global flags typed on the benchmark's command line, for each variant's process.
 
-    Each variant is a separate process, so these flags are passed on explicitly.
+    ``--dry-run`` is left out: the benchmark handles a dry run itself and does not start variants.
     """
-    flags = []
-    if _runner.force:
-        flags.append("--force")
-    if _runner.resume:
-        flags.append("--resume")
-    if _limits.overrides().get("gpu_strict"):
-        flags.append("--gpu-strict")
-    return flags
+    from ..cli import inherited_global_flags
+
+    return [flag for flag in inherited_global_flags() if flag != "--dry-run"]
 
 
 def external_output_dir(out_dir: str) -> str:
@@ -508,7 +504,7 @@ def external_values(
     if inputs.assembly:
         values["assembly"] = inputs.assembly
     if inputs.read_files:
-        values["reads"] = " ".join(inputs.read_files)
+        values["reads"] = quoted_words(inputs.read_files)
     if len(inputs.pairs) == 1:
         # Only for one pair. A per-sample module is called once per sample, so {r1} is defined
         # there. Filling it from the first of several pairs would run one sample and label the row
@@ -534,8 +530,10 @@ def external_argv(
     """The exact command an external arm runs, inside its own conda env.
 
     The template is substituted first and then split with :mod:`shlex`, because ``{reads}`` is a
-    list of files and becomes several argv entries. A pipeline with two steps declares them as its
-    own ``bash -c '... && ...'``, which is still one measured process tree.
+    list of files and becomes several argv entries. Each value is shell-quoted, so a path with a
+    space stays one entry, except inside a single-quoted ``bash -c '...'``. A pipeline with two
+    steps declares them as its own ``bash -c '... && ...'``, which is still one measured process
+    tree.
     """
     external = variant.external
     if external is None:
@@ -550,7 +548,7 @@ def external_argv(
             "--bins-from, and {r1}/{r2} need a module that takes one sample at a time."
             % (variant.name, ", ".join("{%s}" % name for name in missing))
         )
-    resolved = PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], external.command)
+    resolved = PLACEHOLDER_RE.sub(lambda m: quote_value(values[m.group(1)]), external.command)
     return _runner.env_prefix(external_env(variant)) + shlex.split(resolved)
 
 

@@ -1,21 +1,26 @@
 """`metawrap2 check [module ...]`: preflight tools, conda envs, Python extras and databases.
 
 Reports what is missing before a run starts. Exits non-zero if a selected module is missing its
-conda env, a tool inside that env, a required Python extra, or a database it needs. With conda envs
+conda env, a tool inside that env, a required Python extra, or a database it needs. A database is
+optional only when the module has a flag to run without it, and its label names that flag. With conda envs
 enabled (the default), tools are looked up inside each module's env, not on the host PATH.
+
+`check --for "<module command>"` reads one full module command line and reports only the
+databases and conda envs that exact command needs, then ``ready: yes`` or ``ready: no``.
 """
 
 from __future__ import annotations
 
 import shutil
-from typing import List
+from typing import List, Optional
 
+from .. import dbcheck as _dbcheck
 from ..cliformat import make_parser
 from ..config import (
     DB_KEYS,
     MODULE_TOOLS,
-    OPTIONAL_DB_KEYS,
-    check_databases,
+    OPTIONAL_ENV_OWNERS,
+    OPTIONAL_ENVS,
     conda_env_exists,
     explain_unknown_name,
     legacy_module_for,
@@ -24,6 +29,7 @@ from ..config import (
     tool_in_env,
     tools_for_name,
 )
+from ..modules import binning as _binning
 
 OK = "  OK   "
 MISSING = "MISSING"
@@ -33,11 +39,100 @@ def _status(ok: bool) -> str:
     return OK if ok else MISSING
 
 
+def _preset(argv: List[str]) -> str:
+    """The binning preset *argv* selects, as its current name (``default`` when none is given)."""
+    name = None
+    for i, token in enumerate(argv):
+        if token == "--preset" and i + 1 < len(argv):
+            name = argv[i + 1]
+        elif token.startswith("--preset="):
+            name = token.split("=", 1)[1]
+    resolved = _binning.resolve_preset(name) or "default"
+    return resolved if resolved in _binning.PRESETS else "default"
+
+
+def envs_for_command(module: str, argv: List[str]) -> List[str]:
+    """The conda envs one invocation of *module* runs in: its own, and any opt-in env it selects.
+
+    An opt-in env is selected by the flag of the same name (``classify_bins --gtdbtk``). CheckM2's
+    env is needed exactly when the command reads CHECKM2DB, so its flags are taken from there.
+    """
+    envs: List[str] = []
+    own = resolve_env_name(module)
+    if own:
+        envs.append(own)
+    given = set(_dbcheck._flags(argv))
+    for name, owner in OPTIONAL_ENV_OWNERS.items():
+        if owner == module and "--" + name in given:
+            envs.append(OPTIONAL_ENVS[name])
+    if module == "binning" and not given & {"--" + b for b in _binning.BINNERS}:
+        # No binner named, so the preset decides, and the default preset includes SemiBin2.
+        envs += [OPTIONAL_ENVS[b] for b in _binning.PRESETS[_preset(argv)] if b in OPTIONAL_ENVS]
+    if any(need.key == "CHECKM2DB" for need in _dbcheck.active_needs(module, argv)):
+        envs.append(OPTIONAL_ENVS["checkm2"])
+    return list(dict.fromkeys(envs))
+
+
+def check_command(text: str, config: Optional[str] = None) -> int:
+    """`check --for`: the databases and envs one module command needs, and whether it can run."""
+    try:
+        module, argv = _dbcheck.split_command(text)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    settings = load_settings(config)
+    missing = 0
+    print("\n%s %s\n" % (module, " ".join(argv)) if argv else "\n%s\n" % module)
+    entries = _dbcheck.resolve(settings, [(module, argv)])
+    if not entries:
+        print("  (no database needed)")
+    for entry in entries:
+        if entry.problem is None:
+            print("  OK       %-19s %s" % (entry.key, entry.path))
+            continue
+        name = _dbcheck.install_name(entry.key)
+        if entry.flag or not name:
+            fix = entry.problem
+        else:
+            fix = "-> metawrap2 install-db %s" % name
+        if entry.warn_only:
+            # Not counted: the module runs without it.
+            need = next(n for n in _dbcheck.module_needs(module) if n.key == entry.key)
+            print("  NOT SET  %-19s %s (optional: %s)" % (entry.key, fix, need.note))
+            continue
+        missing += 1
+        print("  MISSING  %-19s %s" % (entry.key, fix))
+    own = resolve_env_name(module)
+    for env in envs_for_command(module, argv):
+        if not settings.use_conda_envs:
+            print("  OK       %-19s (conda envs disabled; using PATH)" % env)
+        elif conda_env_exists(env):
+            print("  OK       %-19s conda env" % env)
+        else:
+            missing += 1
+            target = module if env == own else env[len("metawrap2-") :]
+            print("  MISSING  %-19s -> metawrap2 install-env %s" % (env, target))
+    print("\nready: %s\n" % ("no (%d missing)" % missing if missing else "yes"))
+    return 1 if missing else 0
+
+
 def main(argv: List[str]) -> int:
     ap = make_parser(prog="metawrap2 check")
     ap.add_argument("modules", nargs="*", help="modules to check (default: all)")
     ap.add_argument("--config", help="path to metawrap2.toml")
+    ap.add_argument(
+        "--for",
+        dest="command",
+        metavar='"MODULE ARGS"',
+        help="check only what one module command needs, given as one quoted command line "
+        '(e.g. --for "annotate --kofam -b BINS -o OUT")',
+    )
     args = ap.parse_args(argv)
+
+    if args.command is not None:
+        if args.modules:
+            ap.error("give modules or --for, not both")
+        return check_command(args.command, args.config)
 
     settings = load_settings(args.config)
     modules = args.modules or sorted(MODULE_TOOLS)
@@ -114,34 +209,44 @@ def main(argv: List[str]) -> int:
         # Say so when there was nothing to check.
         print("  (nothing to check: %s names no tools)" % ", ".join(modules))
 
-    # Only databases read by a selected module count towards the verdict; optional databases
-    # (Bakta, GTDB-Tk, ...) never do.
-    needed = {
-        key
-        for key, used_by in DB_KEYS.items()
-        if key not in OPTIONAL_DB_KEYS and any(m in used_by for m in modules)
-    }
-    missing_dbs = []
+    # Only the selected modules' databases are listed. One counts towards the verdict unless the
+    # module has a flag to run without it; the label names that flag.
+    shown_keys = _dbcheck.keys_for(modules)
+    db_problems: List[str] = []
     print("\nDatabases:\n")
-    for key, path, present, used_by in check_databases(settings):
-        shown = path if path else "<not set>"
-        required = key in needed
-        note = "" if required else "  (optional for the selected modules)"
-        print("  [%s]  %-16s %-40s used by %s%s" % (_status(present), key, shown, used_by, note))
-        if required and not present:
-            missing_dbs.append(key)
+    if not shown_keys:
+        print("  (none: %s reads no database)" % ", ".join(modules))
+    for key, status, _detail in _dbcheck.check(settings, shown_keys):
+        users = [m for m in modules if any(n.key == key for n in _dbcheck.module_needs(m))]
+        label = _dbcheck.label_for(key, modules)
+        required = not label
+        label = "  " + label if label else ""
+        shown = settings.db(key) or "<not set>"
+        print(
+            "  [%s]  %-19s %-40s used by %s%s"
+            % (
+                status.center(7) if status != _dbcheck.OK else OK,
+                key,
+                shown,
+                ", ".join(users),
+                label,
+            )
+        )
+        if required and status != _dbcheck.OK:
+            found = _dbcheck.problem(settings, key)
+            if found:
+                db_problems.append(found)
+    others = len([key for key in DB_KEYS if key not in shown_keys])
+    if others and args.modules:
+        print(
+            "\n  %d other database%s not needed by %s; 'metawrap2 doctor --all' lists them."
+            % (others, " is" if others == 1 else "s are", ", ".join(modules))
+        )
 
     if missing:
         print(
             "\n%d conda env(s) missing. Create them with:  metawrap2 install-env %s"
             % (missing, " ".join(modules))
-        )
-    if missing_dbs:
-        print(
-            "\n%d database(s) the selected modules need are not set or not present: %s"
-            "\nInstall them with `metawrap2 install-db` (it writes their paths into your "
-            "config), or set the paths under [databases] in metawrap2.toml."
-            % (len(missing_dbs), ", ".join(missing_dbs))
         )
     if missing_tools:
         print(
@@ -157,8 +262,15 @@ def main(argv: List[str]) -> int:
         )
         for row in missing_extras:
             print("  %s" % row["detail"])
-    if missing or missing_dbs or missing_tools or missing_extras:
-        print()
+    if missing or db_problems or missing_tools or missing_extras:
+        failures = list(db_problems)
+        if missing:
+            failures.append("%d conda env(s) missing" % missing)
+        if missing_tools:
+            failures.append("%d tool(s) missing" % len(missing_tools))
+        if missing_extras:
+            failures.append("%d Python extra(s) missing" % len(missing_extras))
+        print("\nPreflight FAILED for %s: %s\n" % (", ".join(modules), "; ".join(failures)))
         return 1
     print("\nPreflight OK for: %s\n" % ", ".join(modules))
     return 0

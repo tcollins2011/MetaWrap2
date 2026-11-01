@@ -120,8 +120,7 @@ classical binners recover 74. It is also the dirtiest of the consolidated sets (
 because the arms that beat it need pytorch, and what settled that was the end-to-end comparison: \
 metaBAT2+SemiBin2 returns more clean MAGs than metaWRAP 1 for less cpu than metaWRAP 1 spends, so the \
 install cost buys a pipeline that is better than the one being replaced rather than merely different. \
-It remains available as `--preset fast`, which is what someone who does not want pytorch should ask \
-for. Originally the arm that \
+It is the binner set of the former `fast` preset. Originally the arm that \
 answered whether CONCOCT earns its place: measured singly on cami2_gi 2026-10-01, CONCOCT scored the \
 best AMBER F1 of the three (0.7166 against metaBAT2's 0.6357 and MaxBin2's 0.4283) for 238 cpu-hours \
 against their 22.9 and 24.5. But a single binner's score is not the question: binning feeds \
@@ -225,7 +224,7 @@ with the consolidated arms."""
 [[binner_set.variants]]
 name = "metabat2_semibin2_comebin_gpu"
 args = ["--metabat2", "--semibin2", "--comebin", "--device", "cuda", "--gpu-strict"]
-note = """The three-binner ensemble, and the `--preset gpu` tier: 183 bins at 70/10, 177 of them \
+note = """The three-binner ensemble, and the `--preset deep` tier: 183 bins at 70/10, 177 of them \
 non-chimeric by GUNC, for 52.8 cpu-hours on a GPU.
 
 It was briefly dropped in favour of COMEBin alone, on a comparison against a wrong number, and was \
@@ -243,7 +242,7 @@ tie. That tie is why this comparison alone could not settle the tier, and the en
 did: on real per-sample assemblies the trio returns 64 high-quality and 60 clean MAGs for 120.7 \
 cpu-hours and 2.36 gpu-hours, against COMEBin alone at 61 and 57 for 80.9 and 1.73. Ensembles help \
 more on a fragmented self-assembly than on a gold one, which is the general lesson here and the reason \
-a binner comparison run only on gold assemblies understates them. `--preset gpu` is \
+a binner comparison run only on gold assemblies understates them. `--preset deep` is \
 metaBAT2+SemiBin2+COMEBin.
 
 metaBAT2 is the third member on cost and cleanliness rather than on the union: the best trio by clean-MAG \

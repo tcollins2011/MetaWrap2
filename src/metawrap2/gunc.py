@@ -15,6 +15,7 @@ import csv
 import os
 from typing import Dict, List, NamedTuple, Optional
 
+from .cmdtemplate import fill_command
 from .command import run, runner
 from .constants import BIN_EXTENSION
 
@@ -37,11 +38,21 @@ GUNC_RUN = (
     "--out_dir {out} --temp_dir {out} --threads {threads}"
 )
 
-#: Shown whenever GUNC cannot run: install the database, or skip the check.
-DB_HINT = (
-    "GUNC needs its reference database; install it with 'metawrap2 install-db gunc' and point "
-    "GUNC_DB at the .dmnd file, or pass --skip-gunc."
-)
+
+def db_hint(skip_flag: str = "--skip-gunc") -> str:
+    """Shown whenever GUNC cannot run: install the database, or skip the check.
+
+    *skip_flag* is the calling module's flag for skipping GUNC (``bin_refinement --skip-gunc``,
+    ``score --no-gunc``).
+    """
+    return (
+        "GUNC needs its reference database; install it with 'metawrap2 install-db gunc' and point "
+        "GUNC_DB at the .dmnd file, or pass %s." % skip_flag
+    )
+
+
+#: :func:`db_hint` for ``bin_refinement`` and the benchmark, which skip GUNC with --skip-gunc.
+DB_HINT = db_hint()
 
 __all__ = [
     "CSS_THRESHOLD",
@@ -49,6 +60,7 @@ __all__ = [
     "STATS_COLUMNS",
     "Verdict",
     "annotate_stats",
+    "db_hint",
     "find_report",
     "parse_report",
     "run_gunc",
@@ -140,13 +152,18 @@ def run_gunc(
     env: Optional[str],
     out_dir: Optional[str] = None,
     log_path: Optional[str] = None,
+    skip_flag: str = "--skip-gunc",
 ) -> Optional[str]:
-    """Run GUNC over *bins_dir* and return its maxCSS table, or None under ``--dry-run``."""
+    """Run GUNC over *bins_dir* and return its maxCSS table, or None under ``--dry-run``.
+
+    *skip_flag* is named in the hint printed if GUNC fails (see :func:`db_hint`).
+    """
     out = out_dir or (bins_dir + ".gunc")
     if not runner.dry_run:
         os.makedirs(out, exist_ok=True)  # gunc does not create its own --out_dir
     run(
-        GUNC_RUN.format(
+        fill_command(
+            GUNC_RUN,
             bins=bins_dir,
             ext=BIN_EXTENSION,
             db=db,
@@ -156,7 +173,7 @@ def run_gunc(
         env=env,
         tool="gunc",
         log_path=log_path,
-        hint=DB_HINT,
+        hint=db_hint(skip_flag),
     )
     if runner.dry_run:
         return None

@@ -12,7 +12,7 @@ import sys
 from typing import List, Optional
 
 from . import __version__
-from .command import EnvManagerMissing
+from .command import EnvManagerMissing, ToolError
 from .config import ConfigError
 
 # module name -> (import path, one-line description shown in help)
@@ -141,7 +141,7 @@ UTILITIES = {
     # scripts (pass/fail exit code); `doctor` gives a readable report.
     "doctor": (
         "metawrap2.commands.doctor",
-        "Check every module's env, tools, databases and Python extras; `--fix` repairs envs",
+        "Check envs, tools and databases (default pipeline, or --all); --fix repairs envs",
     ),
     # The older spelling of `doctor`. Both work; neither is deprecated.
     "test": ("metawrap2.commands.doctor", "Older name for `doctor`"),
@@ -301,6 +301,37 @@ def _apply_setting_flag(flag: str, value: str) -> None:
     command.set_heartbeat_seconds(seconds)
 
 
+def inherited_global_flags() -> List[str]:
+    """The global flags in effect in this process, as arguments for a child ``metawrap2`` process.
+
+    The inverse of :func:`_apply_global_flags`. ``run``, ``cohort`` and ``benchmark`` start each
+    step as a separate process, which would otherwise lose the flags typed before the subcommand.
+    """
+    from . import command, limits
+
+    runner = command.runner
+    flags: List[str] = []
+    for enabled, flag in (
+        (runner.dry_run, "--dry-run"),
+        (runner.force, "--force"),
+        (runner.resume, "--resume"),
+        (runner.verbose_logs, "--verbose-logs"),
+        (runner.skip_space_check, "--skip-space-check"),
+        (runner.skip_validation, "--skip-validation"),
+    ):
+        if enabled:
+            flags.append(flag)
+    if runner.heartbeat_seconds is not None:
+        flags += ["--heartbeat-seconds", str(runner.heartbeat_seconds)]
+    overrides = limits.overrides()
+    for flag, key in _LIMIT_FLAGS.items():
+        if key in overrides:
+            flags += [flag, str(overrides[key])]
+    if overrides.get("gpu_strict"):
+        flags.append("--gpu-strict")
+    return flags
+
+
 def _apply_global_flags(argv: List[str]) -> List[str]:
     """Strip global flags (--dry-run, --force, the --max-* budget) and apply them.
 
@@ -348,6 +379,29 @@ def _apply_global_flags(argv: List[str]) -> List[str]:
     return kept
 
 
+#: Lines of a failed tool's error output repeated when it stops a run.
+TOOL_ERROR_TAIL_LINES = 15
+
+
+def _tool_error_message(exc: ToolError) -> str:
+    """What a run that stopped on a failed tool prints: the tool, its exit code and its last
+    error output, without a Python traceback."""
+    lines = ["%s failed (exit code %d)." % (exc.tool, exc.returncode)]
+    if exc.cmd:
+        lines.append("Command: " + " ".join(str(c) for c in exc.cmd))
+    tail = exc.log_tail.splitlines()[-TOOL_ERROR_TAIL_LINES:] if exc.log_tail else []
+    if tail:
+        lines.append("Last %d line(s) of its error output:" % len(tail))
+        lines += ["    " + line for line in tail]
+    if exc.hint:
+        lines.append("Hint: " + exc.hint)
+    lines.append(
+        "The tool's full output is in run.stderr and metawrap2.log in the output directory. "
+        "Add --verbose-logs to also print the Python traceback."
+    )
+    return "\n".join(lines)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
@@ -392,6 +446,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         # traceback.
         print("\n%s\n" % exc, file=sys.stderr)
         return 2
+    except ToolError as exc:
+        # A wrapped tool exiting non-zero is an expected failure; its own output says why.
+        from . import command
+
+        if command.runner.verbose_logs:
+            import traceback
+
+            traceback.print_exc()
+        print("\n%s\n" % _tool_error_message(exc), file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         # Also covers interrupt.Stopped, so a scheduler's SIGTERM exits 143 without a traceback.
         from . import interrupt

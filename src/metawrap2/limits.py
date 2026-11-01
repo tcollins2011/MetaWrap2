@@ -979,6 +979,10 @@ def gpu_preflight(device: str, strict: bool = False) -> GpuPreflight:
             # gpu_pin passes a malformed index to the tool unchanged, so it is not checked here.
             return GpuPreflight(device=requested)
         index = int(tail)
+    pinned = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if index is None and pinned.isdigit():
+        # `run -j N` gives each concurrent step its own card through CUDA_VISIBLE_DEVICES.
+        index = int(pinned)
 
     probe = query_gpus()
     if probe.problem is not None:

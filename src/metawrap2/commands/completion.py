@@ -6,7 +6,10 @@ completions directory). Completes module and utility names and the global flags.
 
 from __future__ import annotations
 
+import argparse
 from typing import List
+
+from ..cliformat import make_parser
 
 _BASH = """\
 _metawrap2() {
@@ -38,10 +41,31 @@ compdef _metawrap2 metawrap2
 """
 
 
+#: The shells there is a script for.
+SHELLS = ("bash", "zsh")
+
+
+def _parse_args(argv: List[str]) -> argparse.Namespace:
+    p = make_parser(
+        prog="metawrap2 completion",
+        usage="metawrap2 completion [bash|zsh]",
+        description="Print a shell completion script for module and utility names and the "
+        "global flags. Install with, for example, `metawrap2 completion bash >> ~/.bashrc`.",
+    )
+    p.add_argument(
+        "shell",
+        nargs="?",
+        default="bash",
+        choices=SHELLS,
+        help="the shell to print a script for (default: %(default)s)",
+    )
+    return p.parse_args(argv)
+
+
 def main(argv: List[str]) -> int:
     from ..cli import MODULES, UTILITIES
 
-    shell = argv[0] if argv else "bash"
+    shell = _parse_args(argv).shell
     subs = " ".join(sorted(list(MODULES) + list(UTILITIES)))
     if shell == "zsh":
         print(_ZSH % {"subs": subs})

@@ -286,6 +286,48 @@ class Manifest:
         """Every step, in the order it was recorded, for `metawrap2 status`-style output."""
         return [dict(name=name, **data) for name, data in self.data["steps"].items()]
 
+    def completed_usage(self) -> List[Tuple[str, Dict[str, Any]]]:
+        """``(step, usage)`` for every completed step, in recorded order.
+
+        A step recorded before usage was measured gets its ``duration_seconds`` as its wall time,
+        so the study's wall-clock total still counts it.
+        """
+        rows: List[Tuple[str, Dict[str, Any]]] = []
+        with self._lock:
+            steps = list(self.data["steps"].items())
+        for name, data in steps:
+            if data.get("status") != COMPLETED:
+                continue
+            usage = dict(data.get("usage") or {})
+            if "wall_seconds" not in usage and data.get("duration_seconds") is not None:
+                usage["wall_seconds"] = data["duration_seconds"]
+            rows.append((name, usage))
+        return rows
+
+    def completed_span_seconds(self) -> Optional[float]:
+        """Seconds from the first completed step's start to the last one's finish, or None.
+
+        This is the study's wall-clock time when steps ran in parallel; the sum of step times
+        counts parallel steps more than once.
+        """
+        starts: List[float] = []
+        ends: List[float] = []
+        with self._lock:
+            steps = list(self.data["steps"].values())
+        for data in steps:
+            if data.get("status") != COMPLETED:
+                continue
+            try:
+                started = time.mktime(time.strptime(data["started"], "%Y-%m-%dT%H:%M:%S"))
+                finished = time.mktime(time.strptime(data["finished"], "%Y-%m-%dT%H:%M:%S"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            starts.append(started)
+            ends.append(finished)
+        if not starts:
+            return None
+        return max(0.0, max(ends) - min(starts))
+
     def declared_paths(self) -> List[str]:
         """Every path any step declared as an output."""
         paths: List[str] = []

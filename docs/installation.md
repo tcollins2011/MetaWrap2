@@ -15,8 +15,8 @@ pip install .
 metawrap2 quickstart -t 8
 ```
 
-On stock RHEL 8 or older Ubuntu, `python3` is 3.9 and `pip install .` fails after downloading the
-dependencies with `requires a different Python: 3.9.x not in '>=3.10'`. Current Miniforge provides
+On stock RHEL 8 or older Ubuntu, `python3` is 3.9 and `pip install .` fails at once with
+`requires a different Python: 3.9.x not in '>=3.10'`. Current Miniforge provides
 Python 3.14; `pip install .` took 17 seconds on a fresh install. mamba must also be on `PATH` when a
 module runs, which unattended jobs do not set up; see
 [mamba on PATH at run time](#mamba-on-path-at-run-time).
@@ -27,6 +27,8 @@ module needs (550 MB to ~300 GB each). It downloads databases only when asked:
 - `--databases small`: reduced but real builds, for a first run.
 - `--databases full`: the full databases.
 - Or answer the prompt when running interactively.
+
+For a reproducible install, add `--from-lock` (see [Lockfiles](#lockfiles)).
 
 `--binning-only` installs the six modules genome recovery needs. `--skip-envs` builds no
 environments and reports each database's status. With no `--databases` and no terminal to prompt
@@ -98,7 +100,7 @@ metawrap2 install-env gtdbtk
 
 The default binners include SemiBin2, so `quickstart` builds `metawrap2-learned`. Its pytorch is
 CUDA-capable, so `binning --device cuda` needs no extra install. The default device is the CPU
-(cuda under `--preset gpu`); see
+(cuda under `--preset deep`); see
 [Modules](modules.md). [`src/metawrap2/envs/README.md`](https://github.com/ursky/MetaWrap2/blob/main/src/metawrap2/envs/README.md)
 lists the tools in each environment.
 
@@ -154,7 +156,16 @@ metawrap2 install-db --list           # what's available, its sizes, which modul
 metawrap2 install-db --all -t 4       # download, index, and configure everything
 metawrap2 install-db --all --small    # capped-but-real builds: fast, good for testing
 metawrap2 install-db --all --dir /data/metawrap2_dbs   # a different location (default ~/metawrap2_dbs)
+metawrap2 install-db --for viruses --for read_qc       # what these modules need
+metawrap2 install-db --for "annotate --kofam --cazy"   # a module and its flags
+metawrap2 install-db --for-sheet samples.toml          # what a study's planned steps need
 ```
+
+`--for` and `--for-sheet` list the databases needed, with download and on-disk sizes and a total,
+then install them as named databases are installed. For a sheet, the steps `metawrap2 run` would
+plan and the sheet's `[modules]` flags decide what is needed, so `bin_refinement = "--skip-gunc"`
+leaves GUNC out. A database already set up in the config is skipped. `--dry-run`, `--small`,
+`--dir` and `-t` apply as usual.
 
 `install-db` downloads, unpacks and indexes each database (including `checkm data setRoot`). It
 writes each path to your config (`~/.metawrap2/config.toml`, or the file `--config` or
@@ -166,8 +177,56 @@ Downloads use several ranged connections when `aria2c` is available and one `cur
 otherwise. From a host that throttles per connection, `aria2c` is 6-10x faster. It is optional and
 is taken from `PATH` or the `metawrap2-annotate` env. Both paths run the same
 checks. These databases publish no checksums, so each archive is decompressed in full before it is
-accepted; one that does not decompress is deleted and downloaded again, up to three attempts. Set
-`METAWRAP2_ARIA2C=` (empty) to force `curl`, for example if a host rate-limits several connections.
+accepted; one that does not decompress is deleted and downloaded again, up to three attempts. A
+server that cannot be reached is retried after 15 s, 60 s and 240 s, and the error gives the
+downloader's exit code in words. Set `METAWRAP2_ARIA2C=` (empty) to force `curl`, for example if a
+host rate-limits several connections.
+
+Before it starts, `install-db` prints the space needed and the disk ceiling (`max_disk_fraction`
+under `[limits]` in the config, or `--max-disk-fraction`). For GTDB-Tk, GUNC, eggNOG and SingleM
+the archive is deleted only after unpacking, so the space needed counts the download and the
+unpacked size together (220 GB for GTDB-Tk).
+
+| Database | Size | `--small` size | Used by |
+|:---|:---:|:---:|:---|
+| CheckM2 (`checkm2`) | ~3 GB | – | `bin_refinement`, `reassemble_bins`, `binning --run-checkm` |
+| CheckM1 (`checkm`) | ~1.4 GB | – | `bin_refinement` and `binning --run-checkm` with `--checkm1` |
+| GUNC (`gunc`) | ~13 GB | – | `bin_refinement`, unless `--skip-gunc` |
+| KRAKEN2 standard (`kraken2`) | ~90 GB | 8 GB | `kraken2`, and `--bracken` (the k-mer distributions ship with it) |
+| NCBI nt (`blast`) | ~300 GB | ~2 GB | `blobology`, `classify_bins` |
+| NCBI taxonomy (`taxdump`) | ~550 MB | – | `blobology`, `classify_bins` |
+| Indexed host genome (`host`) | ~20 GB | ~9 GB | `read_qc` |
+| KOfam profiles and thresholds (`kofam`) | ~1.5 GB | – | `annotate --kofam` |
+| KEGG BRITE hierarchy (`kegg`) | ~4 MB | – | `pathways` hierarchy and Krona charts |
+| Pfam-A (`pfam`) | 1.6 GB | – | `annotate --pfam` |
+| eggNOG 5.0.2 (`eggnog`) | 48 GB | – | `annotate --eggnog` |
+| dbCAN (`dbcan`) | ~7.4 GB | – | `annotate --cazy` |
+| Bakta (`bakta`) | ~30 GB | 1.3 GB | `annotate --bakta` |
+| AMRFinderPlus (`amrfinder`) | ~200 MB | – | `amr` |
+| CARD (`card`) | ~4 MB | – | `amr --rgi` |
+| geNomad (`genomad`) | ~1.5 GB | – | `viruses`, `amr --mobile-elements` |
+| CheckV (`checkv`) | ~6.4 GB | – | `viruses` |
+| SingleM metapackage (`singlem`) | 9.7 GB | – | `appraise` |
+| GTDB-Tk (`gtdbtk`) | ~110 GB | – | `classify_bins --gtdbtk` |
+| **everything** | **~644 GB** | **~172 GB** | |
+
+`install-db --list` prints the current version of this table.
+
+- Sizes are on disk after unpacking and indexing; downloads are smaller for some (GUNC 6.7 GB,
+  SingleM 2.2 GB, eggNOG 12 GB). `~` marks an estimate, and the total is a lower bound. The
+  `--small` column gives the download size of the smaller variant; its total is what
+  `install-db --small` downloads for everything.
+- `–` in the `--small` column means there is no smaller variant; `--small` installs the full
+  database.
+- SingleM's own downloader fetches it from Zenodo over one connection (`aria2c` is not used). It
+  has taken from about 10 minutes to 2-4 hours (150-300 KB/s). GTDB-Tk needs about twice its size
+  free while it unpacks.
+- GUNC has one download source. If it is down, `bin_refinement --skip-gunc` runs without it and
+  skips only the chimera check.
+
+For the five databases fetched by a tool's own downloader (`amrfinder`, `genomad`, `checkv`,
+`bakta`, `gtdbtk`), `install-db` runs that downloader in the tool's environment, records the path in
+your config, and skips it on a re-run.
 
 `kraken2 --bracken` needs no extra download. The pre-built KRAKEN2 standard database includes the
 `databaseNmers.kmer_distrib` files Bracken reads, for 50 to 300 bp reads. For a custom Kraken2
@@ -187,13 +246,21 @@ changed. `test` is the same command under its original name. In scripts, use
 
 ## Lockfiles
 
-Every shipped environment has a committed exact-build lockfile:
+The environment yamls set minimum versions, so a solve today can pick newer dependencies than the
+ones tested. The lockfiles in `src/metawrap2/envs/locks/` list the exact linux-64 builds of an
+environment that worked. For anything but development, build from them:
 
 ```bash
-metawrap2 install-env bins --lock        # write one from an env you already have
-metawrap2 install-env bins --from-lock   # build from the committed one
+metawrap2 quickstart -t 8 --from-lock    # every default environment, from its lockfile
+metawrap2 install-env --all --from-lock  # or with install-env
+metawrap2 install-env bins --from-lock   # one environment
+metawrap2 install-env bins --lock        # write a lockfile from an env you already have
 conda create -n metawrap2-bins --file src/metawrap2/envs/locks/bins.linux-64.lock
 ```
+
+Lockfiles exist for the `annotate`, `binqc`, `bins`, `checkm2`, `learned`, `reads` and `taxonomy`
+environments. For any other environment, `--from-lock` says there is no lockfile and
+solves its yaml instead.
 
 ## Configuration
 

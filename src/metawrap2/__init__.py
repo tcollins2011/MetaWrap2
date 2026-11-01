@@ -4,4 +4,4 @@ Holds the logic behind the MetaWrap2 modules (metawrap2.modules.*) and the CLI. 
 short files that assemble and run external tools; this package holds the shared, testable code.
 """
 
-__version__ = "2.1.4"
+__version__ = "2.1.5"

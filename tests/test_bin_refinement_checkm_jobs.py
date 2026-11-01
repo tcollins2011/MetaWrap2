@@ -11,6 +11,7 @@ import os
 import threading
 
 import pytest
+from _banner import unbanner
 
 from metawrap2 import checkm as _checkm
 from metawrap2.modules import bin_refinement
@@ -75,7 +76,7 @@ def test_quick_is_hidden_and_changes_nothing(capsys):
     assert "--quick" not in capsys.readouterr().out
     scorer_notes(_args("--checkm1", "--quick"))
     captured = capsys.readouterr()
-    assert "reduced tree by default" in captured.out + captured.err
+    assert "reduced tree by default" in unbanner(captured.out + captured.err)
 
 
 def test_checkm1_and_checkm2_are_mutually_exclusive():

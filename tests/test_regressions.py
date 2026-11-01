@@ -6,6 +6,8 @@ noted. One test per bug or invariant.
 
 import os
 
+from _banner import unbanner
+
 from metawrap2.modules import _common, binning, read_qc
 
 # --- read_qc must never move the user's input files -------------------------------------
@@ -130,7 +132,7 @@ def test_dereplicate_tolerates_a_bin_missing_from_stats(tmp_path, capsys):
     assert ">shared" in (out / "bin.1.fa").read_text()
     assert ">shared" not in (out / "bin.2.fa").read_text()
     assert ">only2" in (out / "bin.2.fa").read_text()
-    assert "no row in" in capsys.readouterr().err
+    assert "no row in" in unbanner(capsys.readouterr().err)
 
 
 # --- metaBAT2 writes non-genome files into its output prefix -----------------------------

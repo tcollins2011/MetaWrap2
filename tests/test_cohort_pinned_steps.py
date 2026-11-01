@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import List
 
+from _banner import unbanner
+
 from metawrap2.commands import cohort as cohort_cmd
 from metawrap2.commands import run as driver
 from metawrap2.commands import status_cmd
@@ -51,11 +53,6 @@ r2 = "raw/A_2.fastq.gz"
 """
 
 
-def _flat(text: str) -> str:
-    """Collapse whitespace, since message banners wrap and pad."""
-    return " ".join(text.replace("*", " ").split())
-
-
 def _planned(tmp_path, monkeypatch, capsys, body, command=cohort_cmd.main):
     """Run a mode as far as the plan, executing nothing. Returns the study it settled on and
     everything it said about it."""
@@ -66,10 +63,12 @@ def _planned(tmp_path, monkeypatch, capsys, body, command=cohort_cmd.main):
         return 0
 
     monkeypatch.setattr(driver, "execute", fake_execute)
+    # No databases are installed here; tests/test_database_preflight.py covers the check.
+    monkeypatch.setattr(driver, "preflight_databases", lambda *args: None)
     sheet = tmp_path / "samples.toml"
     sheet.write_text(body)
     assert command([str(sheet), "-o", str(tmp_path / "out")]) == 0
-    return seen["study"], _flat(capsys.readouterr().out)
+    return seen["study"], unbanner(capsys.readouterr().out)
 
 
 def _cohort_output(tmp_path, monkeypatch, capsys, body):
@@ -142,7 +141,9 @@ def test_a_near_serial_stage_says_what_j_would_have_used_the_budget(tmp_path, mo
     ]
     state = driver.StepState(layout, resume=False)
 
-    def fake_run_step(step, _layout, threads, _config, _flags, _dry, step_state=None, memory=None):
+    def fake_run_step(
+        step, _layout, threads, _config, _flags, _dry, step_state=None, memory=None, cards=None
+    ):
         """A step that kept 1.7 cores busy, as measured for read_qc."""
         started = step_state.start(step, ["metawrap2", "read_qc"], grant={"threads": threads})
         step_state.finish(

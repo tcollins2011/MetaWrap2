@@ -13,6 +13,8 @@ nav:
   - Tutorial: tutorial.md
   - Usage: usage.md
   - Modules: modules.md
+  - Hardware: hardware.md
+  - Coming from metaWRAP 1: metawrap1.md
   - Scoring genomes: score.md
   - Benchmarks: benchmarks.md
   - Release notes: https://github.com/ursky/MetaWrap2/tree/main/releases

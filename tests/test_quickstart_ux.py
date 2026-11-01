@@ -10,6 +10,7 @@ No test touches conda, the network or a database; each fakes the steps it does n
 from __future__ import annotations
 
 import pytest
+from _banner import unbanner
 
 from metawrap2 import cli
 from metawrap2.commands import config_cmd, install_env, quickstart
@@ -18,20 +19,6 @@ try:  # Python 3.11+; the package still supports 3.10, where tomllib does not ex
     import tomllib as _toml
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as _toml
-
-
-def flat(text: str) -> str:
-    """Captured output with the banner borders and the line wrapping taken back out.
-
-    Messages are wrapped to the banner width, so the wrapping is removed before matching.
-    """
-    kept = []
-    for raw in text.split("\n"):
-        line = raw.strip()
-        if line and set(line) <= set("-*#="):
-            continue  # a border row
-        kept.append(line.strip("-*#").strip())
-    return " ".join(" ".join(kept).split())
 
 
 @pytest.fixture
@@ -72,7 +59,7 @@ def quickstart_calls(monkeypatch):
 def test_a_skipped_step_is_numbered_and_says_why(quickstart_calls, capsys):
     """A skipped step 2 is printed as STEP 2/3 with the reason."""
     assert quickstart.main(["--binning-only", "--databases", "none"]) == 0
-    out = flat(capsys.readouterr().out)
+    out = unbanner(capsys.readouterr().out)
     assert "STEP 1/3" in out
     assert "STEP 2/3: databases (skipped: --databases none)" in out
     assert "STEP 3/3" in out
@@ -81,7 +68,7 @@ def test_a_skipped_step_is_numbered_and_says_why(quickstart_calls, capsys):
 def test_skipping_environments_still_starts_at_step_one(quickstart_calls, capsys):
     """With `--skip-envs` the output still starts at STEP 1/3, marked skipped."""
     assert quickstart.main(["--binning-only", "--skip-envs", "--databases", "none"]) == 0
-    out = flat(capsys.readouterr().out)
+    out = unbanner(capsys.readouterr().out)
     assert "STEP 1/3: conda environments (skipped: --skip-envs)" in out
     assert quickstart_calls["env"] is None, "--skip-envs must not create environments"
 
@@ -95,7 +82,7 @@ def test_the_step_banner_counts_environments_not_modules(quickstart_calls, capsy
     The genome-recovery path has seven names that resolve to four environments.
     """
     assert quickstart.main(["--binning-only", "--databases", "none"]) == 0
-    out = flat(capsys.readouterr().out)
+    out = unbanner(capsys.readouterr().out)
     envs = quickstart._unique_envs(quickstart_calls["env"]["modules"])
     assert len(envs) < len(quickstart_calls["env"]["modules"]), "this path must share envs"
     assert "creating %d conda environment(s)" % len(envs) in out
@@ -104,7 +91,7 @@ def test_the_step_banner_counts_environments_not_modules(quickstart_calls, capsy
 def test_the_slow_step_states_how_long_it_took_when_measured(quickstart_calls, capsys):
     """The slow environment step prints its measured duration (29 minutes)."""
     assert quickstart.main(["--binning-only", "--databases", "none"]) == 0
-    out = flat(capsys.readouterr().out)
+    out = unbanner(capsys.readouterr().out)
     assert "29 minutes" in out
 
 
@@ -198,7 +185,7 @@ def test_a_non_interactive_run_says_it_is_downloading_nothing(quickstart_calls, 
     unattended.
     """
     assert quickstart.main(["--binning-only"]) == 0
-    out = flat(capsys.readouterr().out)
+    out = unbanner(capsys.readouterr().out)
     assert "No --databases given and stdin is not a terminal; downloading nothing." in out
     assert "--databases small" in out
     assert quickstart_calls["db"] is None
@@ -212,7 +199,7 @@ def test_skip_envs_reports_database_status_not_environment_status(
     config.write_text("[databases]\n")
     argv = ["--binning-only", "--skip-envs", "--databases", "none", "--config", str(config)]
     assert quickstart.main(argv) == 0
-    out = flat(capsys.readouterr().out)
+    out = unbanner(capsys.readouterr().out)
     assert "MetaWrap2 database status" in out
     assert quickstart_calls["doctor"] is None, "the module table is not what --skip-envs is for"
 

@@ -43,6 +43,8 @@ def test_each_command_s_own_example_sheet_runs_without_a_warning(tmp_path, monke
     """`run` and `cohort` accept their own example sheets without a warning."""
     said: List[str] = []
     monkeypatch.setattr(driver, "execute", lambda *args, **kwargs: 0)
+    # No databases are installed here; tests/test_database_preflight.py covers the check.
+    monkeypatch.setattr(driver, "preflight_databases", lambda *args: None)
     monkeypatch.setattr(driver, "warning", said.append)
     # `<command> --example > samples.toml` then `<command> samples.toml`, as in the README and
     # installation.md.

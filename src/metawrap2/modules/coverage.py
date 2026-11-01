@@ -46,11 +46,13 @@ from ._common import (
     env_for,
     error,
     expect_produced,
+    fill_command,
     finish_run,
     fs_move,
     fs_remove,
     listdir,
     make_checkpoint,
+    quoted_words,
     resolve_threads,
     run,
     start_run,
@@ -421,17 +423,19 @@ def sketch_reads(
         # fairy names single-end and paired sketches differently, and the coverage call takes the
         # sketch paths, so each case needs its own suffix.
         sketches = [os.path.join(sketch_dir, "%s.single.bcsp" % name) for name in names]
-        command = FAIRY_SKETCH_SINGLE.format(
-            reads=" ".join(entry[1] for entry in sets),
-            names=" ".join(names),
+        command = fill_command(
+            FAIRY_SKETCH_SINGLE,
+            reads=quoted_words([entry[1] for entry in sets]),
+            names=quoted_words(names),
             sketches=sketch_dir,
             threads=threads,
         )
     else:
-        command = FAIRY_SKETCH_PAIRED.format(
-            r1=" ".join(entry[1] for entry in sets),
-            r2=" ".join(entry[2] for entry in sets),
-            names=" ".join(names),
+        command = fill_command(
+            FAIRY_SKETCH_PAIRED,
+            r1=quoted_words([entry[1] for entry in sets]),
+            r2=quoted_words([entry[2] for entry in sets]),
+            names=quoted_words(names),
             sketches=sketch_dir,
             threads=threads,
         )
@@ -474,7 +478,7 @@ def _index_kept_bams(bams: Sequence[str], threads: int, env: Optional[str]) -> N
     for bam in bams:
         if os.path.isfile(bam + ".bai"):
             continue
-        run(SAMTOOLS_INDEX.format(threads=threads, bam=bam), env=env, tool="samtools index")
+        run(fill_command(SAMTOOLS_INDEX, threads=threads, bam=bam), env=env, tool="samtools index")
 
 
 def bam_references(bam: str, env: Optional[str]) -> List[Tuple[str, int]]:
@@ -556,8 +560,13 @@ def split_bams(
             sample = os.path.splitext(os.path.basename(bam))[0]
             target = os.path.join(label_dir, sample + ".bam")
             run(
-                "samtools view -b -M -L %s -@ %d -o %s %s"
-                % (bed, max(1, threads - 1), target, bam),
+                fill_command(
+                    "samtools view -b -M -L {bed} -@ {threads} -o {target} {bam}",
+                    bed=bed,
+                    threads=max(1, threads - 1),
+                    target=target,
+                    bam=bam,
+                ),
                 env=env,
                 tool="samtools view",
             )
@@ -569,7 +578,9 @@ def split_bams(
                     handle.write(plain)
                 reheadered = target + ".plain.bam"
                 run(
-                    "samtools reheader %s %s" % (header_path, target),
+                    fill_command(
+                        "samtools reheader {header} {bam}", header=header_path, bam=target
+                    ),
                     env=env,
                     tool="samtools reheader",
                     stdout_path=reheadered,
@@ -637,7 +648,7 @@ def _deprefix_kept_bams(
             handle.write(rewritten)
         plain = bam + ".plain.bam"
         run(
-            "samtools reheader %s %s" % (header_path, bam),
+            fill_command("samtools reheader {header} {bam}", header=header_path, bam=bam),
             env=env,
             tool="samtools reheader",
             stdout_path=plain,
@@ -741,9 +752,10 @@ def main(argv: List[str]) -> int:
             # table.
             if ckpt.todo("fairy_depth_table"):
                 run(
-                    FAIRY_COVERAGE.format(
+                    fill_command(
+                        FAIRY_COVERAGE,
                         threads=args.threads,
-                        sketches=" ".join(sketches),
+                        sketches=quoted_words(sketches),
                         catalogue=catalogue,
                         depth=depth_table,
                     ),

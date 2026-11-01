@@ -527,16 +527,32 @@ def self_peak_rss_bytes() -> int:
     return maxrss_bytes(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
 
-def summarise(usage: Dict[str, Any]) -> str:
-    """One line describing a step's cost, for a log message."""
+#: Below this wall time the cost line prints ``n/a`` for cores busy. CPU and wall times are
+#: rounded to 0.1 s, so on a step of a second or two the ratio is mostly rounding (a 1 s run
+#: reported 12.8 cores busy).
+MIN_SECONDS_FOR_CORES = 5.0
+
+
+def summarise(usage: Dict[str, Any], threads: Optional[int] = None) -> str:
+    """One line describing a step's cost, for a log message.
+
+    With *threads*, the step's thread grant, cores busy is given against the grant, as in
+    ``14.2 of 32 cores busy (44%)``.
+    """
     parts: List[str] = ["%.0fs wall" % usage.get("wall_seconds", 0)]
     if "peak_rss_bytes" in usage:
         parts.append("%s peak memory" % human(usage["peak_rss_bytes"]))
     if "user_seconds" in usage:
         cpu = usage.get("user_seconds", 0) + usage.get("system_seconds", 0)
-        wall = usage.get("wall_seconds") or 1
+        wall = usage.get("wall_seconds") or 0
         # Shows whether a step uses the threads it was given.
-        parts.append("%.1f cores busy" % (cpu / wall))
+        if wall < MIN_SECONDS_FOR_CORES:
+            parts.append("cores busy n/a (under %.0fs)" % MIN_SECONDS_FOR_CORES)
+        elif threads:
+            busy = cpu / wall
+            parts.append("%.1f of %d cores busy (%.0f%%)" % (busy, threads, 100.0 * busy / threads))
+        else:
+            parts.append("%.1f cores busy" % (cpu / wall))
     if "peak_gpu_memory_bytes" in usage:
         # Per device: the figure is what one card had to hold.
         parts.append(

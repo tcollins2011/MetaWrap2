@@ -9,11 +9,16 @@ MetaWrap2 writes a record of each run to its output directory and appends it to 
 | `run_config.json` | full run record: module, version, all resolved parameters (incl. defaults), config file, conda env, databases, platform, timing, inputs, exact commands, tool versions used, and the complete lineage |
 | `run_environment.json` | what the run used, written before any tool runs: the environment's full conda package list, the MetaWrap2 git commit, and each database's content fingerprint |
 | `run_commands.txt` | the exact commands run, in order; the first line is the top-level `metawrap2 <module>` reproducer |
-| `provenance.txt` | readable history of every MetaWrap2 step that led to this output |
+| `provenance.txt` | readable history of every MetaWrap2 step that led to this output, with each step's CPU time, wall time and peak memory |
 | `metawrap2.log` | one timestamped log of MetaWrap2's own messages and every line of every tool (rotates at 256 MB) |
 | `run.stdout` / `run.stderr` | raw tool output (streamed live to the screen and captured here) |
 
 `run_environment.json` is written first, so a run that fails early still records its environment.
+
+A `run` or `cohort` study also writes `provenance.txt` at its top level: the catalogue strategy,
+every step with its status and cost, and totals over the completed steps (CPU-hours, wall-clock
+time from the first step to the last, and peak memory). It is written when the study ends, also
+after a failure or an interruption.
 
 ### Database fingerprints
 

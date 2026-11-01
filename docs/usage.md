@@ -21,8 +21,9 @@ Per-module options are in [Modules](modules.md).
 ## Running a whole study: `run` and `cohort`
 
 Both take a sample sheet (or a directory of read files) and run every module, with a manifest, run
-lock, checkpointing, resource budget and `--resume`. The
-[README](https://github.com/ursky/MetaWrap2#running) covers which to use.
+lock, checkpointing, resource budget and `--resume`. Use `cohort` for more than a few samples: a
+co-assembly holds every sample's reads at once, and per-sample assembly keeps each bin traceable
+to its sample.
 
 ```bash
 metawrap2 run    samples.toml -o study/ -t 32        # co-assemble every sample, bin once
@@ -47,7 +48,12 @@ metawrap2 cohort samples.toml -o study/ -t 32 -j 4   # assemble and bin each sam
   `steps` (or `--steps`) to include it.
 - In `run`, `coverage` and `dereplicate` are dropped with a message.
 - Under `metawrap2 cohort`, `coassemble = true` in a sheet is overridden with a warning naming `run`.
-- `-j N` sets how many samples run a per-sample stage at once, dividing threads and memory.
+- `-j N` sets how many samples run a per-sample stage at once, dividing threads and memory. Concurrent
+  binning steps on `--device cuda` (the default under `--preset deep`) or `auto` get one GPU each,
+  round-robin over the cards the budget allows (`--max-gpus`), and the step banner names them. A
+  `--device cuda:N` in the sheet keeps that card for every sample.
+- The sheet is read once, when the run starts, so edits to it take effect on the next `--resume`;
+  `[limits]` in `metawrap2.toml` is re-read by every step.
 
 ## Functional annotation
 
@@ -164,6 +170,10 @@ Caveats:
 | `--heartbeat-seconds N` | seconds without output before a progress heartbeat; 0 turns it off |
 | `--skip-space-check` | start even if the disk-space estimate says there is no room |
 
+Under `run`, `cohort` and `benchmark`, these options and the resource limits below (`--max-threads`,
+`--max-disk-fraction` and the rest) are passed on to every step. Each step still gets its own share
+of threads and memory from the study's budget.
+
 ## Output while a step runs
 
 A tool's output is shown live and copied to `run.stdout` / `run.stderr`. Progress-bar redraws and
@@ -211,11 +221,16 @@ passes 70% full.
 
 ```toml
 [limits]
-max_thread_fraction = 0.5   # or max_threads = 32, which wins when both are given
-max_memory_fraction = 0.8   # what an unset -m resolves to
+# Share of the cores. max_threads = 32 sets a count instead and wins when both are given.
+max_thread_fraction = 0.5
+# Share of the RAM; also what an unset -m resolves to.
+max_memory_fraction = 0.8
+# Stop a step when a filesystem it writes to passes this fraction full.
 max_disk_fraction = 0.7
-max_gpus = 0                # unset means every GPU present; 0 means use none
-gpu_strict = false          # true refuses a GPU step on a card something else is using
+# GPUs to use. Unset means every GPU present; 0 means none.
+max_gpus = 0
+# true refuses a GPU step on a card another process is using.
+gpu_strict = false
 ```
 
 Each run prints its budget before starting:
@@ -248,8 +263,10 @@ In `src/metawrap2/modules/<module>.py`, the `COMMANDS` block holds the tool comm
 | `metawrap2 run <sheet\|dir> -o study/` | run the whole pipeline for a study from one sample sheet |
 | `metawrap2 cohort <sheet\|dir> -o study/` | the same, per sample, ending in one dereplicated catalogue |
 | `metawrap2 check <module>` | verify tools/databases/conda env for a module |
+| `metawrap2 check --for "<module command>"` | the databases and envs one command needs, then `ready: yes` or `ready: no` |
 | `metawrap2 install-env <module\|--all> [-t N]` | create (and verify) conda env(s), N at a time |
 | `metawrap2 install-db <name\|--all> [-t N] [--small]` | download, index, and configure databases |
+| `metawrap2 install-db --for <module>` / `--for-sheet <sheet>` | install the databases a module or a sample sheet needs |
 | `metawrap2 doctor [module]` | probe envs, software and databases; print a status map (alias: `test`) |
 | `metawrap2 doctor --fix` | recreate only the broken environments, leaving healthy ones alone |
 | `metawrap2 status <study>` | what has run, and what `--resume` would do next |
@@ -259,6 +276,26 @@ In `src/metawrap2/modules/<module>.py`, the `COMMANDS` block holds the tool comm
 | `metawrap2 benchmark list\|fetch\|run\|score` | measure tools and settings against known-truth data |
 | `metawrap2 config init\|show` | scaffold or inspect the config |
 | `metawrap2 completion bash\|zsh` | print a shell-completion script |
+
+### Checking one command
+
+`check --for` takes a full module command in quotes, as you would type it, and reports only the
+databases and conda envs that command needs. Each missing one is printed with the command that
+installs it. The exit code is 0 when the command is ready to run and 1 when something is missing.
+
+```
+$ metawrap2 check --for "annotate --kofam --cazy -b bins/ -o annotation/"
+
+annotate --kofam --cazy -b bins/ -o annotation/
+
+  OK       KOFAM_DB            /path/to/metawrap2_dbs/KOFAM
+  MISSING  DBCAN_DB            -> metawrap2 install-db dbcan
+  OK       metawrap2-annotate  conda env
+
+ready: no (1 missing)
+```
+
+A leading `metawrap2` and global flags such as `--dry-run` are accepted.
 
 ### Checking on a run
 
@@ -366,7 +403,7 @@ Bins are named `bin_001.fasta` for every binner, from 1, zero-padded. Numbers ar
 ## Other flags
 
 * `binning --device {cpu,cuda,cuda:N,auto}` sets where SemiBin2, VAMB and COMEBin train. The default
-  `cpu` gives the same result on any host; `auto` uses a GPU if torch sees one; `--preset gpu`
+  `cpu` gives the same result on any host; `auto` uses a GPU if torch sees one; `--preset deep`
   defaults to `cuda`. VAMB costs 4.9 CPU-hours on a GPU against 66.9 on the CPU, and COMEBin does not
   finish on a CPU.
 * Before each GPU step the card is checked and described in one line:

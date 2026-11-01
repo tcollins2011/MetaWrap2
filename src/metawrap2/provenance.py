@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import dbcheck as _dbcheck
 from .config import Settings as _Settings
+from .logfilter import duration as _duration
+from .usage import human as _human
 
 CONFIG_NAME = "run_config.json"
 ENVIRONMENT_NAME = "run_environment.json"
@@ -154,6 +156,9 @@ class RunRecorder:
     #: The resolved resource budget and what it was measured against, so run times can be
     #: compared. See metawrap2.limits.
     budget: Dict[str, Any] = field(default_factory=dict)
+    #: Measured wall time, CPU time and peak memory, as ``metawrap2.usage`` records them. Set by
+    #: ``finalize``; written into the lineage step and provenance.txt.
+    usage: Dict[str, Any] = field(default_factory=dict)
     _t0: float = field(default_factory=time.time)
 
     def elapsed(self) -> float:
@@ -204,6 +209,7 @@ class RunRecorder:
             "command_line": self.command_line,
             "commands": list(self.commands),
             "inputs": list(self.inputs),
+            "usage": dict(self.usage),
         }
 
     def _lineage(self, input_paths: List[str]) -> List[Dict[str, Any]]:
@@ -217,7 +223,14 @@ class RunRecorder:
         output_dir: str,
         input_paths: Optional[List[str]] = None,
         capture_versions: bool = True,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """Write run_config.json, run_commands.txt and provenance.txt into *output_dir*.
+
+        *usage* is this run's measured cost (see ``modules._common.self_usage``).
+        """
+        if usage:
+            self.usage = dict(usage)
         os.makedirs(output_dir, exist_ok=True)
         input_paths = input_paths if input_paths is not None else self.inputs
         lineage = self._lineage(input_paths)
@@ -237,6 +250,7 @@ class RunRecorder:
             "databases": self.databases,
             "platform": self.platform,
             "budget": dict(self.budget),
+            "usage": dict(self.usage),
             "tool_versions": tool_versions,
             "environment": self.environment,
             "inputs": input_paths,
@@ -371,6 +385,56 @@ def capture_tool_versions(
     return versions
 
 
+def cpu_seconds(usage: Dict[str, Any]) -> Optional[float]:
+    """User plus system CPU seconds in *usage*, or None if it has no CPU time.
+
+    A total from :func:`total_usage` carries the sum as ``cpu_seconds``.
+    """
+    if "cpu_seconds" in usage:
+        return float(usage["cpu_seconds"])
+    if "user_seconds" not in usage and "system_seconds" not in usage:
+        return None
+    return float(usage.get("user_seconds") or 0) + float(usage.get("system_seconds") or 0)
+
+
+def describe_cost(usage: Dict[str, Any], wall_seconds: Optional[float] = None) -> str:
+    """*usage* as ``1.25 CPU-hours, 12m03s wall-clock, 3.1 GB peak memory``.
+
+    *wall_seconds* overrides the recorded wall time. Parts that were not measured are left out.
+    """
+    parts: List[str] = []
+    cpu = cpu_seconds(usage)
+    if cpu is not None:
+        parts.append("%.2f CPU-hours" % (cpu / 3600.0))
+    wall = wall_seconds if wall_seconds is not None else usage.get("wall_seconds")
+    if wall is not None:
+        parts.append("%s wall-clock" % _duration(float(wall)))
+    if usage.get("peak_rss_bytes"):
+        parts.append("%s peak memory" % _human(usage["peak_rss_bytes"]))
+    return ", ".join(parts)
+
+
+def total_usage(usages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Sum CPU and wall time over *usages* and take the largest peak memory.
+
+    Peak memory is a high-water mark per step, so the total is the largest single step, not a sum.
+    Returns {} when none of *usages* has anything recorded.
+    """
+    measured = [u for u in usages if u]
+    if not measured:
+        return {}
+    total: Dict[str, Any] = {
+        "wall_seconds": round(sum(float(u.get("wall_seconds") or 0) for u in measured), 1)
+    }
+    cpus = [c for c in (cpu_seconds(u) for u in measured) if c is not None]
+    if cpus:
+        total["cpu_seconds"] = round(sum(cpus), 1)
+    peaks = [u["peak_rss_bytes"] for u in measured if u.get("peak_rss_bytes")]
+    if peaks:
+        total["peak_rss_bytes"] = max(peaks)
+    return total
+
+
 def _write_provenance(path: str, lineage: List[Dict[str, Any]]) -> None:
     lines = ["MetaWrap2 provenance", "=" * 60, ""]
     lines.append("This output was produced by the following MetaWrap2 steps, in order")
@@ -381,11 +445,22 @@ def _write_provenance(path: str, lineage: List[Dict[str, Any]]) -> None:
         lines.append("    started:  %s" % step.get("started", "?"))
         lines.append("    finished: %s" % step.get("finished", "?"))
         lines.append("    command:  %s" % shlex.join(step.get("command_line", [])))
+        cost = describe_cost(step.get("usage") or {})
+        if cost:
+            lines.append("    cost:     %s" % cost)
         cmds = step.get("commands", [])
         if cmds:
             lines.append("    tools run:")
             for c in cmds:
                 lines.append("      $ %s" % c)
+        lines.append("")
+    # Runs from before 2.1.5 recorded no cost, so the total covers only the steps that did.
+    costed = [step.get("usage") or {} for step in lineage if step.get("usage")]
+    if len(costed) > 1:
+        lines.append(
+            "Total over the %d of %d steps with a recorded cost: %s"
+            % (len(costed), len(lineage), describe_cost(total_usage(costed)))
+        )
         lines.append("")
     with open(path, "w") as fh:
         fh.write("\n".join(lines))

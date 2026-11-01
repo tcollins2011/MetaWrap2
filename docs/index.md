@@ -11,7 +11,7 @@ algorithms, tools and thresholds, so existing analyses could be migrated and che
 Golden tests still pin that baseline. Five defaults have since changed, each based on a benchmark.
 The default configuration recovers more near-complete bins than metaWRAP 1 on the three CAMI2 sites
 and more clean MAGs on all four real datasets, but fewer near-complete bins on the CAMI3 toy dataset
-and on the three-sample real dataset. `--preset gpu` recovers more on every dataset.
+and on the three-sample real dataset. `--preset deep` recovers more on every dataset.
 
 ![Synthetic communities: CAMI2 and CAMI3](figures/synthetic_benchmarks.png)
 

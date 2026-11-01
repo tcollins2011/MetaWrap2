@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metawrap2"
-version = "2.1.4"
+version = "2.1.5"
 description = "MetaWrap2: a benchmarked pipeline for genome-resolved metagenomics, from reads to MAGs and their functions"
 readme = "README.md"
 requires-python = ">=3.10"

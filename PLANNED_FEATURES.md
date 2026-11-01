@@ -48,6 +48,9 @@ Started or decided, each with a named blocker.
   Coster et al., *Bioinformatics* 2018/2023).
 - `[low]` **MultiQC** to combine per-sample QC reports into one (Ewels et al., *Bioinformatics*
   2016).
+- `[low]` **`read_qc --trimmer auto`**: measure read length and tail quality on the first reads,
+  then choose fastp or trim-galore. Needs its own arm in `benchmarks/configurations.toml`, measured
+  on `scn_bioreactor` and a CAMI2 dataset, before it ships.
 
 ## Assembly
 
@@ -115,11 +118,12 @@ prefer metaSPAdes to MEGAHIT, and Hi-C or long reads to either.
 
 ## Cohorts
 
-- `[low]` **Record which strategy built a catalogue** (per-sample or co-assembly) in the cohort
-  summary, since the two are not comparable.
 - `[moderate]` **Compare per-sample assembly and co-assembly at scale.** On three samples they give
   the same number of clean MAGs. The comparison needs about twenty samples, where co-assembly is
   expected to run out of memory.
+- `[moderate]` **Per-sample module overrides in the sample sheet**: a `modules = {...}` key in a
+  `[[samples]]` entry, on top of the global `[modules]` table, for a memory cap, a GPU or a
+  different assembler for one sample.
 - `[moderate]` **Community structure**: beta diversity and ordination of taxonomic and functional
   profiles, with MIxS sample metadata.
 
@@ -130,6 +134,11 @@ prefer metaSPAdes to MEGAHIT, and Hi-C or long reads to either.
   conventions (Krakau et al., *NAR Genom Bioinform* 2022).
 - `[major]` **Cloud execution**: Slurm, cloud batch or Kubernetes executors and object-store input/output. Docker
   and Apptainer images already exist.
+
+## Benchmarks
+
+- `[low]` **`benchmark run --adopt <study>:<step>=<variant>`**: use a finished study step as one
+  arm of a comparison, so the default arm is not run a second time.
 
 ## Methods research
 
@@ -150,8 +159,6 @@ prefer metaSPAdes to MEGAHIT, and Hi-C or long reads to either.
 - `[low]` **Reference recovery report**: how many genomes from a supplied reference set (for
   example published MAGs from the same samples) a run recovered, by skani ANI and aligned fraction.
   It does not depend on CheckM, so it can check CheckM results on real samples.
-- `[low]` **Run CPU-hours in `provenance.txt`**: each step's CPU time is in the run manifest; the
-  run total is not in the provenance summary.
 - `[moderate]` **An interactive HTML report** for browsing MAGs and their functions.
 - `[moderate]` **Submission support**: MIxS/MIMAG metadata, NCBI/ENA submission helpers, and
   provenance as RO-Crate.

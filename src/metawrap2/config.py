@@ -237,7 +237,7 @@ DB_KEYS = {
     # use the same database.
     "AMRFINDER_DB": "amr (AMRFinderPlus reference database)",
     # geNomad's database includes plasmid markers, so `amr` mobility calls and `viruses` share it.
-    "GENOMAD_DB": "viruses (geNomad marker database; also plasmid calls for amr)",
+    "GENOMAD_DB": "viruses (geNomad marker database)",
     "CHECKV_DB": "viruses (CheckV reference database)",
     # CARD's data, for `amr --rgi`. CARD releases every few months (4.0.2 at the time of writing);
     # name the directory by version, not `latest`.
@@ -273,6 +273,122 @@ NON_PATH_DB_KEYS = {"BLASTDB_NAME"}
 #: Database keys whose value is a file, not a directory. GUNC takes only ``--db_file``, so
 #: install-db points GUNC_DB at the ``.dmnd`` itself.
 FILE_DB_KEYS = {"GUNC_DB"}
+
+
+@dataclass(frozen=True)
+class DbNeed:
+    """One database a module reads, and the flags that decide whether it is needed.
+
+    A need with neither *when* nor *skip* is required: the module cannot run without it. *when*
+    names the flag that turns the need on (``--bakta``); *skip* names the flags that let the module
+    run without it (``--skip-checkv``). *path_flag* passes the path on the command line instead of
+    the config. *fallback* is a key the module uses when this one is unset. *warn_only* means the
+    module warns and carries on when the key is unset; *note* says what it does then.
+    """
+
+    key: str
+    when: str = ""
+    skip: Tuple[str, ...] = ()
+    path_flag: str = ""
+    fallback: str = ""
+    warn_only: bool = False
+    note: str = ""
+
+
+#: Databases each module reads, with the flags that make each one needed or not. `check`, `doctor`
+#: and the sample-sheet preflight in `run`/`cohort` read this table. A module that is absent reads
+#: no database.
+MODULE_DB_NEEDS: Dict[str, Tuple[DbNeed, ...]] = {
+    "read_qc": (DbNeed("BMTAGGER_DB", skip=("--skip-bmtagger",)),),
+    "kraken2": (
+        DbNeed("KRAKEN2_DB"),
+        # bracken-build writes its files into the Kraken2 database directory, which the module
+        # uses when neither --bracken-db nor BRACKEN_DB is set.
+        DbNeed("BRACKEN_DB", when="--bracken", path_flag="--bracken-db", fallback="KRAKEN2_DB"),
+    ),
+    "blobology": (DbNeed("BLASTDB"), DbNeed("TAXDUMP")),
+    "classify_bins": (
+        DbNeed("BLASTDB", skip=("--gtdbtk",)),
+        DbNeed("TAXDUMP", skip=("--gtdbtk",)),
+        DbNeed("GTDBTK_DATA_PATH", when="--gtdbtk"),
+    ),
+    "bin_refinement": (
+        # CheckM2 also keeps a database path in its own env, so an unset CHECKM2DB only warns.
+        DbNeed(
+            "CHECKM2DB",
+            skip=("--checkm1", "--skip-checkm"),
+            warn_only=True,
+            note="CheckM2 uses the path stored in its env",
+        ),
+        DbNeed("CHECKM_DB", when="--checkm1"),
+        DbNeed("GUNC_DB", skip=("--skip-gunc",)),
+    ),
+    "reassemble_bins": (
+        DbNeed(
+            "CHECKM2DB",
+            skip=("--skip-checkm",),
+            warn_only=True,
+            note="CheckM2 uses the path stored in its env",
+        ),
+    ),
+    "binning": (
+        DbNeed(
+            "CHECKM2DB",
+            when="--run-checkm",
+            skip=("--checkm1",),
+            warn_only=True,
+            note="CheckM2 uses the path stored in its env",
+        ),
+        DbNeed("CHECKM_DB", when="--checkm1"),
+    ),
+    "annotate_bins": (
+        DbNeed(
+            "BAKTA_DB",
+            when="--bakta",
+            path_flag="--bakta-db",
+            warn_only=True,
+            note="Bakta uses its own default",
+        ),
+    ),
+    "annotate": (
+        DbNeed("BAKTA_DB", when="--bakta", path_flag="--bakta-db"),
+        DbNeed("KOFAM_DB", when="--kofam", path_flag="--kofam-db"),
+        DbNeed("PFAM_DB", when="--pfam", path_flag="--pfam-db"),
+        DbNeed("EGGNOG_DB", when="--eggnog", path_flag="--eggnog-db"),
+        DbNeed("DBCAN_DB", when="--cazy", path_flag="--cazy-db"),
+    ),
+    "pathways": (
+        DbNeed(
+            "KEGG_BRITE",
+            path_flag="--brite-db",
+            warn_only=True,
+            note="pathways skips the hierarchy and Krona plots",
+        ),
+    ),
+    "appraise": (DbNeed("SINGLEM_METAPACKAGE", path_flag="--metapackage"),),
+    "amr": (
+        DbNeed("AMRFINDER_DB", skip=("--skip-amrfinder",), path_flag="--db"),
+        DbNeed("CARD_DB", when="--rgi", path_flag="--card-db"),
+    ),
+    # geNomad makes the viral calls, so it has no skip flag.
+    "viruses": (
+        DbNeed("GENOMAD_DB", path_flag="--genomad-db"),
+        DbNeed("CHECKV_DB", skip=("--skip-checkv",), path_flag="--checkv-db"),
+    ),
+}
+
+#: Config key -> the environment variable its tool reads. The runner sets these in every tool's
+#: environment from the loaded config, so a rebuilt conda env (which drops ``conda env config
+#: vars``) still sees them. The config value replaces one already set in the user's shell, because
+#: the config is what `check` and `doctor` report.
+DB_ENV_VARS: Dict[str, str] = {
+    # GTDB-Tk reads its reference data location only from this variable.
+    "GTDBTK_DATA_PATH": "GTDBTK_DATA_PATH",
+    "CHECKM2DB": "CHECKM2DB",
+    "CHECKM_DB": "CHECKM_DATA_PATH",
+    "CHECKV_DB": "CHECKVDB",
+    "BAKTA_DB": "BAKTA_DB",
+}
 
 
 class ConfigError(Exception):

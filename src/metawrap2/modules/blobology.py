@@ -27,6 +27,7 @@ from ..io.seqio import iter_fasta
 from ..progress import bar
 from ..pyrun import PY
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     check_fasta,
@@ -37,8 +38,10 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     make_checkpoint,
+    quoted_words,
     resolve_threads,
     run,
     start_run,
@@ -119,11 +122,11 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _bams(out: str) -> str:
+def _bams(out: str) -> Raw:
     bams = sorted(glob.glob(os.path.join(out, "*.bam")))
     if not bams and dry_run():
-        return os.path.join(out, "<sample>.bam")
-    return " ".join(bams)
+        return quoted_words([os.path.join(out, "<sample>.bam")])
+    return quoted_words(bams)
 
 
 def _annotate_with_bins(blobplot: str, binned_blobplot: str, bin_folder: str) -> bool:
@@ -134,7 +137,7 @@ def _annotate_with_bins(blobplot: str, binned_blobplot: str, bin_folder: str) ->
     """
     tmp = blobplot + ".binned.tmp"
     run(
-        ADD_BINS.format(blobplot=blobplot, bin_folder=bin_folder),
+        fill_command(ADD_BINS, blobplot=blobplot, bin_folder=bin_folder),
         env=None,
         tool="add_bins_to_blobplot",
         log_path=tmp,
@@ -162,9 +165,9 @@ def _plot(
     table: str, prop: float, taxlevel: str, env: Optional[str], base: Optional[str] = None
 ) -> None:
     if base is None:
-        cmd = MAKEBLOBPLOT.format(table=table, prop=prop, taxlevel=taxlevel)
+        cmd = fill_command(MAKEBLOBPLOT, table=table, prop=prop, taxlevel=taxlevel)
     else:
-        cmd = MAKEBLOBPLOT_BASE.format(table=table, prop=prop, taxlevel=taxlevel, base=base)
+        cmd = fill_command(MAKEBLOBPLOT_BASE, table=table, prop=prop, taxlevel=taxlevel, base=base)
     run(cmd, env=None, tool="makeblobplot")
 
 
@@ -226,7 +229,9 @@ def main(argv: List[str]) -> int:
             else:
                 comm("Choosing %d contigs at random from %s" % (args.subsample, args.assembly))
                 run(
-                    FASTAQUAL_SELECT.format(assembly=args.assembly, n_contigs=args.subsample),
+                    fill_command(
+                        FASTAQUAL_SELECT, assembly=args.assembly, n_contigs=args.subsample
+                    ),
                     env=None,
                     tool="fastaqual_select",
                     log_path=assembly_copy,
@@ -235,7 +240,9 @@ def main(argv: List[str]) -> int:
             comm("Running MEGABLAST on %s" % assembly)
             if dry_run() or not (os.path.isfile(megablast) and os.path.getsize(megablast)):
                 run(
-                    BLASTN.format(query=assembly_copy, blastdb=blastdb, threads=args.threads),
+                    fill_command(
+                        BLASTN, query=assembly_copy, blastdb=blastdb, threads=args.threads
+                    ),
                     env=env,
                     tool="blastn",
                     log_path=megablast,
@@ -256,7 +263,7 @@ def main(argv: List[str]) -> int:
             index = index_path(assembly_copy, args.aligner)
             comm("Indexing %s" % assembly_copy)
             run(
-                aligner["index_cmd"].format(assembly=assembly_copy, index=index),
+                fill_command(aligner["index_cmd"], assembly=assembly_copy, index=index),
                 env=env,
                 tool="%s index" % args.aligner,
             )
@@ -272,12 +279,14 @@ def main(argv: List[str]) -> int:
                     "Now processing sample %s ... Aligning %s and %s to %s with %s"
                     % (sname, r1, r2, assembly_copy, args.aligner)
                 )
-                align = aligner["paired"].format(threads=args.threads, index=index, r1=r1, r2=r2)
+                align = Raw(
+                    fill_command(aligner["paired"], threads=args.threads, index=index, r1=r1, r2=r2)
+                )
                 run(
                     [
                         "bash",
                         "-c",
-                        ALIGN_BAM.format(align=align, threads=args.threads, bam=bam),
+                        fill_command(ALIGN_BAM, align=align, threads=args.threads, bam=bam),
                     ],
                     env=env,
                     tool="%s | samtools view" % args.aligner,
@@ -293,7 +302,8 @@ def main(argv: List[str]) -> int:
             announcement("MAKE BLOB FILE FROM BLAST AND ALIGNMENT OUTPUT")
             if dry_run() or not (os.path.isfile(blobplot) and os.path.getsize(blobplot)):
                 run(
-                    GC_COV_ANNOTATE.format(
+                    fill_command(
+                        GC_COV_ANNOTATE,
                         megablast=megablast,
                         assembly=assembly_copy,
                         bams=_bams(out),

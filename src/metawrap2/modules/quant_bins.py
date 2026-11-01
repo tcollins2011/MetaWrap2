@@ -70,8 +70,10 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     make_checkpoint,
+    quoted_words,
     require_nonempty_dir,
     resolve_threads,
     run,
@@ -371,7 +373,7 @@ def _quantify_salmon(args: argparse.Namespace, pairs: list, table: str, env, ckp
     if ckpt.todo("index"):
         comm("Indexing assembly file with salmon. Ignore any warnings")
         run(
-            SALMON_INDEX.format(threads=args.threads, assembly=assembly, index=index),
+            fill_command(SALMON_INDEX, threads=args.threads, assembly=assembly, index=index),
             env=env,
             tool="salmon index",
             hint="Something went wrong with indexing the assembly.",
@@ -392,7 +394,9 @@ def _quantify_salmon(args: argparse.Namespace, pairs: list, table: str, env, ckp
             out_quant = os.path.join(align_dir, sample + ".quant")
             comm("processing sample %s with reads %s and %s..." % (sample, r1, r2))
             run(
-                SALMON_QUANT.format(index=index, r1=r1, r2=r2, out=out_quant, threads=args.threads),
+                fill_command(
+                    SALMON_QUANT, index=index, r1=r1, r2=r2, out=out_quant, threads=args.threads
+                ),
                 env=env,
                 tool="salmon quant",
                 hint="Something went wrong with aligning %s fastq files back to assembly!" % sample,
@@ -456,9 +460,10 @@ def _quantify_coverm(args: argparse.Namespace, pairs: list, table: str, env, ckp
     raw = os.path.join(args.output, "coverm_genome" + TSV_SUFFIX)
     if ckpt.todo("coverm"):
         run(
-            COVERM_GENOME.format(
+            fill_command(
+                COVERM_GENOME,
                 genome_list=genome_list,
-                coupled=" ".join("%s %s" % (r1, r2) for _, r1, r2 in pairs),
+                coupled=quoted_words([path for _, r1, r2 in pairs for path in (r1, r2)]),
                 methods=COVERM_METHOD,
                 min_covered=COVERM_MIN_COVERED_FRACTION,
                 min_identity=COVERM_MIN_READ_IDENTITY,
@@ -540,7 +545,9 @@ def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt
     if ckpt.todo("sketch_genomes"):
         comm("sketching bins with sylph")
         run(
-            SYLPH_SKETCH_GENOMES.format(genome_list=genome_list, db=db, threads=args.threads),
+            fill_command(
+                SYLPH_SKETCH_GENOMES, genome_list=genome_list, db=db, threads=args.threads
+            ),
             env=env,
             tool="sylph sketch",
             hint="Something went wrong sketching the bins with sylph.",
@@ -553,7 +560,9 @@ def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt
         comm("sketching reads from %d sample(s) with sylph" % len(pairs))
         ensure_dir(sketch_dir)
         run(
-            SYLPH_SKETCH_READS.format(l1=l1, l2=l2, sketch_dir=sketch_dir, threads=args.threads),
+            fill_command(
+                SYLPH_SKETCH_READS, l1=l1, l2=l2, sketch_dir=sketch_dir, threads=args.threads
+            ),
             env=env,
             tool="sylph sketch",
             hint="Something went wrong sketching the reads with sylph.",
@@ -578,9 +587,10 @@ def _quantify_sylph(args: argparse.Namespace, pairs: list, table: str, env, ckpt
                 % (len(sketches), len(pairs), sketch_dir)
             )
         run(
-            SYLPH_PROFILE.format(
+            fill_command(
+                SYLPH_PROFILE,
                 db=db + ".syldb",
-                sketches=" ".join(sketches),
+                sketches=quoted_words(sketches),
                 min_ani=min_ani,
                 threads=args.threads,
                 out=raw,

@@ -33,6 +33,7 @@ from ..io.seqio import contig_id, is_binnable, iter_fasta
 from ..progress import bar
 from ..utils import short_tmpdir
 from ._common import (
+    Raw,
     absolutize_paths,
     add_scorer_args,
     align_read_sets,
@@ -45,11 +46,13 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     listdir,
     make_checkpoint,
     memory_arg,
     optional_env_for,
+    quoted_words,
     resolve_memory_gb,
     resolve_threads,
     run,
@@ -81,8 +84,8 @@ MAXBIN2 = (
 #: MaxBin2's EM iteration limit. 50 is MaxBin2's own default; it is passed explicitly so it can be
 #: lowered with `--maxbin2-max-iteration`. Cost per iteration scales with contigs x abundance
 #: columns: a user measured ~53 min/iteration on a 418k-contig water co-assembly with 36 samples,
-#: so MaxBin2 alone could run ~40 hours there (the CAMI2 tier table gives 13.8 CPU-hours for the
-#: whole `fast` preset).
+#: so MaxBin2 alone could run ~40 hours there (13.8 CPU-hours on CAMI2 for metaBAT2 + MaxBin2,
+#: the former `fast` preset).
 MAXBIN2_MAX_ITERATION = 50
 
 CONCOCT_CUTUP = "cut_up_fasta.py {assembly} -c 10000 --merge_last -b {bed} -o 0"
@@ -211,26 +214,22 @@ BIN_DIRS: Tuple[str, ...] = tuple("%s_bins" % b for b in BINNERS)
 #: The error message names the binner that needs the alignment.
 BAM_BINNERS: Tuple[str, ...] = ("concoct", "semibin2", "vamb", "comebin")
 
-#: Binner tiers, chosen by available compute. Measured on CAMI2 gastrointestinal, three samples,
-#: after bin_refinement. "Clean HQ" counts bins that are >=70% complete, <=10% contaminated and
-#: non-chimeric by GUNC, joined per bin:
+#: Binner tiers. Measured on CAMI2 gastrointestinal, three samples, after bin_refinement. "Clean
+#: HQ" counts bins that are >=70% complete, <=10% contaminated and non-chimeric by GUNC, joined per
+#: bin:
 #:
 #:     tier       binners                        HQ   clean HQ   clean/HQ   cpu-hours
-#:     very-fast  metaBAT2                        37      35       94.6%       4.8
-#:     fast       metaBAT2 + MaxBin2              71      59       83.1%       7.1
 #:     default    metaBAT2 + SemiBin2            131     114       87.0%      86.8  (17 on a GPU)
-#:     gpu        metaBAT2 + SemiBin2 + COMEBin  183     177       96.7%      52.8  (on a GPU)
+#:     deep       metaBAT2 + SemiBin2 + COMEBin  183     177       96.7%      52.8  (on a GPU)
 #:
-#: End to end on per-sample assemblies (reads in, MAGs out), the four tiers return 36, 41, 53 and 60
-#: clean MAGs for 8.8, 13.8, 43.8 and 120.7 cpu-hours of binning and refinement, against metaWRAP
-#: 1.3.0's 48 for 52.5. `default` is the first tier measured that beats metaWRAP 1 on both counts.
+#: End to end on per-sample assemblies (reads in, MAGs out), `default` returns 53 clean MAGs and
+#: `deep` 60, for 43.8 and 120.7 cpu-hours of binning and refinement, against metaWRAP 1.3.0's 48
+#: for 52.5.
 #:
-#: **Why `gpu` is three binners rather than COMEBin alone.** On the gold assembly the trio and COMEBin
-#: alone tie - 177 clean MAGs against 176 - which is what the ensemble used to be dropped for. End to
-#: end on per-sample assemblies they do not tie: the trio returns 60 clean MAGs against COMEBin's 57.
-#: The gold assembly flatters a single strong binner, because there the contigs are long and clean
-#: enough that one model can place nearly everything; on a real assembly there is more that one model
-#: gets wrong and another does not.
+#: **Why `deep` is three binners rather than COMEBin alone.** On the gold assembly the trio and
+#: COMEBin alone return 177 and 176 clean MAGs. End to end on per-sample assemblies the trio returns
+#: 60 against COMEBin's 57. On the gold assembly the contigs are long and clean enough for one model
+#: to place nearly everything; on a real assembly the binners make different errors.
 #:
 #: Members were chosen by complementarity: each clean high-quality bin was assigned to the reference
 #: genome owning most of its sequence, and unions were taken over pairs and trios. The binners are
@@ -245,32 +244,34 @@ BAM_BINNERS: Tuple[str, ...] = ("concoct", "semibin2", "vamb", "comebin")
 #: VAMB costs 4.9 cpu-hours on a GPU (67 on a CPU) and CONCOCT 238. metaBAT2 is also the most widely
 #: validated of the six.
 #:
-#: The tiers are not supersets of one another and "stepping up can only add genomes" does not hold:
-#: `fast` runs MaxBin2, which `default` and `gpu` do not. What holds is that each tier recovers more
-#: clean MAGs than the one below it.
-#:
-#: `gpu` needs a GPU. COMEBin on CPU reached epoch 20 of 200 after 305 cpu-hours and was stopped;
-#: on one GPU the same run finishes in 40. `gpu` therefore defaults to `--device cuda` (see
+#: `deep` needs a GPU. COMEBin on CPU reached epoch 20 of 200 after 305 cpu-hours and was stopped;
+#: on one GPU the same run finishes in 40. `deep` therefore defaults to `--device cuda` (see
 #: GPU_PRESETS).
 #:
-#: `default` needs the learned-binner env (~1.5 GB of pytorch), for 114 clean MAGs against `fast`'s
-#: 59. `fast` (the previous default) is for a quick look.
+#: The two hidden entries are the former `fast` and `very-fast` presets (metaBAT2 + MaxBin2, and
+#: metaBAT2 alone). They still run, so existing sheets and scripts keep working, but they are left
+#: out of --help, error messages and the docs: end to end they returned 41 and 36 clean MAGs, fewer
+#: than metaWRAP 1's 48.
 PRESETS: Dict[str, Tuple[str, ...]] = {
-    "very-fast": ("metabat2",),
-    "fast": ("metabat2", "maxbin2"),
     "default": ("metabat2", "semibin2"),
     # Three different algorithm families. See the note above for the margin over COMEBin alone, and
     # for why the third member is metaBAT2 and not the binner that adds one genome to the union.
-    "gpu": ("metabat2", "semibin2", "comebin"),
+    "deep": ("metabat2", "semibin2", "comebin"),
+    # Hidden: accepted, not listed.
+    "fast": ("metabat2", "maxbin2"),
+    "very-fast": ("metabat2",),
 }
 
-#: Older preset names that are still accepted, mapped to the current name. `gpu` was called `slow`
-#: before it was renamed after the hardware it needs.
-PRESET_ALIASES: Dict[str, str] = {"slow": "gpu"}
+#: The presets --help, error messages and the docs list. The rest of PRESETS is hidden.
+ADVERTISED_PRESETS: Tuple[str, ...] = ("default", "deep")
+
+#: Older preset names that are still accepted, mapped to the current name. `deep` was called `slow`
+#: up to 2.1.3 and `gpu` in 2.1.4.
+PRESET_ALIASES: Dict[str, str] = {"gpu": "deep", "slow": "deep"}
 
 #: Presets whose learned binners need a GPU to finish in reasonable time. They default to
 #: ``--device cuda``; an explicit ``--device`` overrides this.
-GPU_PRESETS = frozenset({"gpu"})
+GPU_PRESETS = frozenset({"deep"})
 
 
 def resolve_preset(name: Optional[str]) -> Optional[str]:
@@ -280,15 +281,26 @@ def resolve_preset(name: Optional[str]) -> Optional[str]:
     return PRESET_ALIASES.get(name, name)
 
 
+def preset_name(value: str) -> str:
+    """argparse type for ``--preset``: any preset or alias. The error lists the advertised ones.
+
+    ``choices=`` would print every accepted name in the usage line and in the error.
+    """
+    if value in PRESETS or value in PRESET_ALIASES:
+        return value
+    raise argparse.ArgumentTypeError(
+        "invalid preset %r (choose from %s)" % (value, ", ".join(ADVERTISED_PRESETS))
+    )
+
+
 #: The tier a pipeline run uses when its sheet names no binner. Named here rather than as a second
 #: list of flags in the driver, so the shipped default and the tier table cannot disagree.
 #:
 #: `default` beats metaWRAP 1 on both counts end to end on per-sample assemblies: 53 clean
-#: high-quality MAGs against 48, for 43.8 cpu-hours against 52.5. `fast`, the previous default,
-#: returns 41 for 13.8.
+#: high-quality MAGs against 48, for 43.8 cpu-hours against 52.5.
 #:
 #: A plain run therefore needs metawrap2-learned (~1.5 GB of pytorch), which `quickstart` and
-#: `install-env --binning-only` build. `--preset fast` restores the old behaviour.
+#: `install-env --binning-only` build.
 DEFAULT_PRESET = "default"
 
 #: The first three columns of a jgi-format depth table. Checked because metaBAT2 bins any TSV
@@ -318,11 +330,12 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--preset",
-        choices=tuple(PRESETS) + tuple(PRESET_ALIASES),
-        help="which binners to run, chosen by how much compute you have (see PRESETS for the measured "
-        "basis). Ignored if you name binners yourself. 'gpu' adds COMEBin and trains SemiBin2 and "
-        "COMEBin on a GPU (--device cuda unless --device is given); on CPU COMEBin did not finish "
-        "three CAMI2 samples in 280 CPU-hours. 'slow' is the old name for 'gpu'",
+        type=preset_name,
+        metavar="{%s}" % ",".join(ADVERTISED_PRESETS),
+        help="which binners to run. 'default' is metaBAT2 + SemiBin2. 'deep' adds COMEBin and "
+        "trains SemiBin2 and COMEBin on a GPU (--device cuda unless --device is given); on CPU "
+        "COMEBin did not finish three CAMI2 samples in 280 CPU-hours. Ignored if you name binners "
+        "yourself",
     )
     p.add_argument("--metabat2", action="store_true", help="bin with metaBAT2")
     p.add_argument("--maxbin2", action="store_true", help="bin with MaxBin2")
@@ -351,8 +364,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         metavar="{cpu,cuda,cuda:N,auto}",
         help="where the learned binners (SemiBin2, VAMB, COMEBin) train. 'auto' uses a GPU if "
         "torch can see one in that binner's env and the CPU otherwise; the default is cpu so that "
-        "a run is reproducible on any host (see DEFAULT_LEARNED_DEVICE), except under --preset gpu, "
-        "which defaults to cuda",
+        "a run is reproducible on any host (see DEFAULT_LEARNED_DEVICE), except under "
+        "--preset deep, which defaults to cuda",
     )
     p.add_argument(
         "--gpu-strict",
@@ -546,12 +559,13 @@ def _bam_paths(work: str) -> List[str]:
     return sorted(os.path.join(work, f) for f in listdir(work) if f.endswith(".bam"))
 
 
-def _bams(work: str) -> str:
+def _bams(work: str) -> Raw:
+    """The sample BAMs in *work*, shell-quoted, for a template's ``{bams}`` field."""
     bams = _bam_paths(work)
     # Under --dry-run no alignment ran, so show a placeholder in the printed command.
     if not bams and dry_run():
-        return os.path.join(work, "<sample>.bam")
-    return " ".join(bams)
+        return quoted_words([os.path.join(work, "<sample>.bam")])
+    return quoted_words(bams)
 
 
 #: Name of the shared contig x sample depth table inside ``work_files``.
@@ -760,7 +774,8 @@ def _run_metabat2(args, env, work, assembly_copy, depth):
     metabat_len = max(args.min_len, METABAT_MIN_LEN)
     comm("Starting binning with metaBAT2...")
     run(
-        METABAT2.format(
+        fill_command(
+            METABAT2,
             assembly=assembly_copy,
             depth=depth,
             out=args.output,
@@ -843,7 +858,8 @@ def _run_maxbin2(args, env, work, assembly_copy, depth):
         markers = MAXBIN_MARKERS_UNIVERSAL if args.universal else MAXBIN_MARKERS_BACTERIAL
         maxbin_out = os.path.join(work, "maxbin2_out")
         run(
-            MAXBIN2.format(
+            fill_command(
+                MAXBIN2,
                 assembly=assembly_copy,
                 markers=markers,
                 threads=args.threads,
@@ -875,7 +891,8 @@ def _run_maxbin2(args, env, work, assembly_copy, depth):
     ensure_dir(maxbin_out)
     comm("Starting binning with MaxBin2...")
     run(
-        MAXBIN2.format(
+        fill_command(
+            MAXBIN2,
             assembly=assembly_copy,
             markers=markers,
             threads=args.threads,
@@ -912,20 +929,20 @@ def _run_concoct(args, env, work, assembly_copy):
         for f in sorted(listdir(work)):
             if f.endswith(".bam"):
                 run(
-                    SAMTOOLS_INDEX.format(threads=args.threads, bam=os.path.join(work, f)),
+                    fill_command(SAMTOOLS_INDEX, threads=args.threads, bam=os.path.join(work, f)),
                     env=env,
                     tool="samtools index",
                 )
         comm("cutting up contigs into 10kb fragments for CONCOCT...")
         run(
-            CONCOCT_CUTUP.format(assembly=assembly_copy, bed=bed),
+            fill_command(CONCOCT_CUTUP, assembly=assembly_copy, bed=bed),
             env=env,
             tool="cut_up_fasta.py",
             log_path=comp,
         )
         comm("estimating contig fragment coverage...")
         run(
-            CONCOCT_COVERAGE.format(bed=bed, bams=_bams(work)),
+            fill_command(CONCOCT_COVERAGE, bed=bed, bams=_bams(work)),
             env=env,
             tool="concoct_coverage_table.py",
             log_path=depth,
@@ -935,7 +952,8 @@ def _run_concoct(args, env, work, assembly_copy):
     ensure_dir(concoct_out)
     comm("Starting binning with CONCOCT...")
     run(
-        CONCOCT.format(
+        fill_command(
+            CONCOCT,
             min_len=args.min_len,
             threads=args.threads,
             cov=depth,
@@ -953,7 +971,7 @@ def _run_concoct(args, env, work, assembly_copy):
     merged = os.path.join(concoct_out, "clustering_gt%d_merged.csv" % args.min_len)
     comm("merging 10kb fragments back into contigs")
     run(
-        CONCOCT_MERGE.format(clustering=clustering),
+        fill_command(CONCOCT_MERGE, clustering=clustering),
         env=env,
         tool="merge_cutup_clustering.py",
         log_path=merged,
@@ -1054,9 +1072,9 @@ def _run_semibin2(args, env, work, assembly_copy):
     }
     if separator:
         comm("multi-sample mode: SemiBin2 fits one model over every sample's contigs")
-        command = SEMIBIN2_MULTI.format(separator=separator, **fields)
+        command = fill_command(SEMIBIN2_MULTI, separator=separator, **fields)
     else:
-        command = SEMIBIN2.format(**fields)
+        command = fill_command(SEMIBIN2, **fields)
     if getattr(args, "long_read_type", None):
         # SemiBin2's default features assume short-read coverage. The type comes from
         # metawrap2.longreads, which also sets Flye's flag and minimap2's preset.
@@ -1164,7 +1182,8 @@ def _run_vamb(args, env, work, assembly_copy):
         shutil.rmtree(out)
     comm("Starting binning with VAMB...")
     run(
-        VAMB.format(
+        fill_command(
+            VAMB,
             out=out,
             assembly=assembly_copy,
             bamdir=work,
@@ -1233,7 +1252,8 @@ def _run_comebin(args, env, work, assembly_copy):
     ensure_dir(out)
     comm("Starting binning with COMEBin...")
     run(
-        COMEBIN.format(
+        fill_command(
+            COMEBIN,
             assembly=_comebin_assembly(args, work, assembly_copy),
             out=out,
             bamdir=work,
@@ -1299,7 +1319,6 @@ def _apply_preset(args) -> None:
     given = getattr(args, "preset", None)
     preset = resolve_preset(given)
     if given and given != preset:
-        comm("--preset %s is the old name for --preset %s" % (given, preset))
         args.preset = preset
     if getattr(args, "device", None) is None:
         use_gpu = preset in GPU_PRESETS and not named
@@ -1321,8 +1340,8 @@ def _apply_preset(args) -> None:
         error(
             "You must select at least one binning method: --metabat2, --maxbin2, --concoct, "
             "--semibin2, --vamb, --comebin.\n"
-            "Or pick a tier with --preset {very-fast,fast,default,gpu} and let it choose - see "
-            "`--help`."
+            "Or pick a tier with --preset {%s} and let it choose - see `--help`."
+            % ",".join(ADVERTISED_PRESETS)
         )
 
 
@@ -1499,7 +1518,7 @@ def main(argv: List[str]) -> int:
                 for bam in _bam_paths(work):
                     if not os.path.isfile(bam + ".bai"):
                         run(
-                            SAMTOOLS_INDEX.format(threads=args.threads, bam=bam),
+                            fill_command(SAMTOOLS_INDEX, threads=args.threads, bam=bam),
                             env=env,
                             tool="samtools index",
                         )

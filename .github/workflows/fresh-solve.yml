@@ -1,40 +1,108 @@
 name: Fresh env solve
 
-# Solve an environment from its yaml (not its lockfile) and run a real module against the result.
+# Solve each environment from its yaml (not its lockfile) and run its tools.
 #
 # Every pin in src/metawrap2/envs/*.yaml is a floor with no ceiling, so the environment a user
 # gets today is untested. When a wrapped tool renames a flag, drops an option or changes a
 # default, `install-env` still solves and the pipeline breaks on the first run. The committed
 # lockfiles (`--from-lock`) install the versions that worked when the lock was written, so they
-# do not show this.
+# do not show this. The monthly Lockfiles workflow re-solves every yaml but runs nothing in them.
 #
-# Scope: the read-level environment (metawrap2-reads) and `read_qc`, the first step of every
-# pipeline, not all thirteen environments, which would take over an hour of runner time. The
-# monthly Lockfiles workflow re-solves them all but runs nothing against them, so a tool whose
-# CLI changed still solves and writes a lockfile. This job runs the tools. It can be widened
-# (binning next).
+# Scope:
+#   weekly   - the environments `quickstart` builds: every env in config.MODULE_ENVS, plus the
+#              separate envs a default run uses (CheckM2, and the learned binners of the default
+#              binning tier). One runner per env, run in parallel.
+#   monthly  - the opt-in envs (GTDB-Tk, eggNOG-mapper, RGI, TRACS, AMBER). They are used only when
+#              a flag asks for them, so a weekly check would cost runner time for few users. Their
+#              large databases are not needed here: `doctor --tools-only` checks the tools only.
+#   on demand - one module or env (`read_qc`, `binning`, `learned`, ...), or `default`, `opt-in`
+#              or `all`.
 #
-# Needs network and ~15 minutes, so it runs weekly and on demand, not per PR.
+# Each env gets one cheap check, `metawrap2 doctor <env> --tools-only`, which runs every tool's
+# version or help command. The read env also runs read_qc on the committed fixture, since that
+# checks the arguments MetaWrap2 passes and not only that the tools start.
+#
+# Each env takes about 5 to 20 minutes, so this runs on a schedule and on demand, not per PR.
 
 on:
   schedule:
     # Monday, early, so a week of upstream drift is still a readable diff.
     - cron: "41 5 * * 1"
+    # The opt-in envs, on the 15th of each month.
+    - cron: "41 6 15 * *"
   workflow_dispatch:
     inputs:
       module:
-        description: "Module whose environment to solve fresh (read_qc, binning, ...)"
-        default: "read_qc"
+        description: "Module or env to solve fresh (read_qc, binning, learned, ...), or default, opt-in or all"
+        default: "default"
+
+env:
+  OPT_IN_CRON: "41 6 15 * *"
 
 jobs:
-  solve:
-    name: Solve ${{ github.event.inputs.module || 'read_qc' }} fresh and run it
+  envs:
+    name: List the environments
     runs-on: ubuntu-latest
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Installed so the list comes from the same code as `quickstart`: a new env is covered the
+      # day it is added to MODULE_ENVS or DEFAULT_OPTIONAL_ENVS.
+      - run: pip install .
+      - id: list
+        shell: bash
+        env:
+          WANTED: ${{ github.event.inputs.module }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [ "$SCHEDULE" = "$OPT_IN_CRON" ]; then WANTED=opt-in; fi
+          names=$(python - "${WANTED:-default}" <<'EOF'
+          import json
+          import sys
+
+          from metawrap2.commands.quickstart import _default_run_envs
+          from metawrap2.config import ALL_MODULE_ENVS, OPTIONAL_ENVS, resolve_env_name
+
+          # The same list `quickstart` builds with no modules named.
+          default = [env.removeprefix("metawrap2-") for env in ALL_MODULE_ENVS]
+          default += [name for name in _default_run_envs([]) if name not in default]
+          built = {resolve_env_name(name) for name in default}
+          opt_in = sorted(
+              {env.removeprefix("metawrap2-") for env in OPTIONAL_ENVS.values() if env not in built}
+          )
+          groups = {"default": default, "opt-in": opt_in, "all": default + opt_in}
+          wanted = sys.argv[1]
+          names = groups.get(wanted, wanted.split())
+          unknown = [name for name in names if resolve_env_name(name) is None]
+          if unknown:
+              sys.exit(
+                  "No conda env for: %s. Give a module or env name, or default, opt-in or all."
+                  % " ".join(unknown)
+              )
+          print(json.dumps(names))
+          EOF
+          )
+          echo "names=$names" >> "$GITHUB_OUTPUT"
+          echo "Environments: $names"
+
+  solve:
+    name: Solve ${{ matrix.name }} fresh and run it
+    needs: envs
+    runs-on: ubuntu-latest
+    strategy:
+      # One env breaking upstream must not hide the state of the others.
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.envs.outputs.names) }}
     defaults:
       run:
         shell: bash -el {0}
     env:
-      MODULE: ${{ github.event.inputs.module || 'read_qc' }}
+      NAME: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,34 +115,57 @@ jobs:
 
       - run: pip install .
 
+      # DOCTOR_NAMES is what to pass to `doctor`. An env base name (`reads`) checks every tool in
+      # the env. `annotate` is both an env and a module, and `doctor annotate` checks only that
+      # module's tools, so the env's other modules are named as well.
+      - name: Find the env name
+        run: |
+          python - "$NAME" >> "$GITHUB_ENV" <<'EOF'
+          import sys
+
+          from metawrap2.config import MODULE_ENVS, resolve_env_name
+
+          name = sys.argv[1]
+          env = resolve_env_name(name)
+          names = [name]
+          if env == "metawrap2-" + name and name in MODULE_ENVS:
+              names = [module for module, module_env in MODULE_ENVS.items() if module_env == env]
+          print("ENV_NAME=%s" % env)
+          print("DOCTOR_NAMES=%s" % " ".join(names))
+          EOF
+
       # No --from-lock and no --no-test: solve the yaml as a new user would, then let
       # install-env's own verification run, which catches a tool that no longer starts.
       - name: Solve the environment from its yaml
-        run: metawrap2 install-env "$MODULE" -t 1 --force
+        run: metawrap2 install-env "$NAME" -t 1 --force
 
-      # Always, and before the run: if the solved environment does not work, its versions are
+      # Always, and before the checks: if the solved environment does not work, its versions are
       # needed first.
       - name: Record the solved versions
         if: always()
         run: |
-          env_name=$(python -c "import sys; from metawrap2.config import MODULE_ENVS; print(MODULE_ENVS[sys.argv[1]])" "$MODULE")
-          echo "## Solved $env_name" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Solved $ENV_NAME" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          conda list -n "$env_name" | tee -a "$GITHUB_STEP_SUMMARY"
+          conda list -n "$ENV_NAME" | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      # `doctor --tools-only` runs each tool's version or help command without checking databases.
+      # The runner has no databases, and `check` would fail on each missing one (BMTAGGER_DB, ...).
       - name: Check the tools are callable
-        run: metawrap2 check "$MODULE"
+        run: |
+          read -ra names <<< "$DOCTOR_NAMES"
+          metawrap2 doctor "${names[@]}" --tools-only
 
       # Checks that the tools still take the arguments MetaWrap2 passes. The committed fixture is
       # small (4,000 read pairs) because only the commands and output locations are being tested.
-      - name: Run the module on the committed fixture
-        if: env.MODULE == 'read_qc'
+      # --skip-bmtagger: there is no host index here (about 20 GB), and the fixture is simulated.
+      - name: Run read_qc on the committed fixture
+        if: env.ENV_NAME == 'metawrap2-reads'
         run: |
           metawrap2 read_qc \
             -1 benchmarks/fixtures/tiny/reads/sample_1_1.fq.gz \
             -2 benchmarks/fixtures/tiny/reads/sample_1_2.fq.gz \
-            -o qc_out -t 2
+            -o qc_out -t 2 --skip-bmtagger
           ls -la qc_out
           # Fail if read_qc exited 0 but wrote no reads. The file names are read_qc's documented
           # outputs, so a renamed output fails here instead of in the next step.
@@ -84,7 +175,7 @@ jobs:
       - name: Say what a failure here means
         if: failure()
         run: |
-          echo "::error::A freshly solved $MODULE environment does not work. This is the"\
+          echo "::error::A freshly solved $NAME environment ($ENV_NAME) does not work. This is the"\
                "floors-with-no-ceilings failure mode: nothing in the repository changed, an"\
                "upstream package did. Compare the versions in the step summary with"\
                "src/metawrap2/envs/locks/, find the tool that moved, and either cap it in its"\

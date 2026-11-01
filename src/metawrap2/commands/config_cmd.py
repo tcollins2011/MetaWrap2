@@ -35,17 +35,21 @@ use_conda_envs = true
 # The budget is divided between concurrent steps: `metawrap2 run -j 4` gives each of four samples
 # a quarter of it.
 #
-# max_thread_fraction = 0.5   # half the cores (cgroup- and affinity-aware, not just nproc)
-# max_memory_fraction = 0.8   # 80% of RAM, what an unset -m resolves to
-# max_disk_fraction = 0.7     # stop the run if a filesystem it writes to passes 70% full
-# max_gpus = 0                # unset means every GPU this machine has; 0 means use none
-# gpu_strict = false          # refuse a GPU step when another process already holds the card.
-#                             # Use for benchmarks: a shared card inflates the step's wall time,
-#                             # and its GPU cost cannot be separated from the other job's.
+# Share of the cores a run may use (cgroup- and affinity-aware, not just nproc).
+# max_thread_fraction = 0.5   # fraction of cores
+# Share of RAM a run may use; an unset -m resolves to this.
+# max_memory_fraction = 0.8   # fraction of RAM
+# Stop the run if a filesystem it writes to gets fuller than this.
+# max_disk_fraction = 0.7     # fraction full
+# How many GPUs a run may use. Unset means every GPU this machine has; 0 means none.
+# max_gpus = 0                # GPUs
+# Refuse a GPU step when another process already holds the card. Use for benchmarks: a shared
+# card inflates the step's wall time, and its GPU cost cannot be separated from the other job's.
+# gpu_strict = false          # true or false
 #
 # Absolutes win over fractions when you give them, and are still clamped to the machine:
-# max_threads = 32
-# max_memory_gb = 128
+# max_threads = 32            # threads
+# max_memory_gb = 128         # GB
 #
 # Every one of these has a command-line equivalent for a single run: --max-threads,
 # --max-memory-gb, --max-disk-fraction, --max-gpus, and so on. See `metawrap2 --help`.

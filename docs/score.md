@@ -45,13 +45,17 @@ from its own row.
 | `-c`, `--completeness` | completeness floor for the passing count (default 70) |
 | `--contamination` | contamination ceiling for the passing count (default 10) |
 | `--checkm1` | score with CheckM1 instead of CheckM2 |
-| `--no-gunc` | skip the chimerism check and its reference database |
+| `--no-gunc` | skip the chimerism check and its reference database (`--skip-gunc`, as in `bin_refinement`, also works) |
 | `--score-everything` | score genomes whose size rules them out, instead of recording 0/100 |
 
 `-x` is the FASTA extension here, as in CheckM, GUNC and GTDB-Tk, and not the contamination ceiling
 as in `bin_refinement`. `-c` means completeness in both commands. The contamination ceiling has only
 the long form, `--contamination`. metaWRAP 1 writes `.fa` and MetaWrap2 writes `.fasta`, so pass
-`-x .fa` for metaWRAP 1 bin sets.
+`-x .fa` for metaWRAP 1 bin sets. A number after `-x` (`-x 10`) is refused with a pointer to
+`--contamination`.
+
+When no input directory holds a genome with the extension, `score` warns for each one and exits 1
+with `SCORING FINISHED WITH NOTHING TO DO`.
 
 ## Requirements
 

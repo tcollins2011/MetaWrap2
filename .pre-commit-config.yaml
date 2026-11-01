@@ -33,12 +33,6 @@ repos:
       - id: check-merge-conflict
   - repo: local
     hooks:
-      - id: no-legacy-scripts
-        name: no .sh/.pl/.R (MetaWrap2 is Python-only)
-        entry: bash -c 'if find . -path ./.git -prune -o \( -name "*.sh" -o -name "*.pl" -o -name "*.R" \) -print | grep .; then exit 1; fi'
-        language: system
-        pass_filenames: false
-
       # --- the pre-push gate -------------------------------------------------------------
       # These run once per push, not per commit, because they are slower and check the whole tree.
       - id: black-check

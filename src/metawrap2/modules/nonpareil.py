@@ -28,6 +28,7 @@ from ..cliformat import make_parser
 from ..config import MODULE_ENVS, load_settings
 from ..constants import TSV_SUFFIX
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     comm,
@@ -35,6 +36,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     require_file,
     resolve_threads,
@@ -291,7 +293,8 @@ def _run_one(
     npo = prefix + ".npo"
     prepared, forced_format = _prepare(args, kernel, name, reads, workdir, lengths)
     rc = run(
-        NONPAREIL.format(
+        fill_command(
+            NONPAREIL,
             reads=prepared,
             kernel=kernel,
             format=forced_format or _infer_format(reads, args.format),
@@ -302,7 +305,7 @@ def _run_one(
             k=args.kmer_size,
             # Only for the alignment kernel, which implements it, so run_commands.txt does not
             # suggest a seeded k-mer run.
-            seed=" -r %d" % args.seed if kernel == "alignment" else "",
+            seed=Raw(" -r %d" % args.seed if kernel == "alignment" else ""),
         ),
         env=env,
         tool="nonpareil",

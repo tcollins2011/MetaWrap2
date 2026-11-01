@@ -7,6 +7,8 @@ already look complete are skipped, so re-running is safe.
     metawrap2 install-db --list            # what is available, how big, who needs it
     metawrap2 install-db checkm taxdump    # just these two
     metawrap2 install-db --all             # everything (large: see --list for sizes)
+    metawrap2 install-db --for viruses     # what one module needs
+    metawrap2 install-db --for-sheet samples.toml   # what a study's planned steps need
 
 ``--all`` takes many hours and several hundred GB. ``--small`` installs a capped variant where one
 exists, for smoke tests.
@@ -24,6 +26,7 @@ import contextlib
 import glob
 import gzip
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -31,7 +34,7 @@ import sys
 import tarfile
 import threading
 import time
-from typing import Callable, Deque, Dict, Iterator, List, NamedTuple, Optional, Set, Tuple
+from typing import Callable, Deque, Dict, Iterator, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from .. import interrupt as _interrupt
 from ..benchmark import fetch as _fetcher
@@ -82,6 +85,9 @@ class Database(NamedTuple):
     #: metapackage directory includes its version (``S6.5.0.GTDB_r232.metapackage_...``); the
     #: versioned path is configured so the reference version stays visible.
     key_glob: Optional[str] = None
+    #: The archive is deleted only after it is unpacked, so the install briefly needs the download
+    #: and the unpacked data on disk together.
+    archive_removed: bool = False
 
     @property
     def size(self) -> str:
@@ -144,6 +150,7 @@ DATABASES: Dict[str, Database] = {
         describe="GUNC proGenomes 2.1 reference (diamond .dmnd, about twice the download size "
         "once gunzipped; GUNC runs by default)",
         key_file="gunc_db_progenomes2.1.dmnd",
+        archive_removed=True,
     ),
     "gtdbtk": Database(
         key="GTDBTK_DATA_PATH",
@@ -153,6 +160,7 @@ DATABASES: Dict[str, Database] = {
         small_size=None,
         describe="GTDB-Tk reference package, installed by its download-db.sh (the tarball is "
         "deleted after unpacking, so the install needs about twice this space free)",
+        archive_removed=True,
     ),
     "dbcan": Database(
         key="DBCAN_DB",
@@ -180,6 +188,7 @@ DATABASES: Dict[str, Database] = {
         # The release is not named here; it is defined once, in EGGNOG_DB_VERSION below.
         describe="eggNOG annotation SQLite (39 GB unpacked) and the DIAMOND database of eggNOG "
         "proteins (8.7 GB)",
+        archive_removed=True,
     ),
     "bakta": Database(
         key="BAKTA_DB",
@@ -238,9 +247,10 @@ DATABASES: Dict[str, Database] = {
         on_disk="9.7 GB",
         small_size=None,
         describe="SingleM GTDB marker metapackage (single-copy marker genes + their taxonomy). "
-        "Downloads at 150-300 KB/s, so the 2.2 GB takes 2-4 hours (the other databases here "
-        "download at 0.5-20 MB/s); start it early",
+        "`singlem data` fetches it from Zenodo over one connection, without aria2c, so the time "
+        "depends on Zenodo: from about 10 minutes to 2-4 hours at 150-300 KB/s",
         key_glob="*.smpkg.zb",
+        archive_removed=True,
     ),
     "kofam": Database(
         key="KOFAM_DB",
@@ -453,7 +463,57 @@ def _another_writer(part: str) -> bool:
     return True
 
 
-def _fetch(url: str, dest: str) -> bool:
+#: Exit codes of the two downloaders, in words, for the failure message.
+ARIA2C_EXIT_CODES: Dict[int, str] = {
+    1: "unknown error",
+    2: "timed out",
+    3: "file not found on the server",
+    5: "download too slow",
+    6: "network problem",
+    9: "not enough disk space",
+    19: "could not resolve the host name",
+    22: "unexpected HTTP response",
+    24: "HTTP authorization failed",
+    29: "server overloaded or down for maintenance",
+}
+CURL_EXIT_CODES: Dict[int, str] = {
+    6: "could not resolve the host name",
+    7: "could not connect to the server",
+    18: "transfer ended early",
+    22: "the server returned an HTTP error",
+    28: "timed out",
+    35: "TLS handshake failed",
+    52: "the server sent no reply",
+    56: "connection broken while receiving",
+}
+#: The exit codes that mean the server could not be reached. A source that is down is usually
+#: down for minutes or hours, so these are retried after the longer waits below.
+UNREACHABLE = {"aria2c": {2, 6, 19, 29}, "curl": {6, 7, 28, 35, 52, 56}}
+#: Seconds to wait before each retry of a download whose server could not be reached.
+UNREACHABLE_DELAYS: Tuple[float, ...] = (15.0, 60.0, 240.0)
+
+
+def _exit_code(problem: str) -> Tuple[str, Optional[int]]:
+    """The downloader and exit code named in a ``fetch.download`` failure, if there is one."""
+    found = re.search(r"\b(aria2c|curl) exited (-?\d+)", problem)
+    return (found.group(1), int(found.group(2))) if found else ("", None)
+
+
+def _explain(problem: str) -> str:
+    """*problem* with the downloader's exit code put into words, where it is known."""
+    program, code = _exit_code(problem)
+    meaning = {"aria2c": ARIA2C_EXIT_CODES, "curl": CURL_EXIT_CODES}.get(program, {}).get(code or 0)
+    problem = problem.replace(" after 1 attempt(s)", "")
+    return "%s (%s)" % (problem, meaning) if meaning else problem
+
+
+def _quiet_attempts(line: str) -> None:
+    """``say`` for ``fetch.download``: drop its per-attempt line, which ``_fetch`` prints itself."""
+    if not line.lstrip().startswith("attempt "):
+        print(line)
+
+
+def _fetch(url: str, dest: str, delays: Optional[Sequence[float]] = None) -> bool:
     """Download *url* to *dest*, verified, resuming a partial file that no other process is writing.
 
     The transfer is ``benchmark.fetch.download``: several ranged connections with aria2c when it is
@@ -464,6 +524,10 @@ def _fetch(url: str, dest: str) -> bool:
     ``_run`` is passed in so the child still leads its own process group and writes into this
     thread's capture buffer. The live ``.part`` check below stays here: it guards against two
     copies of this command downloading the same file.
+
+    Each attempt is one ``fetch.download`` call. A server that cannot be reached is retried after
+    *delays* (default ``UNREACHABLE_DELAYS``); any other failure is retried as ``fetch.download``
+    retries it (``fetch.ATTEMPTS`` attempts, ``fetch.RETRY_DELAY`` doubling).
     """
     if os.path.isfile(dest) and os.path.getsize(dest):
         print("  already downloaded: %s" % os.path.basename(dest))
@@ -471,11 +535,30 @@ def _fetch(url: str, dest: str) -> bool:
     tmp = _fetcher.partial_path(dest)
     if os.path.isfile(tmp) and _another_writer(tmp):
         return False
-    problem = _fetcher.download(url, dest, run=_run)
-    if problem:
-        print("  download failed: %s\n  %s" % (url, problem))
-        return False
-    return True
+    long_waits = list(UNREACHABLE_DELAYS if delays is None else delays)
+    short_waits = [_fetcher.RETRY_DELAY * 2**i for i in range(_fetcher.ATTEMPTS - 1)]
+    attempt = 0
+    while True:
+        attempt += 1
+        problem = _fetcher.download(url, dest, run=_run, attempts=1, say=_quiet_attempts)
+        if not problem:
+            return True
+        if problem.endswith("is not installed"):
+            break
+        program, code = _exit_code(problem)
+        waits = long_waits if code in UNREACHABLE.get(program, ()) else short_waits
+        print("  attempt %d of %d failed: %s" % (attempt, len(waits) + 1, _explain(problem)))
+        if attempt > len(waits):
+            break
+        print("  retrying in %.0f s" % waits[attempt - 1])
+        time.sleep(waits[attempt - 1])
+    message = "download failed after %d attempt(s): %s\n  %s" % (attempt, url, _explain(problem))
+    print("  " + message)
+    # Also into the captured output, so the FAILED line at the end quotes it.
+    sink: Optional[Deque[str]] = getattr(_CAPTURED, "lines", None)
+    if sink is not None:
+        sink.extend(message.split("\n  "))
+    return False
 
 
 def _extract(archive: str, into: str) -> bool:
@@ -576,6 +659,11 @@ KRAKEN2_URL = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_20240904.t
 #: The standard build capped to 8 GB, for testing.
 KRAKEN2_SMALL_URL = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_08gb_20240904.tar.gz"
 GUNC_URL = "https://swifter.embl.de/~fullam/gunc/gunc_db_progenomes2.1.dmnd.gz"
+#: GUNC_URL is the database's only published source.
+GUNC_FAILED_NOTE = (
+    "The GUNC database has one download source. Until it can be installed, run bin_refinement "
+    "with --skip-gunc: it skips only the GUNC chimera check."
+)
 PFAM_BASE_URL = "https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release"
 PFAM_FILES = ("Pfam-A.hmm.gz", "Pfam-A.hmm.dat.gz")
 CARD_URL = "https://card.mcmaster.ca/latest/data"
@@ -1332,22 +1420,76 @@ def _human_gb(size_gb: float) -> str:
     return limits.human(size_gb * 1024**3)
 
 
-def _disk_line(path: str, need_gb: float) -> str:
-    """ "N GB needed, <filesystem> is X% full (ceiling Y%, Z of headroom)".
+def _held_archive_size(db: Database, small: bool) -> float:
+    """GB of archive still on disk while *db* is unpacked, or 0 if it is not deleted afterwards."""
+    if not db.archive_removed or (small and db.small_size):
+        return 0.0
+    return _planned_size(db, small, on_disk=False)
+
+
+def _space_needed(names: List[str], small: bool) -> Tuple[float, str]:
+    """GB of free space needed to install *names*, and a note on what it includes.
+
+    A database whose archive is deleted after unpacking needs its download and its unpacked size
+    at once (gtdbtk: 110 GB + 110 GB), so both count.
+    """
+    on_disk = sum(_planned_size(DATABASES[n], small, on_disk=True) for n in names)
+    held = {n: _held_archive_size(DATABASES[n], small) for n in names}
+    held = {n: size for n, size in held.items() if size}
+    if not held:
+        return on_disk, ""
+    if len(names) == 1:
+        db = DATABASES[names[0]]
+        note = "%s download + %s unpacked before the archive is removed" % (
+            db.download.lstrip("~"),
+            db.on_disk.lstrip("~"),
+        )
+    else:
+        note = "%s on disk + %s of archives kept until they are unpacked: %s" % (
+            _human_gb(on_disk),
+            _human_gb(sum(held.values())),
+            ", ".join(held),
+        )
+    return on_disk + sum(held.values()), note
+
+
+def _limits_config(config: Optional[str]):
+    """The ``[limits]`` of the config in effect, so its ``max_disk_fraction`` sets the ceiling.
+
+    Resolved as the modules resolve it, with the global ``--max-*`` flags applied on top by
+    ``limits.resolve``. A config that cannot be read gives the built-in limits, with a note.
+    """
+    from .. import limits
+    from ..config import load_settings
+
+    try:
+        return load_settings(config, strict=False).limits
+    except Exception as exc:  # noqa: BLE001 - a broken config must not stop the install
+        print("note: could not read [limits] from the config (%s); using the defaults" % exc)
+        return limits.LimitsConfig()
+
+
+def _disk_line(path: str, need_gb: float, limits_config=None, note: str = "") -> str:
+    """ "N GB needed (note), <filesystem> is X% full (ceiling Y%, Z of headroom)".
 
     Printed by both the plan and the real run, built from ``limits.disk_state`` as in
-    ``benchmark fetch``.
+    ``benchmark fetch``. *limits_config* is the config's ``[limits]`` (see ``_limits_config``).
+    A need above the headroom adds a warning line.
     """
     from .. import limits
 
     need = int(need_gb * 1024**3)
-    state = limits.disk_state(path, limits.resolve())
+    needed = limits.human(need) + " needed" + (" (%s)" % note if note else "")
+    state = limits.disk_state(path, limits.resolve(limits_config))
     if state is None:
-        return "%s needed; could not measure the filesystem holding %s" % (
-            limits.human(need),
-            path,
+        return "%s; could not measure the filesystem holding %s" % (needed, path)
+    line = "%s, %s" % (needed, state.describe())
+    if need > state.headroom_bytes:
+        line += (
+            "\nWARNING: that is more than the headroom below the disk ceiling; free space, "
+            "install fewer databases at once, or raise max_disk_fraction under [limits]."
         )
-    return "%s needed, %s" % (limits.human(need), state.describe())
+    return line
 
 
 # --- the dry run -------------------------------------------------------------------------
@@ -1440,12 +1582,18 @@ def _plan_steps(name: str, target: str, small: bool, present: bool) -> List[str]
 
 
 def _print_plan(
-    names: List[str], directory: str, small: bool, config_path: str, update_config: bool
+    names: List[str],
+    directory: str,
+    small: bool,
+    config_path: str,
+    update_config: bool,
+    limits_config=None,
 ) -> int:
     """Print the plan for *names* and return the exit code. Writes nothing, runs nothing."""
     print("\n[dry-run] Plan only: nothing is downloaded, unpacked, indexed or written.\n")
     download: List[str] = []
     on_disk: List[str] = []
+    missing: List[str] = []
     globbed = False
     for name in names:
         db = DATABASES[name]
@@ -1455,6 +1603,7 @@ def _print_plan(
         if present:
             print("  already present, would skip")
         else:
+            missing.append(name)
             download.append(_planned_text(db, small, on_disk=False))
             on_disk.append(_planned_text(db, small, on_disk=True))
         for step in _plan_steps(name, target, small, present):
@@ -1480,7 +1629,8 @@ def _print_plan(
                 _human_gb(needed),
             )
         )
-        print("  %s" % _disk_line(directory, needed))
+        space, note = _space_needed(missing, small)
+        print("  %s" % _disk_line(directory, space, limits_config, note).replace("\n", "\n  "))
     else:
         print("  Nothing to do: every database asked for is already installed.")
     if globbed:
@@ -1535,6 +1685,108 @@ def _set_config_keys(path: str, values: Dict[str, str]) -> None:
         fh.write("\n".join(lines).rstrip("\n") + "\n")
 
 
+# --- resolving what a module or a sheet needs ---------------------------------------------
+
+
+def _sheet_invocations(path: str) -> List[Tuple[str, List[str]]]:
+    """``(module, argv)`` for every step `metawrap2 run` would plan for the sheet at *path*.
+
+    Uses the same planner as `run`, so the sheet's ``[modules]`` flags decide which databases are
+    needed. Nothing is written: the output directory is only a name in the planned commands.
+    """
+    from . import run as _run
+
+    study = _run.study_from_directory(path) if os.path.isdir(path) else _run.load_sheet(path)
+    _run.resolve_steps(study)
+    steps = _run.plan_steps(study, _run.Layout("study"))
+    return [(step.module, list(step.argv)) for step in steps]
+
+
+def _needed_names(settings, invocations) -> Tuple[List[str], List[str]]:
+    """The install-db names *invocations* need and lack, and a note for each database skipped.
+
+    A database already usable at its configured path is skipped, as is one given on the command
+    line with its path flag. A key with no installer is noted with where to set it.
+    """
+    from .. import dbcheck as _dbcheck
+
+    names: List[str] = []
+    notes: List[str] = []
+    for entry in _dbcheck.resolve(settings, invocations):
+        name = _dbcheck.install_name(entry.key)
+        if entry.flag:
+            notes.append("%s: given with %s, not installed" % (entry.key, entry.flag))
+        elif entry.problem is None:
+            notes.append("%s: already set up at %s" % (entry.key, entry.path))
+        elif not name:
+            notes.append("%s: %s" % (entry.key, _dbcheck.install_hint(entry.key)))
+        elif name not in names:
+            names.append(name)
+    return names, notes
+
+
+def _print_needed(label: str, names: List[str], notes: List[str], small: bool) -> None:
+    """The databases to install for *label*, with download and on-disk sizes and their totals."""
+    print("\nDatabases needed by %s:\n" % label)
+    if names:
+        print("  %-10s %-11s %s" % ("name", "download", "on disk"))
+        for name in names:
+            db = DATABASES[name]
+            print(
+                "  %-10s %-11s %s"
+                % (name, _planned_text(db, small, False), _planned_text(db, small, True))
+            )
+        print(
+            "  %-10s %-11s %s"
+            % (
+                "total",
+                _human_gb(sum(_planned_size(DATABASES[n], small, False) for n in names)),
+                _human_gb(sum(_planned_size(DATABASES[n], small, True) for n in names)),
+            )
+        )
+    else:
+        print("  (none to install)")
+    for note in notes:
+        print("  %s" % note)
+
+
+def _resolve_for(args) -> Optional[List[str]]:
+    """The names asked for by --for and --for-sheet, after printing them; None on a bad value."""
+    from .. import dbcheck as _dbcheck
+    from ..config import load_settings
+
+    settings = load_settings(args.config)
+    names: List[str] = []
+    for text in args.for_modules or ():
+        try:
+            module, rest = _dbcheck.split_command(text)
+        except ValueError as exc:
+            print(str(exc))
+            return None
+        found, notes = _needed_names(settings, [(module, rest)])
+        needs = _dbcheck.module_needs(module)
+        if needs and all(n.when for n in needs) and not _dbcheck.active_needs(module, rest):
+            # Every database of this module is turned on by a flag (annotate --kofam).
+            notes.append(
+                '%s reads a database only with %s; add the flags, as in --for "%s %s"'
+                % (module, ", ".join(dict.fromkeys(n.when for n in needs)), module, needs[0].when)
+            )
+        _print_needed(" ".join([module] + rest), found, notes, args.small)
+        names += [n for n in found if n not in names]
+    if args.for_sheet:
+        try:
+            invocations = _sheet_invocations(args.for_sheet)
+        except (OSError, ValueError, TypeError) as exc:
+            print("Cannot read %s: %s" % (args.for_sheet, exc))
+            return None
+        found, notes = _needed_names(settings, invocations)
+        modules = list(dict.fromkeys(module for module, _argv in invocations))
+        _print_needed("%s (%s)" % (args.for_sheet, ", ".join(modules)), found, notes, args.small)
+        names += [n for n in found if n not in names]
+    print()
+    return names
+
+
 def main(argv: List[str]) -> int:
     ap = make_parser(
         prog="metawrap2 install-db",
@@ -1543,6 +1795,20 @@ def main(argv: List[str]) -> int:
     ap.add_argument("names", nargs="*", help="databases to install (see --list)")
     ap.add_argument("--all", action="store_true", help="install every database")
     ap.add_argument("--list", action="store_true", help="show available databases and sizes")
+    ap.add_argument(
+        "--for",
+        dest="for_modules",
+        action="append",
+        metavar="MODULE",
+        help="install the databases this module needs; repeat for more modules. Flags may "
+        'follow in quotes (--for "annotate --kofam --cazy")',
+    )
+    ap.add_argument(
+        "--for-sheet",
+        metavar="SHEET",
+        help="install the databases the steps planned for this sample sheet need, "
+        "with its [modules] flags",
+    )
     ap.add_argument(
         "--dir",
         default=os.path.expanduser("~/metawrap2_dbs"),
@@ -1571,11 +1837,21 @@ def main(argv: List[str]) -> int:
     )
     args = ap.parse_args(argv)
 
-    if args.list or (not args.names and not args.all):
+    targeted = bool(args.for_modules or args.for_sheet)
+    if args.list or (not args.names and not args.all and not targeted):
         _print_list()
         return 0 if args.list else 1
 
-    names = list(DATABASES) if args.all else args.names
+    names = list(DATABASES) if args.all else list(args.names)
+    if targeted and not args.all:
+        unknown = [n for n in names if n not in DATABASES]
+        resolved = [] if unknown else _resolve_for(args)
+        if resolved is None:
+            return 1
+        names += [n for n in resolved if n not in names]
+        if not names:
+            print("Nothing to install: every database needed is already set up.\n")
+            return 0
     unknown = [n for n in names if n not in DATABASES]
     if unknown:
         print("Unknown database(s): %s\nKnown: %s" % (", ".join(unknown), ", ".join(DATABASES)))
@@ -1598,7 +1874,14 @@ def main(argv: List[str]) -> int:
         )
 
     if dry_run():
-        return _print_plan(names, args.dir, args.small, config_path, not args.no_config_update)
+        return _print_plan(
+            names,
+            args.dir,
+            args.small,
+            config_path,
+            not args.no_config_update,
+            _limits_config(args.config),
+        )
 
     installed: Dict[str, str] = {}
     #: Keys already written to the config, so the summary pass does not rewrite them.
@@ -1634,10 +1917,15 @@ def main(argv: List[str]) -> int:
     missing = [
         n for n in names if not _already_installed(n, os.path.join(args.dir, n.upper()), args.small)
     ]
-    needed = sum(_planned_size(DATABASES[n], args.small, on_disk=True) for n in missing)
+    needed, note = _space_needed(missing, args.small)
     print(
         "\nInstalling %d database(s) into %s with %d worker(s).\n%s\n"
-        % (len(names), args.dir, workers, _disk_line(args.dir, needed))
+        % (
+            len(names),
+            args.dir,
+            workers,
+            _disk_line(args.dir, needed, _limits_config(args.config), note),
+        )
     )
     # Make SIGTERM and SIGHUP unwind like Ctrl-C, so the cleanup below kills running downloads.
     _interrupt.install_handlers()
@@ -1679,6 +1967,8 @@ def main(argv: List[str]) -> int:
             "%d database(s) failed: %s. Re-run the same command to retry; completed databases "
             "are detected and skipped." % (len(failed), ", ".join(failed))
         )
+        if "gunc" in failed:
+            print(GUNC_FAILED_NOTE)
         return 1
     print("All requested databases are installed. Verify with: metawrap2 check\n")
     return 0

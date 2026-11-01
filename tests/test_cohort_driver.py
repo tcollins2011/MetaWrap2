@@ -5,6 +5,8 @@ Guards a past bug: with ``coassemble = false`` the planner pointed binning and q
 co-assembly path writes. The per-sample path assertions check this.
 """
 
+from _banner import unbanner
+
 from metawrap2.commands import cohort as cohort_cmd
 from metawrap2.commands import run as driver
 
@@ -87,12 +89,14 @@ def test_a_cohort_defaults_to_the_cohort_steps(tmp_path, monkeypatch, capsys):
         return 0
 
     monkeypatch.setattr(driver, "execute", fake_execute)
+    # No databases are installed here; tests/test_database_preflight.py covers the check.
+    monkeypatch.setattr(driver, "preflight_databases", lambda *args: None)
     capsys.readouterr()
     sheet = _sheet(tmp_path, COHORT_SHEET.replace("false", "true"))
     assert cohort_cmd.main([sheet, "-o", str(tmp_path / "out")]) == 0
     assert seen["study"].coassemble is False
     assert seen["names"] == _names(steps)
-    assert "coassemble = true" in capsys.readouterr().out
+    assert "coassemble = true" in unbanner(capsys.readouterr().out)
 
 
 # --- the wiring ---------------------------------------------------------------------------
