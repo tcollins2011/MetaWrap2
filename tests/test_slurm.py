@@ -113,3 +113,22 @@ def test_cancelling_a_job_uses_its_exact_slurm_id(monkeypatch):
     monkeypatch.setattr(slurm, "_run", fake_run)
     slurm.cancel_job("123456")
     assert calls == [["scancel", "123456"]]
+
+
+def test_queued_treats_expired_job_id_as_not_active(monkeypatch):
+    """A job missing from squeue must fall through to sacct."""
+    from subprocess import CompletedProcess
+
+    from metawrap2 import slurm
+
+    def fake_run(argv):
+        return CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="slurm_load_jobs error: Invalid job id specified",
+        )
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+
+    assert slurm._queued("32766245") is False

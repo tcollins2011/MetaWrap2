@@ -1418,12 +1418,30 @@ def run_slurm_step(
         job_id = state.running_slurm_job(step)
 
         if job_id is not None:
-            record = state.manifest.step(step.name)
-            if record is None or record.data.get("command") != argv:
+            result = wait_for_job(job_id, slurm_config)
+
+            if result.state == "COMPLETED" and result.returncode == 0:
+                # Existing job finished successfully; verify its outputs below.
+                comm("Slurm job %s already completed" % job_id)
+
+            elif result.state in (
+                "CANCELLED",
+                "FAILED",
+                "TIMEOUT",
+                "OUT_OF_MEMORY",
+                "NODE_FAIL",
+                "PREEMPTED",
+            ):
+                comm(
+                    "Previous Slurm job %s ended in %s; resubmitting %s"
+                    % (job_id, result.state, step.name)
+                )
+                job_id = None
+
+            else:
                 raise SlurmError(
-                    "%s has an active Slurm job %s, but its command has changed. "
-                    "Do not overwrite its outputs while it may still be running."
-                    % (step.name, job_id)
+                    "Cannot reconcile Slurm job %s (state %s)"
+                    % (job_id, result.state)
                 )
             comm("reconnecting %s to Slurm job %s" % (step.name, job_id))
 

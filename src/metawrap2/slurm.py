@@ -297,15 +297,30 @@ def submit_job(
 
 
 def _queued(job_id: str) -> bool:
-    """Return whether the job is still present in Slurm's active queue."""
+    """Return whether the job is still present in Slurm's active queue.
+
+    A job may disappear from squeue after completing, failing, or being
+    cancelled. In that case, return False so wait_for_job() can query sacct
+    for the final state.
+    """
     result = _run([SQUEUE, "--noheader", "--jobs", job_id, "--format=%i"])
 
     if result.returncode != 0:
+        message = (result.stderr or "").strip()
+
+        # Slurm removes terminal jobs from its active queue.
+        # Missing jobs must be checked through sacct, not treated as errors.
+        if "invalid job id specified" in message.lower():
+            return False
+
         raise SlurmError(
-            f"Could not query squeue for job {job_id}: {result.stderr.strip()}"
+            f"Could not query squeue for job {job_id}: {message}"
         )
 
-    return any(line.strip() == job_id for line in result.stdout.splitlines())
+    return any(
+        line.strip() == str(job_id)
+        for line in result.stdout.splitlines()
+    )
 
 
 def _accounting_result(job_id: str) -> Optional[SlurmResult]:
@@ -353,11 +368,13 @@ def wait_for_job(
     job_id: str,
     config: SlurmConfig,
 ) -> SlurmResult:
-    """Block until a submitted Slurm job finishes.
+    """Block until a submitted or previously recorded Slurm job terminates.
 
-    Poll squeue while the job is active, then use sacct for its final status. If accounting
-    remains unavailable after the grace period, raise an error rather than assume success.
-    The job is not cancelled automatically when monitoring fails.
+    Poll squeue while the job is active. Once it disappears, query sacct
+    for the terminal state.
+
+    If accounting remains unavailable after the grace period, raise
+    SlurmError without cancelling the job or assuming that it failed.
     """
     _require_command(SQUEUE)
     _require_command(SACCT)
@@ -370,18 +387,38 @@ def wait_for_job(
     while True:
         if _queued(job_id):
             accounting_since = None
+
         else:
             result = _accounting_result(job_id)
+
             if result is not None:
-                return result
+                # Ensure the accounting result is a terminal state.
+                # Do not return RUNNING or PENDING as final results.
+                state = result.state.split("+", 1)[0].strip().upper()
+
+                if state not in {
+                    "PENDING",
+                    "CONFIGURING",
+                    "RUNNING",
+                    "COMPLETING",
+                    "SUSPENDED",
+                    "RESIZING",
+                    "REQUEUED",
+                }:
+                    return result
 
             if accounting_since is None:
                 accounting_since = time.monotonic()
-            elif time.monotonic() - accounting_since >= ACCOUNTING_TIMEOUT_SECONDS:
+
+            elif (
+                time.monotonic() - accounting_since
+                >= ACCOUNTING_TIMEOUT_SECONDS
+            ):
                 raise SlurmError(
-                    f"Job {job_id} left squeue, but sacct did not report a final state "
-                    f"within {ACCOUNTING_TIMEOUT_SECONDS} seconds. Check the job manually "
-                    "before attempting to resubmit it."
+                    f"Job {job_id} is no longer in squeue, but sacct "
+                    "has not provided a terminal state within "
+                    f"{ACCOUNTING_TIMEOUT_SECONDS} seconds. "
+                    "Check the scheduler before resubmitting."
                 )
 
         time.sleep(config.poll_seconds)
