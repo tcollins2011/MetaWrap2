@@ -2,7 +2,6 @@
 
 **From reads to annotated MAGs, with every default chosen by a benchmark.**
 
-[![CI](https://github.com/ursky/MetaWrap2/actions/workflows/ci.yml/badge.svg)](https://github.com/ursky/MetaWrap2/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/ursky/MetaWrap2?label=release)](releases/index.md)
 ![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
