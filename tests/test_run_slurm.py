@@ -11,7 +11,6 @@ from metawrap2.commands import run as run_cmd
 from metawrap2.manifest import COMPLETED, FAILED
 from metawrap2.slurm import SlurmResult
 
-
 # --- Slurm configuration and per-module resource resolution ---------------------------------
 
 
@@ -22,16 +21,16 @@ def test_a_slurm_config_uses_module_resources_and_cli_overrides(tmp_path):
     """
     path = tmp_path / "metawrap2.toml"
     path.write_text(
-        '[slurm]\n'
+        "[slurm]\n"
         'partition = "shared"\n'
         'account = "mschatz1"\n'
-        'threads = 8\n'
-        'memory_gb = 32\n'
-        '\n'
-        '[slurm.modules.assembly]\n'
+        "threads = 8\n"
+        "memory_gb = 32\n"
+        "\n"
+        "[slurm.modules.assembly]\n"
         'partition = "bigmem"\n'
-        'threads = 32\n'
-        'memory_gb = 500\n'
+        "threads = 32\n"
+        "memory_gb = 500\n"
     )
 
     settings = config_mod.load_settings(str(path))
@@ -39,13 +38,18 @@ def test_a_slurm_config_uses_module_resources_and_cli_overrides(tmp_path):
     qc = config_mod.resolve_slurm_settings(settings, "read_qc")
 
     assert (assembly["partition"], assembly["threads"], assembly["memory_gb"]) == (
-        "bigmem", 32, 500
+        "bigmem",
+        32,
+        500,
     )
     assert assembly["time"] == "48:00:00"
     assert (qc["partition"], qc["threads"], qc["memory_gb"]) == ("shared", 8, 32)
-    assert config_mod.resolve_slurm_settings(
-        settings, "assembly", {"partition": "priority"}
-    )["partition"] == "priority"
+    assert (
+        config_mod.resolve_slurm_settings(settings, "assembly", {"partition": "priority"})[
+            "partition"
+        ]
+        == "priority"
+    )
 
 
 def test_an_unknown_slurm_setting_is_rejected_before_submission():
@@ -53,9 +57,7 @@ def test_an_unknown_slurm_setting_is_rejected_before_submission():
     problems, _ = config_mod.check_config({"slurm": {"partiton": "bigmem"}})
     assert any("partiton" in problem for problem in problems)
 
-    problems, _ = config_mod.check_config(
-        {"slurm": {"modules": {"assembly": {"memroy_gb": 500}}}}
-    )
+    problems, _ = config_mod.check_config({"slurm": {"modules": {"assembly": {"memroy_gb": 500}}}})
     assert any("memroy_gb" in problem for problem in problems)
 
 
@@ -125,10 +127,10 @@ def test_a_slurm_step_records_its_job_id_before_waiting(tmp_path, monkeypatch):
     class _State:
         def check_slurm_resume(self, step):
             """There is no previous Slurm job in this test."""
-            return None
+            return
 
         def running_slurm_job(self, step):
-            return None
+            return
 
         def start(self, step, command, grant=None):
             events.append(("start", grant["executor"]))
@@ -149,8 +151,15 @@ def test_a_slurm_step_records_its_job_id_before_waiting(tmp_path, monkeypatch):
     monkeypatch.setattr(run_cmd, "wait_for_job", fake_wait)
     step = run_cmd.Step("assembly", "assembly", ["-o", str(tmp_path / "assembly")])
     _, status, _ = run_cmd.run_slurm_step(
-        step, run_cmd.Layout(str(tmp_path)), 8, None, [], False,
-        _State(), 32, run_cmd.SlurmConfig(),
+        step,
+        run_cmd.Layout(str(tmp_path)),
+        8,
+        None,
+        [],
+        False,
+        _State(),
+        32,
+        run_cmd.SlurmConfig(),
     )
 
     assert status == COMPLETED
@@ -166,27 +175,41 @@ def test_a_failed_slurm_job_is_not_marked_completed(tmp_path, monkeypatch):
     """A failed module must never report a successful result to the workflow driver."""
     monkeypatch.setattr(run_cmd, "submit_job", lambda *a, **k: "123")
     monkeypatch.setattr(
-        run_cmd, "wait_for_job",
+        run_cmd,
+        "wait_for_job",
         lambda *a, **k: SlurmResult("123", "FAILED", 1, "Slurm job failed"),
     )
     step = run_cmd.Step("assembly", "assembly", [])
     _, status, _ = run_cmd.run_slurm_step(
-        step, run_cmd.Layout(str(tmp_path)), 8, None, [], False,
-        memory_gb=32, slurm_config=run_cmd.SlurmConfig(),
+        step,
+        run_cmd.Layout(str(tmp_path)),
+        8,
+        None,
+        [],
+        False,
+        memory_gb=32,
+        slurm_config=run_cmd.SlurmConfig(),
     )
     assert status == FAILED
 
 
 def test_a_slurm_dry_run_never_submits_a_scheduler_job(tmp_path, monkeypatch, capsys):
     """A dry run prints the step command without contacting Slurm or starting a real job."""
+
     def unexpected_submission(*args, **kwargs):
         raise AssertionError("dry run submitted a Slurm job")
 
     monkeypatch.setattr(run_cmd, "submit_job", unexpected_submission)
     step = run_cmd.Step("assembly", "assembly", [])
     _, status, _ = run_cmd.run_slurm_step(
-        step, run_cmd.Layout(str(tmp_path)), 4, None, [], True,
-        memory_gb=16, slurm_config=run_cmd.SlurmConfig(),
+        step,
+        run_cmd.Layout(str(tmp_path)),
+        4,
+        None,
+        [],
+        True,
+        memory_gb=16,
+        slurm_config=run_cmd.SlurmConfig(),
     )
     assert status == COMPLETED
     assert "[slurm plan]" in capsys.readouterr().out
@@ -201,6 +224,7 @@ def test_all_parallel_slurm_steps_are_checked_before_advancing(tmp_path, monkeyp
     Previously `futures` was reset inside the submission loop, so only the final future was
     inspected. That could allow assembly to start after an earlier QC job failed.
     """
+
     class _State:
         resume = False
 
@@ -218,7 +242,9 @@ def test_all_parallel_slurm_steps_are_checked_before_advancing(tmp_path, monkeyp
     monkeypatch.setattr(run_cmd, "announcement", lambda *a, **k: None)
     monkeypatch.setattr(run_cmd, "comm", lambda *a, **k: None)
     monkeypatch.setattr(run_cmd, "warning", lambda *a, **k: None)
-    monkeypatch.setattr(run_cmd, "error", lambda message: (_ for _ in ()).throw(RuntimeError(message)))
+    monkeypatch.setattr(
+        run_cmd, "error", lambda message: (_ for _ in ()).throw(RuntimeError(message))
+    )
 
     def fake_step(step, *args):
         calls.append(step.name)
@@ -254,6 +280,7 @@ def test_all_parallel_slurm_steps_are_checked_before_advancing(tmp_path, monkeyp
 
 def test_slurm_stages_keep_their_order_and_receive_per_job_resources(tmp_path, monkeypatch):
     """Independent QC jobs finish before assembly, with full Slurm grants for each module."""
+
     class _State:
         resume = False
 
@@ -267,7 +294,9 @@ def test_slurm_stages_keep_their_order_and_receive_per_job_resources(tmp_path, m
 
     calls = []
     monkeypatch.setattr(run_cmd, "_before_group", lambda *a: None)
-    monkeypatch.setattr(run_cmd, "_after_group", lambda step, *a: calls.append(("after", step.module)))
+    monkeypatch.setattr(
+        run_cmd, "_after_group", lambda step, *a: calls.append(("after", step.module))
+    )
     monkeypatch.setattr(run_cmd, "announcement", lambda *a, **k: None)
     monkeypatch.setattr(run_cmd, "comm", lambda *a, **k: None)
     monkeypatch.setattr(run_cmd, "audit_outputs", lambda *a: None)
@@ -279,7 +308,9 @@ def test_slurm_stages_keep_their_order_and_receive_per_job_resources(tmp_path, m
     monkeypatch.setattr(run_cmd, "run_slurm_step", fake_step)
     settings = config_mod.Settings(
         slurm={
-            "threads": 8, "memory_gb": 32, "partition": "shared",
+            "threads": 8,
+            "memory_gb": 32,
+            "partition": "shared",
             "modules": {"assembly": {"threads": 32, "memory_gb": 500, "partition": "bigmem"}},
         }
     )
@@ -289,30 +320,31 @@ def test_slurm_stages_keep_their_order_and_receive_per_job_resources(tmp_path, m
         run_cmd.Step("assembly", "assembly", []),
     ]
 
-    assert run_cmd.execute(
-        steps,
-        run_cmd.Layout(str(tmp_path)),
-        run_cmd.Study([]),
-        8,
-        2,
-        None,
-        [],
-        _State(),
-        True,
-        memory_gb=32,
-        executor="slurm",
-        settings=settings,
-        cli_overrides={},
-    ) == 0
+    assert (
+        run_cmd.execute(
+            steps,
+            run_cmd.Layout(str(tmp_path)),
+            run_cmd.Study([]),
+            8,
+            2,
+            None,
+            [],
+            _State(),
+            True,
+            memory_gb=32,
+            executor="slurm",
+            settings=settings,
+            cli_overrides={},
+        )
+        == 0
+    )
 
     qc = [entry for entry in calls if entry[:2] in (("run", "read_qc:A"), ("run", "read_qc:B"))]
     assert len(qc) == 2
     assert all(entry[2:] == (8, 32, "shared") for entry in qc)
     assert ("after", "read_qc") in calls
     assert ("run", "assembly", 32, 500, "bigmem") in calls
-    assert calls.index(("after", "read_qc")) < calls.index(
-        ("run", "assembly", 32, 500, "bigmem")
-    )
+    assert calls.index(("after", "read_qc")) < calls.index(("run", "assembly", 32, 500, "bigmem"))
 
 
 # --- CLI backend selection -----------------------------------------------------------------
@@ -340,8 +372,21 @@ def test_the_slurm_cli_selects_the_slurm_executor(tmp_path, monkeypatch):
     monkeypatch.setattr(run_cmd, "record_strategy", lambda *a, **k: None)
     monkeypatch.setattr(run_cmd, "load_settings", lambda *a, **k: config_mod.Settings())
 
-    assert run_cmd.main([
-        str(sheet), "-o", str(tmp_path / "results"),
-        "--executor", "slurm", "--dry-run", "-t", "32", "-m", "500",
-    ]) == 0
+    assert (
+        run_cmd.main(
+            [
+                str(sheet),
+                "-o",
+                str(tmp_path / "results"),
+                "--executor",
+                "slurm",
+                "--dry-run",
+                "-t",
+                "32",
+                "-m",
+                "500",
+            ]
+        )
+        == 0
+    )
     assert captured["executor"] == "slurm"

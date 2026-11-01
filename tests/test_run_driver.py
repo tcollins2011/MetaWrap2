@@ -106,7 +106,19 @@ def _run_main(tmp_path, monkeypatch, extra_argv=(), limits_toml=""):
     seen = {}
 
     def fake_execute(
-        steps, layout, study, threads, jobs, config_, flags, state, dry, memory_gb=None, executor="local", settings=None, cli_overrides=None
+        steps,
+        layout,
+        study,
+        threads,
+        jobs,
+        config_,
+        flags,
+        state,
+        dry,
+        memory_gb=None,
+        executor="local",
+        settings=None,
+        cli_overrides=None,
     ):
         seen.update(threads=threads, jobs=jobs, memory_gb=memory_gb)
         return 0

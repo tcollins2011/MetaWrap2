@@ -1177,12 +1177,11 @@ class StepState:
             return
 
         executor = data.get("executor") or data.get("grant", {}).get("executor")
-        if executor == "slurm":
-            if not data.get("scheduler_job_id"):
-                raise SlurmError(
-                    "%s was running under Slurm but has no recorded job ID. "
-                    "Check squeue/sacct before resubmitting." % step.name
-                )
+        if executor == "slurm" and not data.get("scheduler_job_id"):
+            raise SlurmError(
+                "%s was running under Slurm but has no recorded job ID. "
+                "Check squeue/sacct before resubmitting." % step.name
+            )
 
 
 def strategy_record(study: Study) -> Dict[str, Any]:
@@ -1355,7 +1354,6 @@ def run_step(
     return step, status, log_path
 
 
-
 def run_slurm_step(
     step: Step,
     layout: Layout,
@@ -1440,17 +1438,12 @@ def run_slurm_step(
 
             else:
                 raise SlurmError(
-                    "Cannot reconcile Slurm job %s (state %s)"
-                    % (job_id, result.state)
+                    "Cannot reconcile Slurm job %s (state %s)" % (job_id, result.state)
                 )
             comm("reconnecting %s to Slurm job %s" % (step.name, job_id))
 
     if job_id is None:
-        started = (
-            state.start(step, argv, grant=grant)
-            if state is not None
-            else time.time()
-        )
+        started = state.start(step, argv, grant=grant) if state is not None else time.time()
 
         try:
             job_id = submit_job(
@@ -1467,12 +1460,9 @@ def run_slurm_step(
             # Keep the record unresolved rather than risk automatic duplicate submission.
             warning(
                 "%s submission could not be confirmed: %s. "
-                "Check squeue/sacct before resuming."
-                % (step.name, exc)
+                "Check squeue/sacct before resuming." % (step.name, exc)
             )
-            raise SlurmError(
-                "Slurm submission outcome is uncertain for %s" % step.name
-            ) from exc
+            raise SlurmError("Slurm submission outcome is uncertain for %s" % step.name) from exc
 
         if state is not None:
             state.record_slurm_job(step, job_id)
@@ -1488,9 +1478,7 @@ def run_slurm_step(
         else:
             missing = [path for path in step.outputs if not os.path.exists(path)]
             empty = [
-                path
-                for path in step.outputs
-                if os.path.isfile(path) and os.path.getsize(path) == 0
+                path for path in step.outputs if os.path.isfile(path) and os.path.getsize(path) == 0
             ]
 
             if missing or empty:
@@ -1504,8 +1492,7 @@ def run_slurm_step(
     except SlurmError as exc:
         # The job might still be running. Do not mark it failed or clear its ID.
         warning(
-            "Could not determine final state of Slurm job %s for %s: %s"
-            % (job_id, step.name, exc)
+            "Could not determine final state of Slurm job %s for %s: %s" % (job_id, step.name, exc)
         )
         raise
 
@@ -1513,8 +1500,7 @@ def run_slurm_step(
         # Keep the running manifest record so --resume can reconnect.
         warning(
             "Interrupted while monitoring Slurm job %s. "
-            "The job has not been cancelled; use --resume to reconnect."
-            % job_id
+            "The job has not been cancelled; use --resume to reconnect." % job_id
         )
         raise
 
@@ -1535,7 +1521,7 @@ def slurm_resources_for(
     settings: Settings,
     cli_overrides: Dict[str, Any],
     default_threads: int = 8,
-    default_memory_gb: int = 32
+    default_memory_gb: int = 32,
 ) -> Tuple[int, int, SlurmConfig]:
     """Resolve CPU, memory, and scheduling options for a step."""
 
@@ -1549,9 +1535,7 @@ def slurm_resources_for(
     memory_gb = int(opts.get("memory_gb", default_memory_gb))
 
     if threads < 1 or memory_gb < 1:
-        raise ValueError(
-            "Slurm threads and memory must be positive."
-        )
+        raise ValueError("Slurm threads and memory must be positive.")
 
     config = SlurmConfig(
         partition=opts.get("partition"),
@@ -1701,7 +1685,7 @@ def execute(
                 settings,
                 cli_overrides,
                 default_threads=threads,
-                default_memory_gb=memory_gb
+                default_memory_gb=memory_gb if memory_gb is not None else 32,
             )
 
             comm(
@@ -1725,14 +1709,12 @@ def execute(
                 futures = []
                 for s in pending:
                     if executor == "slurm":
-                        step_threads, step_memory, step_config = (
-                            slurm_resources_for(
-                                s,
-                                settings,
-                                cli_overrides,
-                                default_threads=threads,
-                                default_memory_gb=memory_gb
-                            )
+                        step_threads, step_memory, step_config = slurm_resources_for(
+                            s,
+                            settings,
+                            cli_overrides,
+                            default_threads=threads,
+                            default_memory_gb=memory_gb if memory_gb is not None else 32,
                         )
 
                         future = pool.submit(
@@ -1798,8 +1780,7 @@ def execute(
         except SlurmError as exc:
             warning(
                 "Slurm execution stopped: %s\n"
-                "Check the scheduler and resume the study after resolving the problem."
-                % exc
+                "Check the scheduler and resume the study after resolving the problem." % exc
             )
             return 1
 
@@ -1991,7 +1972,7 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
         "--executor",
         choices=("local", "slurm"),
         default="local",
-        help="execution backend (default: local)"
+        help="execution backend (default: local)",
     )
     ap.add_argument("--slurm-partition")
     ap.add_argument("--slurm-account")
@@ -2010,7 +1991,7 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
             "a sample sheet (or directory) and -o/--output are required; "
             "see `metawrap2 run --example`"
         )
-        
+
     cli_overrides = {
         "partition": args.slurm_partition,
         "account": args.slurm_account,
@@ -2137,7 +2118,12 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
             "on" if strategy["dereplicated"] else "off",
         )
     )
-    if args.executor == "local":
+    if args.executor == "slurm":
+        comm(
+            "Slurm executor: up to %d concurrent jobs; "
+            "CPU and memory resources allocated per job" % args.jobs
+        )
+    elif budget is not None:
         comm("Resource budget: %s" % budget.describe())
 
         overrides = _limits.overrides()
@@ -2145,12 +2131,9 @@ def main(argv: List[str], prog: str = "metawrap2 run", cohort: bool = False) -> 
             comm(
                 "Budget overridden on the command line: %s"
                 % ", ".join(
-                    "--%s %s" % (k.replace("_", "-"), v)
-                    for k, v in sorted(overrides.items())
+                    "--%s %s" % (k.replace("_", "-"), v) for k, v in sorted(overrides.items())
                 )
             )
-    else:
-        comm("Slurm resources are resolved independently for each module.")
 
     state = StepState(layout, resume=resume, strict_fingerprints=args.strict_fingerprints)
     # Written before the first step, so a failed or interrupted study still records its strategy.

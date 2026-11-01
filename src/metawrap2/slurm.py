@@ -1,4 +1,3 @@
-
 """Slurm job submission and monitoring for MetaWrap2.
 
 `metawrap2 run` and `metawrap2 cohort` execute each planned module as a separate Slurm batch
@@ -124,8 +123,7 @@ def _run(
     try:
         return subprocess.run(
             list(argv),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
             timeout=timeout,
@@ -254,11 +252,9 @@ def submit_job(
         argv.append(f"--account={config.account}")
 
     argv.append(script)
-    
+
     if config.gres and config.gpus:
-        raise ValueError(
-            "Specify either gres or gpus, not both."
-        )
+        raise ValueError("Specify either gres or gpus, not both.")
 
     if config.gres:
         argv.append(f"--gres={config.gres}")
@@ -271,7 +267,7 @@ def submit_job(
 
     if config.qos:
         argv.append(f"--qos={config.qos}")
-        
+
     stdout_path = config.output or log_path
     stderr_path = config.error or stdout_path
 
@@ -313,14 +309,9 @@ def _queued(job_id: str) -> bool:
         if "invalid job id specified" in message.lower():
             return False
 
-        raise SlurmError(
-            f"Could not query squeue for job {job_id}: {message}"
-        )
+        raise SlurmError(f"Could not query squeue for job {job_id}: {message}")
 
-    return any(
-        line.strip() == str(job_id)
-        for line in result.stdout.splitlines()
-    )
+    return any(line.strip() == str(job_id) for line in result.stdout.splitlines())
 
 
 def _accounting_result(job_id: str) -> Optional[SlurmResult]:
@@ -337,9 +328,7 @@ def _accounting_result(job_id: str) -> Optional[SlurmResult]:
     )
 
     if result.returncode != 0:
-        raise SlurmError(
-            f"Could not query sacct for job {job_id}: {result.stderr.strip()}"
-        )
+        raise SlurmError(f"Could not query sacct for job {job_id}: {result.stderr.strip()}")
 
     for line in result.stdout.splitlines():
         fields = line.split("|")
@@ -410,10 +399,7 @@ def wait_for_job(
             if accounting_since is None:
                 accounting_since = time.monotonic()
 
-            elif (
-                time.monotonic() - accounting_since
-                >= ACCOUNTING_TIMEOUT_SECONDS
-            ):
+            elif time.monotonic() - accounting_since >= ACCOUNTING_TIMEOUT_SECONDS:
                 raise SlurmError(
                     f"Job {job_id} is no longer in squeue, but sacct "
                     "has not provided a terminal state within "
@@ -434,9 +420,7 @@ def cancel_job(job_id: str) -> None:
     result = _run([SCANCEL, job_id])
 
     if result.returncode != 0:
-        raise SlurmError(
-            f"Could not cancel Slurm job {job_id}: {result.stderr.strip()}"
-        )
+        raise SlurmError(f"Could not cancel Slurm job {job_id}: {result.stderr.strip()}")
 
 
 def submit_and_wait(

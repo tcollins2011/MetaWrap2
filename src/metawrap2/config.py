@@ -350,22 +350,12 @@ def resolve_slurm_settings(
     """
     slurm = settings.slurm
 
-    resolved = {
-        key: value
-        for key, value in slurm.items()
-        if key != "modules"
-    }
+    resolved = {key: value for key, value in slurm.items() if key != "modules"}
 
     resolved.update(slurm.get("modules", {}).get(module, {}))
 
     if overrides:
-        resolved.update(
-            {
-                key: value
-                for key, value in overrides.items()
-                if value is not None
-            }
-        )
+        resolved.update({key: value for key, value in overrides.items() if value is not None})
 
     return resolved
 
@@ -403,7 +393,7 @@ CONFIG_TABLES = {
     "databases": "database paths - see DB_KEYS",
     "limits": "the run's resource budget - see metawrap2.limits.LIMITS_KEYS",
     "modules": "per-module option overrides, e.g. [modules.binning]",
-    "slurm": "Slurm job submission and resource options - see SLURM_KEYS"
+    "slurm": "Slurm job submission and resource options - see SLURM_KEYS",
 }
 
 
@@ -472,7 +462,12 @@ def check_config(data: Dict[str, Any], path: str = "") -> Tuple[List[str], List[
                 if key not in SLURM_KEYS:
                     problems.append(
                         "unknown key 'slurm.%s'%s%s. Known keys: %s"
-                        % (key, where, _did_you_mean(key, SLURM_KEYS), ", ".join(sorted(SLURM_KEYS)))
+                        % (
+                            key,
+                            where,
+                            _did_you_mean(key, SLURM_KEYS),
+                            ", ".join(sorted(SLURM_KEYS)),
+                        )
                     )
 
             modules = slurm.get("modules", {})
@@ -487,9 +482,7 @@ def check_config(data: Dict[str, Any], path: str = "") -> Tuple[List[str], List[
                         )
 
                     if not isinstance(options, dict):
-                        problems.append(
-                            "[slurm.modules.%s]%s must be a table" % (module, where)
-                        )
+                        problems.append("[slurm.modules.%s]%s must be a table" % (module, where))
                         continue
 
                     for key in options:

@@ -6,14 +6,15 @@ import pytest
 
 from metawrap2 import slurm
 
-
 # --- generated batch scripts ---------------------------------------------------------------
 
 
 def test_a_slurm_script_preserves_quoted_command_arguments(tmp_path):
     """Module arguments containing spaces or shell metacharacters must remain one argument."""
     script = tmp_path / "job.sh"
-    slurm.write_script(["python", "-m", "metawrap2.cli", "read_qc", "a b; $(touch wrong)"], str(script), 8)
+    slurm.write_script(
+        ["python", "-m", "metawrap2.cli", "read_qc", "a b; $(touch wrong)"], str(script), 8
+    )
     content = script.read_text()
     assert content.startswith("#!/usr/bin/env bash\n")
     assert "export OMP_NUM_THREADS=8" in content
@@ -43,28 +44,48 @@ def test_a_slurm_job_passes_partition_account_resources_and_gpu_flags(tmp_path, 
     monkeypatch.setattr(slurm, "_run", fake_run)
     job_id = slurm.submit_job(
         ["python", "-m", "metawrap2.cli", "binning"],
-        name="mw2_binning", threads=32, memory_gb=500,
-        script_path=str(tmp_path / "job.sh"), log_path=str(tmp_path / "job.log"),
-        config=slurm.SlurmConfig(partition="bigmem", account="mschatz1_bigmem",
-                                 time="48:00:00", gres="gpu:1"),
+        name="mw2_binning",
+        threads=32,
+        memory_gb=500,
+        script_path=str(tmp_path / "job.sh"),
+        log_path=str(tmp_path / "job.log"),
+        config=slurm.SlurmConfig(
+            partition="bigmem", account="mschatz1_bigmem", time="48:00:00", gres="gpu:1"
+        ),
     )
     assert job_id == "123456"
     argv = calls[0]
-    for flag in ("--job-name=mw2_binning", "--cpus-per-task=32", "--mem=500G",
-                 "--partition=bigmem", "--account=mschatz1_bigmem", "--time=48:00:00",
-                 "--gres=gpu:1", "--ntasks=1"):
+    for flag in (
+        "--job-name=mw2_binning",
+        "--cpus-per-task=32",
+        "--mem=500G",
+        "--partition=bigmem",
+        "--account=mschatz1_bigmem",
+        "--time=48:00:00",
+        "--gres=gpu:1",
+        "--ntasks=1",
+    ):
         assert flag in argv
 
 
 def test_a_rejected_sbatch_submission_reports_the_scheduler_error(tmp_path, monkeypatch):
     """An invalid account or partition fails before a workflow step is considered running."""
     monkeypatch.setattr(slurm.shutil, "which", lambda name: "/usr/bin/" + name)
-    monkeypatch.setattr(slurm, "_run", lambda argv, timeout=60: subprocess.CompletedProcess(
-        argv, 1, "", "sbatch: error: invalid account"))
+    monkeypatch.setattr(
+        slurm,
+        "_run",
+        lambda argv, timeout=60: subprocess.CompletedProcess(
+            argv, 1, "", "sbatch: error: invalid account"
+        ),
+    )
     with pytest.raises(slurm.SlurmError, match="invalid account"):
         slurm.submit_job(
-            ["true"], name="mw2_test", threads=1, memory_gb=2,
-            script_path=str(tmp_path / "job.sh"), log_path=str(tmp_path / "job.log"),
+            ["true"],
+            name="mw2_test",
+            threads=1,
+            memory_gb=2,
+            script_path=str(tmp_path / "job.sh"),
+            log_path=str(tmp_path / "job.log"),
             config=slurm.SlurmConfig(),
         )
 
@@ -74,8 +95,13 @@ def test_a_rejected_sbatch_submission_reports_the_scheduler_error(tmp_path, monk
 
 def test_a_completed_job_requires_a_zero_exit_code(monkeypatch):
     """Do not mistake a COMPLETED Slurm state for success when the process returned nonzero."""
-    monkeypatch.setattr(slurm, "_run", lambda argv, timeout=60: subprocess.CompletedProcess(
-        argv, 0, "123|COMPLETED|2:0\n123.batch|COMPLETED|2:0\n", ""))
+    monkeypatch.setattr(
+        slurm,
+        "_run",
+        lambda argv, timeout=60: subprocess.CompletedProcess(
+            argv, 0, "123|COMPLETED|2:0\n123.batch|COMPLETED|2:0\n", ""
+        ),
+    )
     result = slurm._accounting_result("123")
     assert result.state == "COMPLETED"
     assert result.returncode == 2
@@ -83,8 +109,13 @@ def test_a_completed_job_requires_a_zero_exit_code(monkeypatch):
 
 def test_an_out_of_memory_job_cannot_be_reported_successful(monkeypatch):
     """Slurm can report OOM with a zero process exit code, but the step must still fail."""
-    monkeypatch.setattr(slurm, "_run", lambda argv, timeout=60: subprocess.CompletedProcess(
-        argv, 0, "123|OUT_OF_MEMORY|0:0\n", ""))
+    monkeypatch.setattr(
+        slurm,
+        "_run",
+        lambda argv, timeout=60: subprocess.CompletedProcess(
+            argv, 0, "123|OUT_OF_MEMORY|0:0\n", ""
+        ),
+    )
     result = slurm._accounting_result("123")
     assert result.state == "OUT_OF_MEMORY"
     assert result.returncode != 0
