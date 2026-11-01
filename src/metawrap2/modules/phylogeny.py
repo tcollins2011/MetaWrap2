@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import os
+import shutil
 from typing import List, Optional, Tuple
 
 from .. import phylogeny as _phylo
@@ -39,6 +41,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     resolve_threads,
     run,
@@ -81,6 +84,8 @@ FASTTREE_AA = "fasttree -lg -log {log} {alignment}"
 SUMMARY_TABLE = "trees" + TSV_SUFFIX
 #: Where each tree's own files are kept.
 TREES_DIR = "trees"
+#: Where a gzipped alignment is decompressed for the tree builder.
+ALIGNMENTS_DIR = "alignments"
 #: Fixed so two runs over one alignment give the same tree. IQ-TREE's search is stochastic, and an
 #: unseeded rerun with a different topology would look like a real disagreement.
 SEED = 1337
@@ -163,6 +168,24 @@ def _tree_name(path: str) -> str:
     return "%s__%s" % (parent, base) if parent else base
 
 
+def _plain_alignment(path: str, name: str, output: str) -> str:
+    """*path*, or for a gzipped alignment a decompressed copy of it under *output*.
+
+    :func:`metawrap2.phylogeny.read_alignment` reads gzip, but FastTree and IQ-TREE do not. GTDB-Tk
+    writes its ``*.user_msa.fasta.gz`` compressed, so ``-d <GTDB-Tk folder>`` always hands over a
+    .gz. The copy is named after the tree, which is unique per alignment.
+    """
+    if not path.endswith(".gz"):
+        return path
+    folder = os.path.join(output, ALIGNMENTS_DIR)
+    ensure_dir(folder)
+    plain = os.path.join(folder, name + ".fasta")
+    with gzip.open(path, "rb") as src, open(plain, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    comm("decompressed %s to %s for the tree builder" % (os.path.basename(path), plain))
+    return plain
+
+
 def main(argv: List[str]) -> int:
     args = _parse_args(argv)
     settings = load_settings(args.config)
@@ -195,6 +218,11 @@ def main(argv: List[str]) -> int:
             reason = _phylo.too_few_taxa(alignment)
             if reason:
                 warning(reason)
+                continue
+            try:
+                path = _plain_alignment(path, name, args.output)
+            except OSError as problem:
+                warning("could not decompress %s: %s" % (path, problem))
                 continue
             comm(
                 "%s: %d taxa, %d columns, mean occupancy %.2f"
@@ -230,7 +258,7 @@ def main(argv: List[str]) -> int:
                     % (name, alignment.kind, "-nt -gtr" if nucleotide else "-lg")
                 )
                 rc = run(
-                    template.format(log=prefix + ".log", alignment=path),
+                    fill_command(template, log=prefix + ".log", alignment=path),
                     env=env,
                     tool="fasttree",
                     check=False,
@@ -239,7 +267,8 @@ def main(argv: List[str]) -> int:
                 model = "GTR (FastTree, fixed)" if nucleotide else "LG (FastTree, fixed)"
             else:
                 rc = run(
-                    IQTREE.format(
+                    fill_command(
+                        IQTREE,
                         alignment=path,
                         prefix=prefix,
                         replicates=args.replicates,

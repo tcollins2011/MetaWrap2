@@ -21,6 +21,7 @@ import os
 import re
 
 import pytest
+from _banner import unbanner
 
 from metawrap2 import checkm as checkm_mod
 from metawrap2.constants import BIN_EXTENSION
@@ -279,7 +280,7 @@ def test_checkm1_without_its_database_stops_before_any_work(tmp_path, monkeypatc
         _run(tmp_path, "AB", extra=["--checkm1"])
     assert seen == []
     err = capsys.readouterr()
-    assert re.search(r"install-db checkm(?!2)", err.out + err.err)
+    assert re.search(r"install-db checkm(?!2)", unbanner(err.out + err.err))
 
 
 def test_a_resume_with_the_other_scorer_is_refused(tmp_path, monkeypatch, capsys):
@@ -296,7 +297,7 @@ def test_a_resume_with_the_other_scorer_is_refused(tmp_path, monkeypatch, capsys
     with pytest.raises(SystemExit):
         bin_refinement.main(argv)
     err = capsys.readouterr()
-    assert "was scored with CheckM2" in err.out + err.err
+    assert "was scored with CheckM2" in unbanner(err.out + err.err)
 
 
 def test_a_run_from_before_the_scorer_file_is_judged_by_its_stats(tmp_path, monkeypatch, capsys):
@@ -311,4 +312,4 @@ def test_a_run_from_before_the_scorer_file_is_judged_by_its_stats(tmp_path, monk
     with pytest.raises(SystemExit):
         bin_refinement.main(argv)
     err = capsys.readouterr()
-    assert "was scored with CheckM1" in err.out + err.err
+    assert "was scored with CheckM1" in unbanner(err.out + err.err)

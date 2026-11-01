@@ -21,8 +21,9 @@ Per-module options are in [Modules](modules.md).
 ## Running a whole study: `run` and `cohort`
 
 Both take a sample sheet (or a directory of read files) and run every module, with a manifest, run
-lock, checkpointing, resource budget and `--resume`. The
-[README](https://github.com/ursky/MetaWrap2#running) covers which to use.
+lock, checkpointing, resource budget and `--resume`. Use `cohort` for more than a few samples: a
+co-assembly holds every sample's reads at once, and per-sample assembly keeps each bin traceable
+to its sample.
 
 ```bash
 metawrap2 run    samples.toml -o study/ -t 32        # co-assemble every sample, bin once
@@ -47,7 +48,66 @@ metawrap2 cohort samples.toml -o study/ -t 32 -j 4   # assemble and bin each sam
   `steps` (or `--steps`) to include it.
 - In `run`, `coverage` and `dereplicate` are dropped with a message.
 - Under `metawrap2 cohort`, `coassemble = true` in a sheet is overridden with a warning naming `run`.
-- `-j N` sets how many samples run a per-sample stage at once, dividing threads and memory.
+- `-j N` sets how many samples run a per-sample stage at once, dividing threads and memory. Concurrent
+  binning steps on `--device cuda` (the default under `--preset deep`) or `auto` get one GPU each,
+  round-robin over the cards the budget allows (`--max-gpus`), and the step banner names them. A
+  `--device cuda:N` in the sheet keeps that card for every sample.
+- The sheet is read once, when the run starts, so edits to it take effect on the next `--resume`;
+  `[limits]` in `metawrap2.toml` is re-read by every step.
+
+## Running on Slurm
+
+`--executor slurm` submits each step of a `run` or `cohort` study as one Slurm batch job. The driver
+stays on the login node: it submits a stage's jobs, waits for all of them, then submits the next
+stage. It needs `sbatch`, `squeue`, `sacct` (job accounting on) and `scancel`, and the inputs,
+databases, conda environments and output directory must be on a filesystem the compute nodes see.
+
+```bash
+metawrap2 cohort samples.toml -o study/ --executor slurm -j 8 --slurm-account my_lab
+metawrap2 cohort samples.toml -o study/ --executor slurm -j 8 --dry-run   # print the sbatch commands
+```
+
+Job options go in `[slurm]` in `metawrap2.toml`, with a `[slurm.modules.<module>]` table per module
+that needs something else:
+
+```toml
+[slurm]
+partition = "general"
+account = "my_lab"
+time = "24:00:00"
+threads = 16
+memory_gb = 64
+
+[slurm.modules.assembly]
+partition = "bigmem"
+memory_gb = 500
+time = "72:00:00"
+```
+
+- Keys: `partition`, `account`, `qos`, `constraint`, `time`, `gres`, `gpus`, `threads`,
+  `memory_gb`, `extra_args` (a list of further sbatch options) and `poll_seconds` (default 30,
+  `[slurm]` only). An unset key keeps the cluster's default; unset `threads` and `memory_gb` are 8
+  and 32 GB.
+- The command line wins over the config: `-t` and `-m` set each job's CPUs and memory, and
+  `--slurm-partition`, `--slurm-account`, `--slurm-time`, `--slurm-qos`, `--slurm-constraint`,
+  `--slurm-gres` and `--slurm-gpus` set the sbatch option for every job.
+- Each job gets its full `threads` and `memory_gb`; `-j` only limits how many jobs of a stage are
+  queued at once. The `[limits]` budget of the login node does not cap them, and the global flags
+  (`--max-disk-fraction`, `--heartbeat-seconds` and the rest) reach every job.
+- A binning step on `--device cuda` (the default under `--preset deep`) requests `gres=gpu:1`
+  unless `gres` or `gpus` is set for it. Slurm picks the card, so name no card (`cuda:N`) in the
+  sheet.
+- Each job's output goes to `LOGS/<step>.log`, after the step's command and its sbatch command. The
+  batch scripts are in `.metawrap2/run_steps/slurm/`. The job runs with the driver's environment
+  (`--export=ALL`) in the directory the driver was started from, and each step is given the
+  config file by absolute path.
+- Job IDs are in the manifest. If the driver stops (a closed login session), `--resume` reconnects
+  to jobs that are still queued or running, keeps the results of jobs that finished, and submits a
+  step again only if its job failed. Ctrl-C cancels the study's running jobs with `scancel`.
+- A job fails unless it ends `COMPLETED` with exit code 0, so `TIMEOUT`, `OUT_OF_MEMORY`,
+  `NODE_FAIL`, `CANCELLED` and a preempted job that is not requeued stop the study, as a failed
+  local step does. The wall time, CPU time and peak memory from `sacct` go into the manifest and
+  the study's `provenance.txt`.
 
 ## Functional annotation
 
@@ -164,6 +224,10 @@ Caveats:
 | `--heartbeat-seconds N` | seconds without output before a progress heartbeat; 0 turns it off |
 | `--skip-space-check` | start even if the disk-space estimate says there is no room |
 
+Under `run`, `cohort` and `benchmark`, these options and the resource limits below (`--max-threads`,
+`--max-disk-fraction` and the rest) are passed on to every step. Each step still gets its own share
+of threads and memory from the study's budget.
+
 ## Output while a step runs
 
 A tool's output is shown live and copied to `run.stdout` / `run.stderr`. Progress-bar redraws and
@@ -211,11 +275,16 @@ passes 70% full.
 
 ```toml
 [limits]
-max_thread_fraction = 0.5   # or max_threads = 32, which wins when both are given
-max_memory_fraction = 0.8   # what an unset -m resolves to
+# Share of the cores. max_threads = 32 sets a count instead and wins when both are given.
+max_thread_fraction = 0.5
+# Share of the RAM; also what an unset -m resolves to.
+max_memory_fraction = 0.8
+# Stop a step when a filesystem it writes to passes this fraction full.
 max_disk_fraction = 0.7
-max_gpus = 0                # unset means every GPU present; 0 means use none
-gpu_strict = false          # true refuses a GPU step on a card something else is using
+# GPUs to use. Unset means every GPU present; 0 means none.
+max_gpus = 0
+# true refuses a GPU step on a card another process is using.
+gpu_strict = false
 ```
 
 Each run prints its budget before starting:
@@ -224,7 +293,9 @@ Each run prints its budget before starting:
 Resource budget: 16/32 threads, 102.4 GB/128.0 GB memory, disk ceiling 70%, 1/1 GPUs
 ```
 
-* With the local executor, the budget is divided: metawrap2 run -j 4 gives each of four concurrent samples a quarter. Slurm execution instead requests the configured resources independently for each job.
+* The budget is divided: `metawrap2 run -j 4` gives each of four concurrent samples a quarter.
+  With `--executor slurm` each job has its own allocation instead (see
+  [Running on Slurm](#running-on-slurm)).
 * `-t` and `-m` are capped to it, with a message naming the setting to raise. Unset, they resolve
   to the budget.
 * The disk ceiling is a hard stop. A run will not start above it, and a run that crosses it is
@@ -234,123 +305,6 @@ Per-run global flags: `--max-threads`, `--max-thread-fraction`, `--max-memory-gb
 `--max-memory-fraction`, `--max-disk-fraction`, `--max-gpus` and `--gpu-strict`.
 `disk_check_interval` (seconds between disk checks inside a long step) is a `[limits]` setting;
 `--disk-check-interval` overrides it. The grant is recorded in the manifest, and `metawrap2 calibrate` compares it with the memory used.
-
-## Slurm execution
-
-MetaWrap2 supports Slurm as an alternative executor for the `run` and `cohort` workflow drivers. The default executor is `local`; selecting `slurm` submits individual pipeline steps to the cluster scheduler.
-
-### Running a workflow
-
-```bash
-# Co-assembly workflow
-metawrap2 run samples.toml -o study/ \
-    --executor slurm -j 4
-
-# Per-sample assembly and binning workflow
-metawrap2 cohort samples.toml -o study/ \
-    --executor slurm -j 4
-
-# Resume an interrupted Slurm workflow
-metawrap2 cohort samples.toml -o study/ \
-    --executor slurm -j 4 --resume
-```
-
-The executor uses `sbatch` to submit jobs, `squeue` to monitor active jobs, and `sacct` to determine their final status.
-
-Independent steps within a stage may execute concurrently. The `-j` option controls how many steps are submitted and monitored at once; it does not divide each Slurm job's CPU and memory allocation.
-
-Dependent workflow stages run only after their prerequisites complete successfully.
-
-### Configuration
-
-Slurm settings are specified in the regular MetaWrap2 configuration file, typically `~/.metawrap2/config.toml`.
-
-```toml
-[slurm]
-partition = "compute"
-account = "my_account"
-time = "24:00:00"
-threads = 16
-memory_gb = 64
-poll_seconds = 30
-
-# More resources for assembly
-[slurm.modules.assembly]
-partition = "bigmem"
-threads = 32
-memory_gb = 500
-time = "48:00:00"
-
-# Optional GPU allocation for GPU-enabled binning
-[slurm.modules.binning]
-partition = "gpu"
-threads = 16
-memory_gb = 128
-gres = "gpu:1"
-time = "24:00:00"
-```
-
-Replace the partition and account names with values accepted by your cluster. Resource requirements vary considerably with sample size, sequencing depth and the selected tools.
-
-Global Slurm settings provide defaults. Module-specific settings override the corresponding global settings. Explicit CLI resource overrides take precedence where supported.
-
-Supported scheduler options include partition, account, walltime, CPU and memory allocations, GPU/GRES requests, constraints, QoS, output and error paths, and polling interval.
-
-GPU allocation only reserves hardware; it does not automatically enable GPU execution in a tool. Use the corresponding module options, such as the appropriate binning preset or device selection, when GPU acceleration is required.
-
-### Resource allocation
-
-Local and Slurm executors use different resource-budget models:
-
-| Behavior | Local executor | Slurm executor |
-|---|---|---|
-| CPU allocation | Limited by local resource budget | Requested per scheduled job |
-| Memory allocation | Limited by local resource budget | Requested per scheduled job |
-| `-j N` | Divides the available local budget among concurrent steps | Limits concurrent Slurm jobs |
-| Partition selection | Not applicable | Configurable globally or per module |
-| GPU allocation | Uses local GPUs | Requests scheduler-allocated GPUs |
-
-For example, with `-j 4`, `threads = 32` and `memory_gb = 500`, up to four independent Slurm jobs may be requested concurrently, each with 32 CPUs and 500 GB of memory, subject to cluster limits and availability.
-
-The scheduler may leave jobs pending when resources are unavailable or account limits have been reached.
-
-### Monitoring jobs
-
-Submitted jobs can be inspected using the standard Slurm commands:
-
-```bash
-squeue -u "$USER"
-
-# Inspect a particular job
-scontrol show job 123456
-
-# Inspect final accounting information
-sacct -j 123456 \
-    --format=JobID,State,Elapsed,AllocCPUS,ReqMem,ExitCode
-```
-
-MetaWrap2 records submitted Slurm job IDs in the study manifest, alongside its existing command, input, output and execution-state records.
-
-The executor waits for each job's terminal scheduler state and checks the declared outputs before marking the step complete. A successful Slurm exit code alone does not establish that the expected output files were produced.
-
-### Resume and interruptions
-
-Slurm jobs may continue running after the MetaWrap2 controller exits or loses its connection to the scheduler.
-
-When a workflow is restarted with `--resume`, MetaWrap2 checks the manifest for unfinished scheduler jobs. If a compatible active job ID is recorded, the driver reconnects to it rather than submitting another copy.
-
-If Slurm's final state cannot be determined, MetaWrap2 preserves the unresolved job record instead of assuming that the job has failed. Investigate the job using `squeue` or `sacct` before retrying.
-
-There is a narrow interruption window between successful scheduler submission and persistence of the job ID. If the manifest shows a Slurm submission with no recorded job ID, verify the scheduler state manually before resubmitting to avoid concurrent jobs writing to the same outputs.
-
-### Current limitations
-
-- **Blocking execution:** The driver remains active while monitoring jobs and must be restarted with `--resume` after an interruption.
-- **No job arrays:** Independent sample-level steps are submitted as individual jobs.
-- **No automatic retry policy:** Failed jobs are reported to the workflow driver; automatic resubmission and resource escalation are not yet supported.
-- **No scheduler-managed dependency graph:** MetaWrap2 controls stage ordering rather than submitting the complete workflow as a Slurm dependency DAG.
-
-These restrictions preserve the existing execution model while allowing workflows to use cluster resources.
 
 ## Editing the commands
 
@@ -365,8 +319,10 @@ In `src/metawrap2/modules/<module>.py`, the `COMMANDS` block holds the tool comm
 | `metawrap2 run <sheet\|dir> -o study/` | run the whole pipeline for a study from one sample sheet |
 | `metawrap2 cohort <sheet\|dir> -o study/` | the same, per sample, ending in one dereplicated catalogue |
 | `metawrap2 check <module>` | verify tools/databases/conda env for a module |
+| `metawrap2 check --for "<module command>"` | the databases and envs one command needs, then `ready: yes` or `ready: no` |
 | `metawrap2 install-env <module\|--all> [-t N]` | create (and verify) conda env(s), N at a time |
 | `metawrap2 install-db <name\|--all> [-t N] [--small]` | download, index, and configure databases |
+| `metawrap2 install-db --for <module>` / `--for-sheet <sheet>` | install the databases a module or a sample sheet needs |
 | `metawrap2 doctor [module]` | probe envs, software and databases; print a status map (alias: `test`) |
 | `metawrap2 doctor --fix` | recreate only the broken environments, leaving healthy ones alone |
 | `metawrap2 status <study>` | what has run, and what `--resume` would do next |
@@ -376,6 +332,26 @@ In `src/metawrap2/modules/<module>.py`, the `COMMANDS` block holds the tool comm
 | `metawrap2 benchmark list\|fetch\|run\|score` | measure tools and settings against known-truth data |
 | `metawrap2 config init\|show` | scaffold or inspect the config |
 | `metawrap2 completion bash\|zsh` | print a shell-completion script |
+
+### Checking one command
+
+`check --for` takes a full module command in quotes, as you would type it, and reports only the
+databases and conda envs that command needs. Each missing one is printed with the command that
+installs it. The exit code is 0 when the command is ready to run and 1 when something is missing.
+
+```
+$ metawrap2 check --for "annotate --kofam --cazy -b bins/ -o annotation/"
+
+annotate --kofam --cazy -b bins/ -o annotation/
+
+  OK       KOFAM_DB            /path/to/metawrap2_dbs/KOFAM
+  MISSING  DBCAN_DB            -> metawrap2 install-db dbcan
+  OK       metawrap2-annotate  conda env
+
+ready: no (1 missing)
+```
+
+A leading `metawrap2` and global flags such as `--dry-run` are accepted.
 
 ### Checking on a run
 
@@ -483,7 +459,7 @@ Bins are named `bin_001.fasta` for every binner, from 1, zero-padded. Numbers ar
 ## Other flags
 
 * `binning --device {cpu,cuda,cuda:N,auto}` sets where SemiBin2, VAMB and COMEBin train. The default
-  `cpu` gives the same result on any host; `auto` uses a GPU if torch sees one; `--preset gpu`
+  `cpu` gives the same result on any host; `auto` uses a GPU if torch sees one; `--preset deep`
   defaults to `cuda`. VAMB costs 4.9 CPU-hours on a GPU against 66.9 on the CPU, and COMEBin does not
   finish on a CPU.
 * Before each GPU step the card is checked and described in one line:

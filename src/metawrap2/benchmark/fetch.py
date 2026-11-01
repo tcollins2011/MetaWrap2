@@ -151,8 +151,18 @@ def _landing_path(dataset: Dataset, remote: Remote, dest: str) -> str:
 
     Flattened to a basename. The published layout (reads under ``gastrooral/``, truth under
     ``per_bodysite/gastro_bam/``) carries nothing the harness needs.
+
+    Archives go to ``archives/`` and are unpacked into ``extracted/``; gold-standard files go to
+    ``gold/``. A data file that is not an archive (a plain FASTQ) goes straight to ``extracted/``,
+    which is where ``benchmark run`` looks for reads.
     """
-    return os.path.join(dest, "archives" if remote.is_archive else "gold", remote.name)
+    if remote.is_archive:
+        folder = "archives"
+    elif any(remote is entry for entry in dataset.files):
+        folder = "extracted"
+    else:
+        folder = "gold"
+    return os.path.join(dest, folder, remote.name)
 
 
 def plan(dataset: Dataset, dest: str, *, hash_it: bool = False) -> FetchPlan:

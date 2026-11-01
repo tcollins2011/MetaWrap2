@@ -1,19 +1,19 @@
 # MetaWrap2 lockfile for the taxonomy module (linux-64).
-# Exact builds of everything in the metawrap2-taxonomy environment, so a run from today can be
-# reproduced later. Generated with:  metawrap2 install-env taxonomy --lock
+# Exact builds of every package in the metawrap2-taxonomy environment, for reproducing a run.
+# Generated with:  metawrap2 install-env taxonomy --lock
 # Recreate with:  conda create -n metawrap2-taxonomy --file taxonomy.linux-64.lock
 # This file may be used to create an environment using:
 # $ conda create --name <env> --file <this file>
 # platform: linux-64
-# created-by: conda 26.7.2
+# created-by: conda 26.9.4
 @EXPLICIT
-https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.7.22-hbd8a1cb_0.conda#0f51e2391ade309db462a55611263e9c
-https://conda.anaconda.org/conda-forge/linux-64/ld_impl_linux-64-2.46.1-bootstrap_ha15bf96_2.conda#2c238120d4d57c422d6671036eae76a8
+https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda#3fd02989038a1e1cee627c14c2d73f29
+https://conda.anaconda.org/conda-forge/linux-64/ld_impl_linux-64-2.46.1-bootstrap_ha15bf96_3.conda#e82d33173910cc8da8da4e51d732ff3e
 https://conda.anaconda.org/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda#d904c7ddd95e026254b4b80808ee9e12
 https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda#a9f577daf3de00bca7c3c76c0ecbd1de
 https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda#735629b400b70eeab21a2ba8f5b1c2ce
 https://conda.anaconda.org/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda#e675fabcf81499adc7edf58124fb1e01
-https://conda.anaconda.org/conda-forge/linux-64/c-ares-1.34.8-hebe6cf0_2.conda#3ad2b403be8fc5612b9159e2ce621f69
+https://conda.anaconda.org/conda-forge/linux-64/c-ares-1.34.9-hebe6cf0_0.conda#78b505af04bf7a87ca957ef0cb5946f5
 https://conda.anaconda.org/conda-forge/linux-64/keyutils-1.6.3-h7cc23a3_1.conda#ba55d1b89fd7775e67de8291029b4059
 https://conda.anaconda.org/conda-forge/linux-64/libev-4.33-h280c20c_3.conda#7bc31538d6e3fb349e897353969237ec
 https://conda.anaconda.org/conda-forge/linux-64/libgcc-ng-16.2.0-h69a702a_7.conda#2005515ac9340f816fb2ac7e83afe553
@@ -22,7 +22,7 @@ https://conda.anaconda.org/conda-forge/linux-64/libiconv-1.18-h0cb94f2_3.conda#f
 https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda#9b6707e0caca917fa6ea9ee473f37a5d
 https://conda.anaconda.org/conda-forge/linux-64/libxcrypt-4.4.38-h280c20c_0.conda#f7a7ff5a6ab331e037abd34f379a631d
 https://conda.anaconda.org/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda#ee6c0cd80a60961a1f48aa3e0b91f986
-https://conda.anaconda.org/conda-forge/linux-64/libedit-3.1.20250104-pl5321h373387f_1.conda#50708d3b951d0f8e2d7f2df5b5edc040
+https://conda.anaconda.org/conda-forge/linux-64/libedit-3.1.20260512-pl5321h373387f_0.conda#27dbd7e2984b8fe48e069379636ccfdd
 https://conda.anaconda.org/conda-forge/linux-64/libgfortran-16.2.0-h69a702a_7.conda#3a8d285f5f22138ef826ad54cf267e73
 https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-ng-16.2.0-hdf11a46_7.conda#25a23bde5e26d548374f3e02b4669670
 https://conda.anaconda.org/conda-forge/linux-64/libunistring-0.9.10-h7f98852_0.tar.bz2#7245a044b4a1980ed83196176b78b73a
@@ -78,9 +78,10 @@ https://conda.anaconda.org/conda-forge/linux-64/perl-pathtools-3.75-pl5321hb9d3c
 https://conda.anaconda.org/conda-forge/linux-64/python-2.7.15-h5a48372_1011_cpython.tar.bz2#d1824ac0987155f58a03b7ffda01db38
 https://conda.anaconda.org/bioconda/noarch/krona-2.8.1-pl5321hdfd78af_1.tar.bz2#cbffcf9493a67fe1869cd81a50441616
 https://conda.anaconda.org/conda-forge/linux-64/numpy-1.16.5-py27h95a1406_0.tar.bz2#c0f6bb7c3bd322885bcc08a8741b209c
-https://conda.anaconda.org/bioconda/noarch/perl-archive-tar-3.12-pl5321hdfd78af_0.conda#4ee2727440bf9b0b055c1f17a72701f6
+https://conda.anaconda.org/bioconda/noarch/perl-archive-tar-3.14-pl5321hcbfc158_0.conda#290aa04cc6fe79133433eb72de48edc0
 https://conda.anaconda.org/bioconda/noarch/perl-json-4.11-pl5321hdfd78af_0.conda#56411755d21870a9ec16c76fd7b66dba
 https://conda.anaconda.org/bioconda/linux-64/blast-2.16.0-hc155240_3.tar.bz2#488f9f30f2427027f4a5a8b84de9d2dd
 https://conda.anaconda.org/conda-forge/linux-64/boost-1.64.0-py27_4.tar.bz2#662a551af5849d5d237d574f747ee2d5
 https://conda.anaconda.org/bioconda/linux-64/kraken2-2.1.3-pl5321hdcf5f25_3.tar.bz2#35d018278315c0e03cc322c6561f7038
 https://conda.anaconda.org/bioconda/noarch/taxator-tk-1.3.3e-hdfd78af_2.tar.bz2#29b3516f4edfd009c88563a97c538e95
+https://conda.anaconda.org/bioconda/linux-64/bracken-3.1-h9948957_0.tar.bz2#79e22c3add0be637a0a35e8bd2598074

@@ -1,6 +1,7 @@
 """dereplicate skips empty bin folders with a warning; only an all-empty input stops it."""
 
 import pytest
+from _banner import unbanner
 
 from metawrap2.modules import dereplicate
 
@@ -30,7 +31,7 @@ def test_an_empty_folder_is_dropped(tmp_path, monkeypatch, capsys):
         dereplicate.main(["-o", str(tmp_path / "out"), "-b", full, "-b", empty])
     assert [p.rstrip("/").split("/")[-1] for p in seen["paths"]] == ["s1"]
     out = capsys.readouterr()
-    assert "no bins" in out.out + out.err
+    assert "no bins" in unbanner(out.out + out.err)
 
 
 def test_every_folder_empty_is_an_error(tmp_path):

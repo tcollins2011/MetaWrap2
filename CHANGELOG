@@ -1,59 +1,102 @@
-New - Slurm executor for workflow execution
-    `metawrap2 run` and `metawrap2 cohort` support `--executor slurm`, submitting
-    pipeline steps through sbatch and monitoring their completion with squeue
-    and sacct. Local execution remains the default.
+MetaWrap2 v=2.1.5
+	Binning presets are now `default` and `deep`, fixes from a second new-user test of 2.1.4, a
+		shorter README, and CI fixes.
+	Changed - `--preset gpu` renamed `--preset deep`
+		`--preset deep` runs metaBAT2 + SemiBin2 + COMEBin and trains SemiBin2 and COMEBin with
+			`--device cuda` unless `--device` is given, as `--preset gpu` did. `gpu` and `slow` are
+			still accepted as aliases of `deep`, on the command line and in study sheets.
+		`binning --help` and the no-binner error list `{default,deep}`. An unknown preset is rejected
+			with the same list.
+		`--preset fast` and `--preset very-fast` are no longer documented; they still run.
+	Fixed - global flags were not passed to the steps of run, cohort and benchmark
+		Each step runs as its own process, and only --force, --resume and --dry-run reached it. Flags
+			typed before the subcommand (--max-disk-fraction, --max-threads, --max-memory-gb, --max-gpus,
+			--skip-space-check, --skip-validation, --verbose-logs, --heartbeat-seconds, --gpu-strict) now
+			reach every step, which still gets its own share of threads and memory. Reported in issue #6.
+		Tests from pull request #7 (Matthew Nguyen) cover each budget flag, a zero heartbeat, both
+			entry points, and the flags' place before the module name in a step's command.
+	Fixed - quickstart and install-env failing intermittently on parallel builds
+		Environments built at once share conda's package cache, and concurrent writes left truncated
+			channel indexes ("Unable to read repo solv file ... unexpected EOF") or missing `.conda` and
+			`.conda.partial` files. The first environment is now built alone, so the indexes are cached
+			before the parallel builds start, and any environment that fails in parallel is removed and
+			retried on its own. `-t 1` builds everything serially. Reported in issue #5.
+	Fixed - tests that failed with some temporary-path lengths
+		Banners wrap long lines and frame them with `*****`, so a path of some lengths split the phrase a
+			test matched. Tests now strip the frame first (tests/_banner.py).
+	Fixed - stale lockfiles
+		The reads, annotate and taxonomy lockfiles lacked Flye, Nonpareil, dbCAN, GECCO and Bracken, so
+			an environment built with `--from-lock` was missing them. They are re-solved, and a test checks
+			that every lockfile has every package its yaml lists.
+	Fixed - scheduled workflows
+		The fresh-solve and end-to-end jobs ran read_qc without a host database; they now pass
+			`--skip-bmtagger`, and fresh-solve checks tools with `doctor --tools-only`.
+	Changed - documentation
+		The README is shorter: memory and GPU tables moved to docs/hardware.md, the database table to
+			docs/installation.md, and the metaWRAP 1 migration notes to docs/metawrap1.md.
+	Removed - the CI and pre-commit check for .sh, .pl and .R files
+	Fixed - GTDB-Tk and argNorm on current library versions
+		gtdbtk.yaml pins python <3.13 and numpy <2 (GTDB-Tk 2.4 uses pydantic 1, which defines no fields
+			on Python 3.13+, and ndarray.tostring, removed in numpy 2); amr.yaml pins pandas <3 for
+			argNorm. The stale GTDB-Tk lockfile is removed. A test checks lockfiles against their yaml.
+		GTDB-Tk's failure hint points to the environment when GTDB-Tk had already loaded its data.
+	Fixed - database paths are passed to tools from the config
+		GTDBTK_DATA_PATH, CHECKM_DATA_PATH, CHECKM2DB, CHECKVDB and BAKTA_DB come from metawrap2.toml for
+			every tool process, so rebuilding an environment no longer loses them.
+	Fixed - check and doctor
+		Optional only when a flag allows skipping the database, named in the label. check viruses fails
+			without GENOMAD_DB. check <module> lists only that module's databases; doctor states its scope
+			(--all for every module) and counts what it prints.
+	New - Slurm executor for run and cohort, contributed by Matthew Nguyen (pull request #8)
+		`--executor slurm` submits each step as one sbatch job and waits for every job of a stage before
+			the next stage. Job options come from [slurm] and [slurm.modules.<module>] in metawrap2.toml
+			and from --slurm-partition, --slurm-account, --slurm-time, --slurm-qos, --slurm-constraint,
+			--slurm-gres and --slurm-gpus. -t and -m set each job's CPUs and memory, uncapped by the login
+			node's [limits]; -j sets how many jobs of a stage are queued at once.
+		Job IDs are recorded in the manifest before the driver waits. --resume reconnects to jobs still
+			queued or running, keeps jobs that finished, and resubmits steps whose jobs failed. Ctrl-C
+			cancels the running jobs. A job fails unless it ends COMPLETED with exit code 0; a preempted
+			job that is requeued is followed to its end. squeue and sacct errors are retried for 30 min.
+		Wall time, CPU time and peak memory come from sacct, for the manifest and provenance.txt. A
+			binning step on --device cuda requests gres gpu:1. --dry-run prints each sbatch command.
+	New - run and cohort check databases before the first step
+	Fixed - --dry-run wrote step markers that --resume trusted
+		Markers now record whether they were written by a dry run; dry runs write none, decompress
+			nothing, and do not make the real run refuse the directory. run/cohort --dry-run create no
+			output directory.
+	Fixed - concurrent GPU steps under run/cohort -j N all used the first card
+		Each concurrent learned-binner step gets its own card within --max-gpus, named in the banner.
+	Fixed - paths with spaces
+		Command templates are filled with each value quoted (fill_command, now in cmdtemplate.py), in every
+			module and in CheckM, CheckM2, GUNC and external benchmark arms.
+	Fixed - compressed reads named without .gz/.bz2 are reported with the rename to make
+	Fixed - tool failures print the tool, exit code and error tail; the traceback needs --verbose-logs
+	Fixed - non-UTF-8 tool output no longer stops a run
+	Fixed - phylogeny decompresses gzipped alignments before the tree builder
+	Fixed - false "already exists" warning in read_qc, assembly, kraken2 and reassemble_bins
+	Fixed - install-db
+		Honours [limits] max_disk_fraction; counts the unpacked size where the archive is removed after
+			unpacking; explains aria2c/curl exit codes; retries a refused connection after 15, 60 and 240 s;
+			names bin_refinement --skip-gunc when GUNC's database cannot be fetched.
+	Fixed - score and bin_refinement accept each other's GUNC flag; score exits 1 with no genomes
+	Fixed - smaller items
+		completion takes bash or zsh only; config init comments sit above each key; diff_abundance
+			accepts -t; the cost line shows n/a under 5 s and the share of the thread grant; a warning for
+			--single-end on interleaved reads; the geNomad error names --genomad-db; the example sheet
+			says it is read once; plain-file benchmark datasets land in extracted/.
+	Changed - read_qc's low-retention warning names long reads with decaying tail quality
+	New - scn_bioreactor dataset in benchmarks/datasets.toml for the trimmer comparison
+		2x251 bp bioreactor metagenomes (PRJNA279279). Trim Galore kept 32.6% more reads and 17.9% more
+			Q30 bases than fastp, for 21% less CPU. The default stays fastp.
+	New - check --for "<command>": the databases and envs one module command needs, and ready: yes/no
+	New - install-db --for <module> and --for-sheet <sheet>, with sizes and a total before installing
+	New - install-env and quickstart list the environments still building
+	New - costs in provenance.txt
+		Each step's CPU time, wall time and peak memory in a module's provenance.txt; a study-level
+			provenance.txt from run and cohort with the catalogue strategy, each step's cost and totals.
+	Changed - the scheduled fresh-solve workflow covers every default environment weekly and the opt-in
+		environments monthly, each solved from its yaml and checked with doctor --tools-only.
 
-    Slurm resources can be configured globally and per module, including CPUs,
-    memory, walltime, partition, account, GPU/GRES, constraints and QoS.
-    Each job receives an independent resource allocation rather than sharing
-    the login node's limits. `-j` controls concurrent Slurm jobs.
-
-    Scheduler job IDs are recorded in the study manifest. Resuming a workflow
-    can reconnect to an existing submitted job, avoiding duplicate execution.
-    Failed jobs and missing outputs stop dependent stages; unresolved scheduler
-    states are retained for investigation.
-
-    The initial implementation uses blocking job monitoring. Job arrays,
-    detached workflow submission and automatic retries are not yet supported.
-New - Slurm executor for workflow execution
-    `metawrap2 run` and `metawrap2 cohort` support `--executor slurm`, submitting
-    pipeline steps through sbatch and monitoring completion using squeue and sacct.
-    Local execution remains the default.
-
-    Slurm resources can be configured globally and per module, including CPUs,
-    memory, walltime, partition, account, GPU/GRES, constraints and QoS.
-    Each job receives an independent resource allocation rather than being
-    limited by the login node's resources. `-j` controls concurrent Slurm jobs
-    while preserving workflow stage ordering.
-
-    Submitted job IDs are recorded in the study manifest. `--resume` can reconnect
-    to existing Slurm jobs instead of submitting duplicates. Failed jobs and
-    missing outputs stop dependent stages, while uncertain scheduler states
-    are preserved for investigation.
-
-    The initial implementation uses blocking job monitoring. Job arrays,
-    detached execution and automatic retries are not yet supported.
-Fix - Global CLI flags not propagated to child modules (#7)
-    The `run` and `cohort` drivers previously applied global CLI overrides
-    only to the parent process. Child module invocations received `--force`,
-    `--resume` and `--dry-run`, but not resource-limit overrides or other
-    execution flags.
-
-    Added `child_global_flags()` to propagate resource overrides such as
-    `--max-threads`, `--max-memory-gb`, `--max-disk-fraction`, `--max-gpus`
-    and `--gpu-strict`, along with execution options including
-    `--skip-space-check`, `--skip-validation`, `--verbose-logs` and
-    `--heartbeat-seconds`.
-
-    This fixes cases where a child module used default resource limits
-    despite explicit overrides on the workflow command. For example, a
-    cohort launched with `--max-disk-fraction 0.9` previously failed
-    read_qc when filesystem usage exceeded the default 70% threshold.
-    Child modules now receive the requested 90% limit while preserving
-    their independently allocated CPU and memory resources.
-
-    Added regression tests covering resource overrides, execution flags,
-    child command construction and both run and cohort entry points.
 MetaWrap2 v=2.1.4
 	`metawrap2 score`, a progress heartbeat, a low-utilisation warning, verified multi-connection
 		downloads, a GPU check before learned binners, benchmark arms that run another pipeline,

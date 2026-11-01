@@ -33,6 +33,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     require_file,
     resolve_threads,
@@ -180,7 +181,7 @@ def main(argv: List[str]) -> int:
                 group, os.path.join(work, "%s_genomes%s" % (group.name, TSV_SUFFIX))
             )
             rc = run(
-                PPANGGOLIN.format(genome_list=listing, outdir=outdir, threads=args.threads),
+                fill_command(PPANGGOLIN, genome_list=listing, outdir=outdir, threads=args.threads),
                 env=env,
                 tool="ppanggolin workflow",
                 check=False,
@@ -198,7 +199,8 @@ def main(argv: List[str]) -> int:
             summaries.append(summary)
             if args.msa:
                 rc = run(
-                    PPANGGOLIN_MSA.format(
+                    fill_command(
+                        PPANGGOLIN_MSA,
                         pangenome=os.path.join(outdir, PANGENOME_FILE),
                         outdir=os.path.join(outdir, "msa"),
                         threads=args.threads,

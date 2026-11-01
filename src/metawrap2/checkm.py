@@ -16,6 +16,7 @@ import threading
 from typing import Dict, List, Optional, Tuple
 
 from . import mimag as _mimag
+from .cmdtemplate import fill_command
 from .command import run
 from .constants import BIN_EXTENSION, STATS_SUFFIX
 from .logging import comm
@@ -241,6 +242,18 @@ def checkm1_data_env() -> Dict[str, str]:
     return {"CHECKM_DATA_PATH": path} if path else {}
 
 
+#: Command templates, filled with :func:`metawrap2.cmdtemplate.fill_command` so a path with a space
+#: stays one argument. The two CheckM2 options are appended only when set.
+CHECKM2_PREDICT = (
+    "checkm2 predict --threads {threads} --input {bins} --output-directory {out} -x {ext} --force"
+)
+CHECKM2_DATABASE = "--database_path {db}"
+CHECKM2_TTABLE = "--ttable {ttable}"
+CHECKM1_LINEAGE_WF = (
+    "checkm lineage_wf -x {ext} {bins} {out} -t {threads} --tmpdir {tmp} --pplacer_threads {placer}"
+)
+
+
 def run_checkm2(
     bins_dir: str,
     *,
@@ -265,14 +278,17 @@ def run_checkm2(
     """
     checkm_out = bins_dir + ".checkm"
     db = database if database is not None else checkm2_database()
-    cmd = (
-        f"checkm2 predict --threads {threads} --input {bins_dir} --output-directory {checkm_out} "
-        f"-x {BIN_EXTENSION.lstrip('.')} --force"
+    cmd = fill_command(
+        CHECKM2_PREDICT,
+        threads=threads,
+        bins=bins_dir,
+        out=checkm_out,
+        ext=BIN_EXTENSION.lstrip("."),
     )
     if db:
-        cmd += f" --database_path {db}"
+        cmd += " " + fill_command(CHECKM2_DATABASE, db=db)
     if ttable:
-        cmd += f" --ttable {ttable}"
+        cmd += " " + fill_command(CHECKM2_TTABLE, ttable=ttable)
     run(
         cmd,
         env=env,
@@ -321,9 +337,14 @@ def _checkm1(
     Shared by the retries in :func:`run_checkm`. *reduced* adds ``--reduced_tree``.
     """
     placer = pplacer if pplacer is not None else pplacer_threads(threads, mem_gb, reduced)
-    cmd = (
-        f"checkm lineage_wf -x {BIN_EXTENSION.lstrip('.')} {bins_dir} {checkm_out} "
-        f"-t {threads} --tmpdir {tmp} --pplacer_threads {placer}"
+    cmd = fill_command(
+        CHECKM1_LINEAGE_WF,
+        ext=BIN_EXTENSION.lstrip("."),
+        bins=bins_dir,
+        out=checkm_out,
+        threads=threads,
+        tmp=tmp,
+        placer=placer,
     )
     if reduced:
         cmd += " --reduced_tree"

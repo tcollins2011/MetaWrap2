@@ -37,6 +37,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     make_checkpoint,
     require_file,
@@ -54,9 +55,9 @@ CONDA_ENV = MODULE_ENVS["kraken2"]
 # ─── COMMANDS (edit flags here) ──────────────────────────────────────────────────────────
 # One plot per input file. -n names the root of the wheel; without it Krona labels it "all".
 #
-# {root} is quoted: Krona takes input files positionally, so an unquoted name with a space
-# ("genome bin_006") becomes a second, nonexistent input path.
-KRONA = "ktImportText {inputs} -o {out} -n '{root}'"
+# {root} is quoted when the command is filled in: Krona takes input files positionally, so an
+# unquoted name with a space ("genome bin_006") becomes a second, nonexistent input path.
+KRONA = "ktImportText {inputs} -o {out} -n {root}"
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 DEFAULT_THREADS = 1
 #: genome x module, both completeness scores and every flag that qualifies them.
@@ -356,7 +357,7 @@ def _draw_krona(
                 continue
             html = os.path.join(krona_dir, "%s.%s.%s.html" % (unit, name, suffix))
             rc = run(
-                KRONA.format(inputs=text, out=html, root="%s %s" % (unit, name)),
+                fill_command(KRONA, inputs=text, out=html, root="%s %s" % (unit, name)),
                 env=env,
                 tool="ktImportText",
                 check=False,

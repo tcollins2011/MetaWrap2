@@ -31,6 +31,7 @@ from ..constants import FASTA_EXTENSIONS, STATS_SUFFIX, TSV_SUFFIX
 from ..io.seqio import contig_id, iter_fasta
 from ..progress import bar
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     check_fasta,
@@ -39,6 +40,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     list_bins,
     make_checkpoint,
@@ -564,7 +566,8 @@ def _run_cazy(args, genes_dir: str, todo: List[tuple]) -> None:
                 continue
             outdir = os.path.join(root, name)
             rc = run(
-                DBCAN.format(proteins=faa, outdir=outdir, db=db, threads=args.threads) + methods,
+                fill_command(DBCAN, proteins=faa, outdir=outdir, db=db, threads=args.threads)
+                + methods,
                 env=env,
                 tool="run_dbcan",
                 check=False,
@@ -630,7 +633,7 @@ def _run_bgc(args, genes_dir: str, todo: List[tuple]) -> None:
                 continue
             outdir = os.path.join(root, name)
             rc = run(
-                GECCO.format(genome=path, gff=gff, outdir=outdir, threads=args.threads),
+                fill_command(GECCO, genome=path, gff=gff, outdir=outdir, threads=args.threads),
                 env=env,
                 tool="gecco run",
                 check=False,
@@ -771,8 +774,8 @@ def _run_eggnog(args, genes_dir: str, todo: List[tuple], kofam_by_genome=None) -
             # emapper's --output_dir and --temp_dir are type=existing_dir, so create it first.
             ensure_dir(outdir)
             rc = run(
-                EGGNOG.format(
-                    proteins=faa, outdir=outdir, db=db, prefix=name, threads=args.threads
+                fill_command(
+                    EGGNOG, proteins=faa, outdir=outdir, db=db, prefix=name, threads=args.threads
                 ),
                 env=env,
                 tool="emapper.py",
@@ -923,11 +926,12 @@ def main(argv: List[str]) -> int:
             if ckpt.todo("bakta"):
                 bakta_out = os.path.join(args.output, "bakta")
                 ensure_dir(bakta_out)
-                db = "--db %s" % bakta_db if bakta_db else ""
+                db = Raw(fill_command("--db {db}", db=bakta_db) if bakta_db else "")
                 failed = 0
                 for name, path, _meta in bar(todo, desc="bakta", unit=" genome", total=len(todo)):
                     rc = run(
-                        BAKTA.format(
+                        fill_command(
+                            BAKTA,
                             threads=args.threads,
                             outdir=os.path.join(bakta_out, name),
                             prefix=name,

@@ -138,20 +138,18 @@ has no default binner and needs at least one binner flag or a preset; `metawrap2
 and SemiBin2 (as of 2026-10-09), which needs the `metawrap2-learned` environment (~1.5 GB of
 pytorch, built by `quickstart`).
 
-`--preset {very-fast,fast,default,gpu}` picks a binner set by compute. Clean high-quality MAGs
-(≥70/≤10 and non-chimeric by GUNC) from binning CAMI2 GI's gold assembly:
+`--preset {default,deep}` picks a binner set. `deep` adds COMEBin and trains on a GPU; `gpu` and
+`slow` are accepted as aliases of `deep`. Clean high-quality MAGs (≥70/≤10 and non-chimeric by GUNC)
+from binning CAMI2 GI's gold assembly:
 
 | tier | binners | HQ | clean HQ | clean/HQ | CPU-h |
 |---|---|---|---|---|---|
-| `very-fast` | metaBAT2 | 37 | 35 | 94.6% | 4.8 |
-| `fast` | metaBAT2 + MaxBin2 | 71 | 59 | 83.1% | 7.1 |
 | `default` | metaBAT2 + SemiBin2 | 131 | 114 | 87.0% | 86.8 (17 on a GPU) |
-| `gpu` | metaBAT2 + SemiBin2 + COMEBin | 183 | 177 | 96.7% | 52.8 on a GPU |
+| `deep` | metaBAT2 + SemiBin2 + COMEBin | 183 | 177 | 96.7% | 52.8 on a GPU |
 
-The tiers are not nested, and a preset never overrides a binner you named. On real per-sample
-assemblies the tiers are closer together; end to end, `default` gives 53 clean MAGs against metaWRAP
-1's 48 for 43.8 CPU-hours against 52.5, and `gpu` 60 against COMEBin alone's 57. `very-fast`'s 4.8
-CPU-hours is with minimap2 (22.9 under bwa). See [Benchmarks](benchmarks.md#3-binning) for both
+A preset never overrides a binner you named. On real per-sample assemblies the tiers are closer
+together; end to end, `default` gives 53 clean MAGs against metaWRAP 1's 48 for 43.8 CPU-hours
+against 52.5, and `deep` 60 against COMEBin alone's 57. See [Benchmarks](benchmarks.md#3-binning) for both
 designs and the choice of third binner.
 
 Binner flags:
@@ -159,7 +157,7 @@ Binner flags:
 - `--metabat2`, `--maxbin2` - read the shared depth table `work_files/contig_depth.txt`. MaxBin2's
   per-sample abundance files take its mean columns. `--maxbin2-max-iteration` sets the EM iteration
   limit (default 50, MaxBin2's own); on a 418k-contig co-assembly of 36 samples one iteration took
-  about 53 minutes, so 50 take about 40 hours. Preset costs in Benchmarks (3 samples, 17-63k
+  about 53 minutes, so 50 take about 40 hours. Binning costs in Benchmarks (3 samples, 17-63k
   contigs) do not scale to that size.
 - `--concoct` - opt-in (since 2026-10-02). On `cami2_gi` it used 192 of the 213 binning CPU-hours of
   a three-binner run, for 74 clean MAGs against the classical pair's 64. Coverage comes from
@@ -186,10 +184,10 @@ Other options:
 
 - `--device {cpu,cuda,cuda:N,auto}` - where the learned binners train. Default cpu, because GPU and
   CPU runs of the same seeded network can give different MAGs. `auto` uses a GPU if that binner's
-  torch sees one and falls back to the CPU otherwise. `--preset gpu` defaults to cuda; an explicit
+  torch sees one and falls back to the CPU otherwise. `--preset deep` defaults to cuda; an explicit
   `--device` overrides it. Peak VRAM is recorded: COMEBin 5.71 GB (17k and 63k contigs), SemiBin2
   0.41 GB on 16,936 contigs and 2.75 GB on 63,376, VAMB 0.56 GB on 16,527, so an 8 GB card runs all
-  three on that data. See [Hardware](https://github.com/ursky/MetaWrap2#hardware).
+  three on that data. See [Hardware](hardware.md).
 
   `cuda:N` pins the step to card N with `CUDA_VISIBLE_DEVICES`. Before each GPU step the card is
   checked with `nvidia-smi` and a line gives the card, its utilisation, its free memory and any

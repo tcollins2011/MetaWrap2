@@ -237,7 +237,7 @@ DB_KEYS = {
     # use the same database.
     "AMRFINDER_DB": "amr (AMRFinderPlus reference database)",
     # geNomad's database includes plasmid markers, so `amr` mobility calls and `viruses` share it.
-    "GENOMAD_DB": "viruses (geNomad marker database; also plasmid calls for amr)",
+    "GENOMAD_DB": "viruses (geNomad marker database)",
     "CHECKV_DB": "viruses (CheckV reference database)",
     # CARD's data, for `amr --rgi`. CARD releases every few months (4.0.2 at the time of writing);
     # name the directory by version, not `latest`.
@@ -274,27 +274,121 @@ NON_PATH_DB_KEYS = {"BLASTDB_NAME"}
 #: install-db points GUNC_DB at the ``.dmnd`` itself.
 FILE_DB_KEYS = {"GUNC_DB"}
 
-# Supported Slurm configuration keys for job submission and resource allocation.
-SLURM_KEYS = frozenset(
-    {
-        "partition",
-        "account",
-        "time",
-        "threads",
-        "memory_gb",
-        "gres",
-        "gpus",
-        "constraint",
-        "qos",
-        "output",
-        "error",
-        "poll_seconds",
-        "modules",
-    }
-)
 
-# Slurm keys that can be overridden per module, excluding the module overrides table itself.
-SLURM_MODULE_KEYS = SLURM_KEYS - {"modules"}
+@dataclass(frozen=True)
+class DbNeed:
+    """One database a module reads, and the flags that decide whether it is needed.
+
+    A need with neither *when* nor *skip* is required: the module cannot run without it. *when*
+    names the flag that turns the need on (``--bakta``); *skip* names the flags that let the module
+    run without it (``--skip-checkv``). *path_flag* passes the path on the command line instead of
+    the config. *fallback* is a key the module uses when this one is unset. *warn_only* means the
+    module warns and carries on when the key is unset; *note* says what it does then.
+    """
+
+    key: str
+    when: str = ""
+    skip: Tuple[str, ...] = ()
+    path_flag: str = ""
+    fallback: str = ""
+    warn_only: bool = False
+    note: str = ""
+
+
+#: Databases each module reads, with the flags that make each one needed or not. `check`, `doctor`
+#: and the sample-sheet preflight in `run`/`cohort` read this table. A module that is absent reads
+#: no database.
+MODULE_DB_NEEDS: Dict[str, Tuple[DbNeed, ...]] = {
+    "read_qc": (DbNeed("BMTAGGER_DB", skip=("--skip-bmtagger",)),),
+    "kraken2": (
+        DbNeed("KRAKEN2_DB"),
+        # bracken-build writes its files into the Kraken2 database directory, which the module
+        # uses when neither --bracken-db nor BRACKEN_DB is set.
+        DbNeed("BRACKEN_DB", when="--bracken", path_flag="--bracken-db", fallback="KRAKEN2_DB"),
+    ),
+    "blobology": (DbNeed("BLASTDB"), DbNeed("TAXDUMP")),
+    "classify_bins": (
+        DbNeed("BLASTDB", skip=("--gtdbtk",)),
+        DbNeed("TAXDUMP", skip=("--gtdbtk",)),
+        DbNeed("GTDBTK_DATA_PATH", when="--gtdbtk"),
+    ),
+    "bin_refinement": (
+        # CheckM2 also keeps a database path in its own env, so an unset CHECKM2DB only warns.
+        DbNeed(
+            "CHECKM2DB",
+            skip=("--checkm1", "--skip-checkm"),
+            warn_only=True,
+            note="CheckM2 uses the path stored in its env",
+        ),
+        DbNeed("CHECKM_DB", when="--checkm1"),
+        DbNeed("GUNC_DB", skip=("--skip-gunc",)),
+    ),
+    "reassemble_bins": (
+        DbNeed(
+            "CHECKM2DB",
+            skip=("--skip-checkm",),
+            warn_only=True,
+            note="CheckM2 uses the path stored in its env",
+        ),
+    ),
+    "binning": (
+        DbNeed(
+            "CHECKM2DB",
+            when="--run-checkm",
+            skip=("--checkm1",),
+            warn_only=True,
+            note="CheckM2 uses the path stored in its env",
+        ),
+        DbNeed("CHECKM_DB", when="--checkm1"),
+    ),
+    "annotate_bins": (
+        DbNeed(
+            "BAKTA_DB",
+            when="--bakta",
+            path_flag="--bakta-db",
+            warn_only=True,
+            note="Bakta uses its own default",
+        ),
+    ),
+    "annotate": (
+        DbNeed("BAKTA_DB", when="--bakta", path_flag="--bakta-db"),
+        DbNeed("KOFAM_DB", when="--kofam", path_flag="--kofam-db"),
+        DbNeed("PFAM_DB", when="--pfam", path_flag="--pfam-db"),
+        DbNeed("EGGNOG_DB", when="--eggnog", path_flag="--eggnog-db"),
+        DbNeed("DBCAN_DB", when="--cazy", path_flag="--cazy-db"),
+    ),
+    "pathways": (
+        DbNeed(
+            "KEGG_BRITE",
+            path_flag="--brite-db",
+            warn_only=True,
+            note="pathways skips the hierarchy and Krona plots",
+        ),
+    ),
+    "appraise": (DbNeed("SINGLEM_METAPACKAGE", path_flag="--metapackage"),),
+    "amr": (
+        DbNeed("AMRFINDER_DB", skip=("--skip-amrfinder",), path_flag="--db"),
+        DbNeed("CARD_DB", when="--rgi", path_flag="--card-db"),
+    ),
+    # geNomad makes the viral calls, so it has no skip flag.
+    "viruses": (
+        DbNeed("GENOMAD_DB", path_flag="--genomad-db"),
+        DbNeed("CHECKV_DB", skip=("--skip-checkv",), path_flag="--checkv-db"),
+    ),
+}
+
+#: Config key -> the environment variable its tool reads. The runner sets these in every tool's
+#: environment from the loaded config, so a rebuilt conda env (which drops ``conda env config
+#: vars``) still sees them. The config value replaces one already set in the user's shell, because
+#: the config is what `check` and `doctor` report.
+DB_ENV_VARS: Dict[str, str] = {
+    # GTDB-Tk reads its reference data location only from this variable.
+    "GTDBTK_DATA_PATH": "GTDBTK_DATA_PATH",
+    "CHECKM2DB": "CHECKM2DB",
+    "CHECKM_DB": "CHECKM_DATA_PATH",
+    "CHECKV_DB": "CHECKVDB",
+    "BAKTA_DB": "BAKTA_DB",
+}
 
 
 class ConfigError(Exception):
@@ -329,7 +423,8 @@ class Settings:
     #: it, and a cohort driver divides it among concurrent samples. See metawrap2.limits.
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     overrides: Dict[str, Dict[str, object]] = field(default_factory=dict)
-    #: Slurm defaults and per-module overrides.
+    #: The ``[slurm]`` table, for ``run --executor slurm``: job options and per-module
+    #: ``[slurm.modules.<module>]`` overrides. See :func:`slurm_options`.
     slurm: Dict[str, Any] = field(default_factory=dict)
 
     def db(self, key: str) -> str:
@@ -337,27 +432,6 @@ class Settings:
 
     def module_override(self, module: str) -> Dict[str, object]:
         return self.overrides.get(module, {})
-
-
-def resolve_slurm_settings(
-    settings: Settings,
-    module: str,
-    overrides: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Resolve Slurm settings for a module.
-
-    Precedence: CLI overrides > per-module Slurm settings > global Slurm settings.
-    """
-    slurm = settings.slurm
-
-    resolved = {key: value for key, value in slurm.items() if key != "modules"}
-
-    resolved.update(slurm.get("modules", {}).get(module, {}))
-
-    if overrides:
-        resolved.update({key: value for key, value in overrides.items() if value is not None})
-
-    return resolved
 
 
 def find_config(explicit: Optional[str] = None) -> Optional[str]:
@@ -393,8 +467,100 @@ CONFIG_TABLES = {
     "databases": "database paths - see DB_KEYS",
     "limits": "the run's resource budget - see metawrap2.limits.LIMITS_KEYS",
     "modules": "per-module option overrides, e.g. [modules.binning]",
-    "slurm": "Slurm job submission and resource options - see SLURM_KEYS",
+    "slurm": "Slurm job options for `run --executor slurm` - see SLURM_KEYS",
 }
+
+#: The keys ``[slurm]`` and ``[slurm.modules.<module>]`` understand, with the type each takes.
+SLURM_KEYS = {
+    "partition": "sbatch --partition",
+    "account": "sbatch --account",
+    "qos": "sbatch --qos",
+    "constraint": "sbatch --constraint",
+    "time": 'sbatch --time, e.g. "24:00:00"; unset uses the partition\'s default',
+    "gres": 'sbatch --gres, e.g. "gpu:1"',
+    "gpus": 'sbatch --gpus, e.g. 1 or "a100:1"',
+    "threads": "CPUs per job (--cpus-per-task) and the step's -t",
+    "memory_gb": "memory per job in GB (--mem) and the step's -m",
+    "extra_args": 'a list of further sbatch options, e.g. ["--exclude=node7"]',
+    "poll_seconds": "seconds between job-state checks ([slurm] only)",
+}
+
+#: ``[slurm]`` keys taking a positive whole number.
+_SLURM_INT_KEYS = {"threads", "memory_gb", "poll_seconds"}
+#: ``[slurm]`` keys that apply to the whole study, not to one module's jobs.
+_SLURM_GLOBAL_ONLY = {"poll_seconds"}
+
+
+def _slurm_table_problems(table: Dict[str, Any], label: str, where: str) -> List[str]:
+    """Problems with one ``[slurm]`` or ``[slurm.modules.<module>]`` table."""
+    problems: List[str] = []
+    known = [k for k in SLURM_KEYS if label == "slurm" or k not in _SLURM_GLOBAL_ONLY]
+    for key, value in table.items():
+        if label == "slurm" and key == "modules":
+            continue
+        if key not in known:
+            problems.append(
+                "unknown key '%s.%s'%s%s. Known keys: %s"
+                % (label, key, where, _did_you_mean(key, known), ", ".join(known))
+            )
+        elif key in _SLURM_INT_KEYS:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                problems.append("'%s.%s'%s must be a positive whole number" % (label, key, where))
+        elif key == "extra_args":
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                problems.append("'%s.%s'%s must be a list of strings" % (label, key, where))
+        elif key == "gpus":
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                problems.append("'%s.%s'%s must be a number or a string" % (label, key, where))
+        elif not isinstance(value, str):
+            problems.append("'%s.%s'%s must be a string" % (label, key, where))
+    if "gres" in table and "gpus" in table:
+        problems.append("'%s'%s sets both gres and gpus; use one" % (label, where))
+    return problems
+
+
+def check_slurm(slurm: Any, where: str = "") -> List[str]:
+    """Problems with a ``[slurm]`` table, for :func:`check_config`."""
+    if not isinstance(slurm, dict):
+        return ["[slurm]%s must be a table" % where]
+    problems = _slurm_table_problems(slurm, "slurm", where)
+    modules = slurm.get("modules", {})
+    if not isinstance(modules, dict):
+        return problems + ["[slurm.modules]%s must be a table" % where]
+    for module, table in modules.items():
+        if module not in MODULE_ENVS:
+            problems.append(
+                "unknown module [slurm.modules.%s]%s%s"
+                % (module, where, _did_you_mean(module, MODULE_ENVS))
+            )
+        if not isinstance(table, dict):
+            problems.append("[slurm.modules.%s]%s must be a table" % (module, where))
+            continue
+        problems += _slurm_table_problems(table, "slurm.modules.%s" % module, where)
+    return problems
+
+
+def slurm_options(
+    settings: Settings, module: str, overrides: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """The Slurm options for *module*'s jobs.
+
+    Later sources win: ``[slurm]``, then ``[slurm.modules.<module>]``, then *overrides* (the
+    command line). An override of None is ignored. ``gres`` and ``gpus`` are two forms of one
+    request, so a source that sets one replaces the other as well.
+    """
+    modules = settings.slurm.get("modules") or {}
+    resolved: Dict[str, Any] = {}
+    for layer in (
+        {k: v for k, v in settings.slurm.items() if k != "modules"},
+        dict(modules.get(module) or {}),
+        {k: v for k, v in (overrides or {}).items() if v is not None},
+    ):
+        for key, other in (("gres", "gpus"), ("gpus", "gres")):
+            if key in layer:
+                resolved.pop(other, None)
+        resolved.update(layer)
+    return resolved
 
 
 def _did_you_mean(name: str, known: Iterable[str]) -> str:
@@ -452,51 +618,9 @@ def check_config(data: Dict[str, Any], path: str = "") -> Tuple[List[str], List[
         except LimitsError as exc:
             # The message names the key; put the file name in front of it.
             problems.append("%s%s" % (("%s: " % path) if path else "", exc))
+    if "slurm" in data:
+        problems += check_slurm(data["slurm"], where)
     databases = data.get("databases")
-    slurm = data.get("slurm")
-    if slurm is not None:
-        if not isinstance(slurm, dict):
-            problems.append("[slurm]%s must be a table" % where)
-        else:
-            for key in slurm:
-                if key not in SLURM_KEYS:
-                    problems.append(
-                        "unknown key 'slurm.%s'%s%s. Known keys: %s"
-                        % (
-                            key,
-                            where,
-                            _did_you_mean(key, SLURM_KEYS),
-                            ", ".join(sorted(SLURM_KEYS)),
-                        )
-                    )
-
-            modules = slurm.get("modules", {})
-            if not isinstance(modules, dict):
-                problems.append("[slurm.modules]%s must be a table" % where)
-            else:
-                for module, options in modules.items():
-                    if module not in MODULE_ENVS:
-                        problems.append(
-                            "unknown Slurm module %r%s%s"
-                            % (module, where, _did_you_mean(module, MODULE_ENVS))
-                        )
-
-                    if not isinstance(options, dict):
-                        problems.append("[slurm.modules.%s]%s must be a table" % (module, where))
-                        continue
-
-                    for key in options:
-                        if key not in SLURM_MODULE_KEYS:
-                            problems.append(
-                                "unknown key 'slurm.modules.%s.%s'%s%s. Known keys: %s"
-                                % (
-                                    module,
-                                    key,
-                                    where,
-                                    _did_you_mean(key, SLURM_MODULE_KEYS),
-                                    ", ".join(sorted(SLURM_MODULE_KEYS)),
-                                )
-                            )
     if isinstance(databases, dict):
         known = set(DB_KEYS) | OPTIONAL_DB_KEYS
         for key in databases:
@@ -568,7 +692,7 @@ def load_settings(explicit: Optional[str] = None, strict: bool = True) -> Settin
         low_utilisation_fraction=optional_float("low_utilisation_fraction"),
         limits=limits,
         overrides={k: dict(v) for k, v in data.get("modules", {}).items()},
-        slurm=dict(data.get("slurm", {})),
+        slurm=dict(data["slurm"]) if isinstance(data.get("slurm"), dict) else {},
     )
 
 

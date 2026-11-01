@@ -226,34 +226,21 @@ class Manifest:
             # interrupted step (e.g. after an OOM) keeps it. See metawrap2.limits and
             # `metawrap2 calibrate`.
             entry["grant"] = dict(grant)
-            # Record the executor before submission so an interrupted Slurm submission
-            # can be distinguished from an ordinary interrupted local step.
-            if grant and grant.get("executor"):
+            if grant.get("executor"):
+                # Recorded before a Slurm job is submitted, so a resume can tell a step that was
+                # handed to the scheduler from an interrupted local one.
                 entry["executor"] = str(grant["executor"])
         with self._lock:
             self.data["steps"][name] = entry
             self.save()
         return started
 
-    def record_scheduler_job(
-        self,
-        name: str,
-        executor: str,
-        job_id: str,
-    ) -> None:
-        """Persist the scheduler job ID for a running step.
-
-        A scheduler job is attached only after the step's execution record exists. Rejecting
-        missing or finished steps prevents an old submission from overwriting a completed run.
-        """
+    def record_scheduler_job(self, name: str, executor: str, job_id: str) -> None:
+        """Attach the scheduler's job ID to running step *name*, so a resume can reconnect."""
         with self._lock:
             entry = self.data["steps"].get(name)
-
             if entry is None or entry.get("status") != "running":
-                raise ValueError(
-                    "Cannot attach scheduler job to a step that is not running: %s" % name
-                )
-
+                raise ValueError("step %s is not running; cannot record job %s" % (name, job_id))
             entry["executor"] = executor
             entry["scheduler_job_id"] = job_id
             self.save()
@@ -299,8 +286,6 @@ class Manifest:
             return False, "no record of it in the manifest"
         if record.status != COMPLETED:
             return False, "last attempt %s" % record.status
-        if not record.outputs:
-            return False, "step has no recorded outputs"
         problem = record.outputs_present()
         if problem:
             return False, problem
@@ -314,6 +299,48 @@ class Manifest:
     def summary(self) -> List[Dict[str, Any]]:
         """Every step, in the order it was recorded, for `metawrap2 status`-style output."""
         return [dict(name=name, **data) for name, data in self.data["steps"].items()]
+
+    def completed_usage(self) -> List[Tuple[str, Dict[str, Any]]]:
+        """``(step, usage)`` for every completed step, in recorded order.
+
+        A step recorded before usage was measured gets its ``duration_seconds`` as its wall time,
+        so the study's wall-clock total still counts it.
+        """
+        rows: List[Tuple[str, Dict[str, Any]]] = []
+        with self._lock:
+            steps = list(self.data["steps"].items())
+        for name, data in steps:
+            if data.get("status") != COMPLETED:
+                continue
+            usage = dict(data.get("usage") or {})
+            if "wall_seconds" not in usage and data.get("duration_seconds") is not None:
+                usage["wall_seconds"] = data["duration_seconds"]
+            rows.append((name, usage))
+        return rows
+
+    def completed_span_seconds(self) -> Optional[float]:
+        """Seconds from the first completed step's start to the last one's finish, or None.
+
+        This is the study's wall-clock time when steps ran in parallel; the sum of step times
+        counts parallel steps more than once.
+        """
+        starts: List[float] = []
+        ends: List[float] = []
+        with self._lock:
+            steps = list(self.data["steps"].values())
+        for data in steps:
+            if data.get("status") != COMPLETED:
+                continue
+            try:
+                started = time.mktime(time.strptime(data["started"], "%Y-%m-%dT%H:%M:%S"))
+                finished = time.mktime(time.strptime(data["finished"], "%Y-%m-%dT%H:%M:%S"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            starts.append(started)
+            ends.append(finished)
+        if not starts:
+            return None
+        return max(0.0, max(ends) - min(starts))
 
     def declared_paths(self) -> List[str]:
         """Every path any step declared as an output."""

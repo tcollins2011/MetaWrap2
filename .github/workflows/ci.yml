@@ -72,17 +72,3 @@ jobs:
             echo "--- $util --help"
             metawrap2 "$util" --help > /dev/null
           done
-
-  no-legacy-scripts:
-    name: No shell/perl/R scripts in repo
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Fail if any .sh/.pl/.R files exist
-        run: |
-          if find . -path ./.git -prune -o \( -name '*.sh' -o -name '*.pl' -o -name '*.R' \) -print | grep .; then
-            echo "MetaWrap2 is Python-only: remove the .sh/.pl/.R files listed above." >&2
-            exit 1
-          fi

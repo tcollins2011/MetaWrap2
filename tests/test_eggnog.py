@@ -27,6 +27,7 @@ import shutil
 from typing import List
 
 import pytest
+from _banner import unbanner
 
 from metawrap2 import eggnog
 from metawrap2.modules import annotate
@@ -326,7 +327,7 @@ def _said(capsys):
     ``comm`` wraps messages in a fixed-width banner, so substring checks on the raw capture would
     depend on where lines break.
     """
-    return " ".join(capsys.readouterr().out.replace("-", " ").replace("*", " ").split())
+    return unbanner(capsys.readouterr().out)
 
 
 def _setup(tmp_path, kofam_table=None):
@@ -470,7 +471,7 @@ def test_a_genome_emapper_fails_on_is_warned_about_not_fatal(tmp_path, monkeypat
         [(GENOME, "x.fa", False), ("bin_007", "y.fa", False)],
     )
     printed = _said(capsys)
-    assert "eggNOG mapper failed on bin_007" in printed
+    assert "eggNOG-mapper failed on bin_007" in printed
     with open(out / annotate.EGGNOG_TABLE) as handle:
         assert len(list(csv.DictReader(handle, delimiter="\t"))) == 6
 
@@ -484,4 +485,4 @@ def test_every_genome_failing_fails_the_step(tmp_path, monkeypatch, capsys):
             _namespace(tmp_path, out, db), str(genes_dir), [(GENOME, "x.fa", False)]
         )
     assert stopped.value.code == 1
-    assert "no eggNOG mapper output was produced" in _said(capsys)
+    assert "no eggNOG-mapper output was produced" in _said(capsys)

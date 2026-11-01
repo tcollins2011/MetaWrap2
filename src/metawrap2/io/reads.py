@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import zlib
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -124,6 +125,38 @@ def _first_read_name(path: str) -> Optional[str]:
                     name = name[:-2]
                 return name
     return None
+
+
+def _mate_base(header: str) -> str:
+    """A read's name without its ``/1`` or ``/2`` mate suffix (the text after a space is dropped,
+    which removes Illumina's ``1:N:0`` comment)."""
+    name = header[1:].strip().split(" ")[0]
+    return name[:-2] if name.endswith(("/1", "/2")) else name
+
+
+def looks_interleaved(path: str, records: int = 4) -> bool:
+    """True if the first *records* reads of *path* come in mate pairs, as in an interleaved file.
+
+    Reads 1 and 2, then 3 and 4, must share a name once ``/1``/``/2`` is removed. Single-end reads
+    have a different name each, so they do not match. Returns False if the file cannot be read or
+    holds fewer than two reads.
+    """
+    headers: List[str] = []
+    try:
+        with smart_open(path, "rt") as fh:
+            for number, line in enumerate(fh):
+                if number % 4 == 0:
+                    if not line.startswith("@"):
+                        return False
+                    headers.append(line)
+                    if len(headers) == records:
+                        break
+    except (OSError, EOFError, ValueError, zlib.error):
+        return False
+    pairs = len(headers) // 2
+    if not pairs:
+        return False
+    return all(_mate_base(headers[2 * i]) == _mate_base(headers[2 * i + 1]) for i in range(pairs))
 
 
 def classify(files: List[str], interleaved: bool = False, single: bool = False) -> ReadSet:

@@ -100,7 +100,12 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="also write the input table as BIOM beside the results",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
-    return p.parse_args(argv)
+    # ANCOM-BC runs in one thread. -t is accepted, as every other module takes it, and dropped so
+    # the run record does not claim a thread grant.
+    p.add_argument("-t", "--threads", type=int, help=argparse.SUPPRESS)
+    args = p.parse_args(argv)
+    del args.threads
+    return args
 
 
 def _read_long_table(path: str) -> Dict[str, Dict[str, float]]:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 from collections import Counter
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -65,6 +66,10 @@ from ..utils import strip_trailing_slash
 #: The two columns :func:`metawrap2.gunc.annotate_stats` appends, in its order. Imported from
 #: :mod:`metawrap2.gunc`, like ``checkm.STATS_HEADER`` and ``mimag.STATS_COLUMNS``.
 GUNC_STATS_COLUMNS: Tuple[str, ...] = _gunc.STATS_COLUMNS
+
+#: This command's flag for skipping GUNC, named in GUNC's hints. ``bin_refinement`` calls it
+#: --skip-gunc; both spellings are accepted by both.
+SKIP_GUNC_FLAG = "--no-gunc"
 
 #: Cache file for per-bin CheckM scores, with the estimator in the filename. Scores are keyed on a
 #: hash of the bin's contigs (see :class:`metawrap2.checkm.BinScoreCache`), so a ``--resume`` that
@@ -159,6 +164,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="don't run the GUNC chimerism check, so its 6.7 GB reference database is not "
         "needed",
     )
+    # bin_refinement spells it --skip-gunc; accept that here too.
+    p.add_argument("--skip-gunc", dest="run_gunc", action="store_false", help=argparse.SUPPRESS)
     p.add_argument(
         "--score-everything",
         action="store_true",
@@ -166,7 +173,19 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "are recorded as 0/100 completeness/contamination without being scored",
     )
     p.add_argument("--config", help="path to metawrap2.toml")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if _looks_like_number(args.extension):
+        # bin_refinement's -x is the contamination ceiling.
+        p.error(
+            "-x takes a FASTA extension here, not a contamination ceiling; did you mean "
+            "--contamination %s?" % args.extension.strip()
+        )
+    return args
+
+
+def _looks_like_number(text: str) -> bool:
+    """True for ``10``, ``7.5`` or ``.10``: a percentage, not a file extension."""
+    return re.fullmatch(r"\.?\d+(\.\d+)?", text.strip()) is not None
 
 
 def normalise_extension(extension: str) -> str:
@@ -381,6 +400,7 @@ def score_one(
             env=env,
             out_dir=staged + ".gunc",
             log_path=staged + ".gunc.log",
+            skip_flag=SKIP_GUNC_FLAG,
         )
         verdicts = _gunc.parse_report(str(report)) if report else {}
         # Called even when GUNC scored nothing, so every table written with GUNC on has its two
@@ -494,9 +514,8 @@ def main(argv: List[str]) -> int:
     if args.run_gunc and not (gunc_db and os.path.exists(gunc_db)):
         # A dry run warns and continues printing the plan. A real run stops before CheckM runs.
         (warning if dry_run() else error)(
-            "GUNC runs by default and its database is not configured (GUNC_DB=%s). %s\n"
-            "Or pass --no-gunc to score completeness and contamination only."
-            % (gunc_db or "<not set>", _gunc.DB_HINT)
+            "GUNC runs by default and its database is not configured (GUNC_DB=%s). %s"
+            % (gunc_db or "<not set>", _gunc.db_hint(SKIP_GUNC_FLAG))
         )
 
     rec = start_run("score", args, env, settings, inputs=list(args.bin_dirs))
@@ -554,6 +573,13 @@ def main(argv: List[str]) -> int:
             print("  Scored with %s:\n" % ("CheckM1" if args.checkm1 else "CheckM2"))
             print(comparison_table(results, args.completeness, args.contamination))
             print("\n  %s\n" % COMPARISON_NOTE)
+        if not dry_run() and not sum(result.genomes for result in results):
+            # Each empty set has had its warning; the run as a whole did nothing.
+            announcement(
+                "SCORING FINISHED WITH NOTHING TO DO - 0 genomes found in %d bin set(s)"
+                % len(results)
+            )
+            raise SystemExit(1)
         announcement("SCORING FINISHED SUCCESSFULLY!")
     finally:
         finish_run(rec, args.output)

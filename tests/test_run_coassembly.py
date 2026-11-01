@@ -48,4 +48,4 @@ def test_a_preset_in_a_sheet_decides_which_bin_sets_refinement_is_given():
         got = selected_binners(["--preset", tier])
         assert set(got) == set(expected), "%s resolved to %s" % (tier, got)
     # Same precedence the binning module applies, or the driver and the module would disagree.
-    assert selected_binners(["--preset", "gpu", "--metabat2"]) == ["metabat2"]
+    assert selected_binners(["--preset", "deep", "--metabat2"]) == ["metabat2"]

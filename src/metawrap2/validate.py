@@ -10,6 +10,8 @@ to what one module passes to the next:
 * :func:`require_nonempty_dir` - exists and contains something
 * :func:`check_fastq` / :func:`check_fasta` - the format matches the extension, and the file does
   not end mid-record
+* :func:`compression_mismatch` - a compressed file is named for its compression (part of
+  :func:`check_fastq`)
 * :func:`require_inputs` - the module-level entry point, reporting all problems at once
 
 FASTA truncation is detected from the tail of the file. Compressed files are read through
@@ -163,9 +165,37 @@ def _scan_lines(path: str):
     return first.decode("utf-8", "replace"), count, ends_with_newline
 
 
+#: Compression formats and the file suffixes the tools expect for them.
+_COMPRESSION_SUFFIXES = {"gzip": ".gz", "bzip2": ".bz2"}
+
+
+def compression_mismatch(path: str, what: str = "file") -> Optional[str]:
+    """A problem description if *path* is compressed but its name does not say so, else None.
+
+    MetaWrap2 reads either way (it sniffs the first bytes), but the tools decide by the suffix: a
+    gzipped ``reads_1.fastq`` is read as text, and FastQC failed on it with a 38-line traceback.
+    """
+    found = detect_compression(path)
+    lower = path.lower()
+    named = next((kind for kind, sfx in _COMPRESSION_SUFFIXES.items() if lower.endswith(sfx)), None)
+    if found == "none" or found == named:
+        return None
+    suffix = _COMPRESSION_SUFFIXES[found]
+    base = os.path.basename(path)
+    if named is None:
+        rename = base + suffix
+    else:
+        rename = base[: -len(_COMPRESSION_SUFFIXES[named])] + suffix
+    return (
+        "%s is %s-compressed but not named %s, so the tools would read it as the wrong format "
+        "(%s). Rename it to %s (or decompress it) and re-run."
+        % (_describe(path), found, suffix, what, rename)
+    )
+
+
 def check_fastq(path: str, what: str = "FASTQ file") -> Optional[str]:
     """Validate that *path* looks like a complete FASTQ file."""
-    problem = require_file(path, what)
+    problem = require_file(path, what) or compression_mismatch(path, what)
     if problem:
         return problem
     # One streaming pass: validate the first line, count all lines (a complete FASTQ has a multiple

@@ -41,8 +41,11 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     make_checkpoint,
+    output_existed,
+    quoted_words,
     resolve_threads,
     run,
     start_run,
@@ -212,7 +215,7 @@ def _kraken2(cmd: str, args, sample: str) -> str:
     if args.no_preload:
         cmd = cmd + " " + MEMORY_MAPPING
     if args.bracken:
-        cmd = cmd + " " + KRAKEN2_REPORT.format(report=_report_path(args, sample))
+        cmd = cmd + " " + fill_command(KRAKEN2_REPORT, report=_report_path(args, sample))
     return cmd
 
 
@@ -255,8 +258,13 @@ def _run_kraken_on_inputs(args, env, db) -> None:
                 comm("%s already exists - skipping running kraken2" % krak2)
             else:
                 cmd = _kraken2(
-                    KRAKEN2_PAIRED.format(
-                        db=db, threads=args.threads, out=krak2, r1=reads_1, r2=reads_2
+                    fill_command(
+                        KRAKEN2_PAIRED,
+                        db=db,
+                        threads=args.threads,
+                        out=krak2,
+                        r1=reads_1,
+                        r2=reads_2,
                     ),
                     args,
                     sample,
@@ -279,7 +287,7 @@ def _run_kraken_on_inputs(args, env, db) -> None:
                 comm("%s already exists - skipping running kraken2" % krak2)
             else:
                 cmd = _kraken2(
-                    KRAKEN2_SINGLE.format(db=db, threads=args.threads, out=krak2, seq=num),
+                    fill_command(KRAKEN2_SINGLE, db=db, threads=args.threads, out=krak2, seq=num),
                     args,
                     sample,
                 )
@@ -336,7 +344,8 @@ def _run_bracken(args, env, db: str, samples: Sequence[Tuple[str, str]]) -> None
         )
         comm("Estimating %s abundance for %s" % (_bracken.RANK_NAMES[rank], sample))
         run(
-            BRACKEN.format(
+            fill_command(
+                BRACKEN,
                 db=db,
                 report=report,
                 out=table,
@@ -401,7 +410,7 @@ def main(argv: List[str]) -> int:
             )
 
         announcement("RUNNING KRAKEN ON ALL FILES")
-        if os.path.isdir(args.output):
+        if output_existed():
             warning("%s already exists." % args.output)
         ensure_dir(args.output)
 
@@ -472,7 +481,7 @@ def main(argv: List[str]) -> int:
                 krona_files = [os.path.join(args.output, "<sample>.krona")]
             kronagram = os.path.join(args.output, "kronagram.html")
             run(
-                KTIMPORTTEXT.format(out=kronagram, krona_files=" ".join(krona_files)),
+                fill_command(KTIMPORTTEXT, out=kronagram, krona_files=quoted_words(krona_files)),
                 env=env,
                 tool="ktImportText",
             )

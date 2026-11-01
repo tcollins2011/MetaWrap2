@@ -5,6 +5,7 @@ One page per version: new features, changed defaults and the measurements behind
 
 | Version | Headline | Defaults that moved |
 |---|---|---|
+| [2.1.5](2.1.5.md) | Binning presets `default` and `deep`; Slurm executor for `run` and `cohort`; database check before a study starts; one GPU per concurrent step; `--dry-run` no longer leaves markers `--resume` trusts; fixes from a new-user test; shorter README | `--preset deep` = metaBAT2 + SemiBin2 + COMEBin, trains on cuda (`gpu` and `slow` still accepted) |
 | [2.1.4](2.1.4.md) | CheckM2 as the default scorer, `metawrap2 score`, bin sets scored in parallel in `bin_refinement`, progress heartbeat, low-utilisation warning, verified downloads, GPU check, external benchmark arms, `--preset gpu` (was `slow`), aligner index reuse, real-sample benchmarks on four datasets, CAMI2 bin counts against the known answer | CheckM2 replaces CheckM1 (`--checkm1` for the old scorer, now on the reduced tree); `--preset gpu` trains on cuda; heartbeat on |
 | [2.1.3](2.1.3.md) | Installation fixes, PDF report, MIMAG tags, Bracken, eggNOG-mapper, functional hierarchy images, tutorial, CAMI2 oral and skin benchmarks | none |
 | [2.1.2](2.1.2.md) | Functional annotation, viruses, AMR, diversity coverage, strains, long reads: 13 new modules and flags | GUNC, CheckM2 and GTDB-Tk pins raised; CoverM identity floors set; `classify_bins` taxator-tk deprecated |

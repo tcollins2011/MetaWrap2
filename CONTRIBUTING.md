@@ -1,6 +1,6 @@
 # Contributing to MetaWrap2
 
-Thanks for helping. MetaWrap2 is pure Python, with no shell, Perl or R scripts.
+Thanks for helping.
 
 ## Setup
 

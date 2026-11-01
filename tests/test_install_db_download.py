@@ -15,6 +15,7 @@ import os
 from typing import Callable, List, Optional, Tuple
 
 import pytest
+from _banner import unbanner
 
 from metawrap2.benchmark import fetch as _fetcher
 from metawrap2.commands import install_db
@@ -54,7 +55,7 @@ def test_a_corrupt_archive_is_not_accepted_as_a_downloaded_database(tmp_path, mo
     dest = tmp_path / "profiles.tar.gz"
 
     assert install_db._fetch("https://example.invalid/profiles.tar.gz", str(dest)) is False
-    out = capsys.readouterr().out
+    out = unbanner(capsys.readouterr().out)
     assert "decompression check failed" in out, out
     assert "does not decompress" in out
     assert len(calls) == _fetcher.ATTEMPTS, "a corrupt download is retried"
@@ -87,7 +88,7 @@ def test_a_good_archive_lands_under_its_real_name_and_says_what_checked_it(
     assert install_db._fetch("https://example.invalid/profiles.tar.gz", str(dest)) is True
     assert dest.read_bytes() == good
     assert len(calls) == 1
-    assert "verified (decompresses cleanly)" in capsys.readouterr().out
+    assert "verified (decompresses cleanly)" in unbanner(capsys.readouterr().out)
 
 
 def test_the_download_still_runs_through_install_dbs_own_run(tmp_path, monkeypatch):

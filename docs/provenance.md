@@ -9,11 +9,16 @@ MetaWrap2 writes a record of each run to its output directory and appends it to 
 | `run_config.json` | full run record: module, version, all resolved parameters (incl. defaults), config file, conda env, databases, platform, timing, inputs, exact commands, tool versions used, and the complete lineage |
 | `run_environment.json` | what the run used, written before any tool runs: the environment's full conda package list, the MetaWrap2 git commit, and each database's content fingerprint |
 | `run_commands.txt` | the exact commands run, in order; the first line is the top-level `metawrap2 <module>` reproducer |
-| `provenance.txt` | readable history of every MetaWrap2 step that led to this output |
+| `provenance.txt` | readable history of every MetaWrap2 step that led to this output, with each step's CPU time, wall time and peak memory |
 | `metawrap2.log` | one timestamped log of MetaWrap2's own messages and every line of every tool (rotates at 256 MB) |
 | `run.stdout` / `run.stderr` | raw tool output (streamed live to the screen and captured here) |
 
 `run_environment.json` is written first, so a run that fails early still records its environment.
+
+A `run` or `cohort` study also writes `provenance.txt` at its top level: the catalogue strategy,
+every step with its status and cost, and totals over the completed steps (CPU-hours, wall-clock
+time from the first step to the last, and peak memory). It is written when the study ends, also
+after a failure or an interruption.
 
 ### Database fingerprints
 
@@ -77,17 +82,10 @@ metawrap2 status study/ --audit          # is every recorded output still presen
 The `--resume` column uses the same check as `--resume`. The audit also runs at the end of every
 run and flags steps that reported success but produced no output.
 
-### Slurm job provenance and recovery
-
-When the Slurm executor is selected, MetaWrap2 records the scheduler type and submitted job ID in the study manifest, in addition to the existing command, resource grant, input fingerprints and output records.
-
-These records allow `--resume` to distinguish an unfinished Slurm job from a step that needs to be submitted again.
-
-A recorded running job can be reattached when its command is unchanged. If the scheduler cannot confirm the final job state, the manifest retains the unresolved execution state rather than treating the job as successfully completed or automatically resubmitting it.
-
-Users should inspect unresolved jobs using `squeue` and `sacct` before manually rerunning or cancelling them.
-
-Slurm scheduling metadata describes the job allocation; it should not be confused with measured resource consumption. The local executor's CPU and memory usage measurements are not automatically equivalent to Slurm accounting statistics.
+A step run with `--executor slurm` also records `executor` (`"slurm"`), `scheduler_job_id`, and in
+its `grant` the job's `threads`, `memory_gb`, `job_name` and any `partition`, `gres` or `gpus`. The
+job ID is written before the driver starts waiting, so `--resume` reconnects to a job that is still
+running instead of submitting it twice. See [Running on Slurm](usage.md#running-on-slurm).
 
 ## Reproducing a run
 
@@ -102,7 +100,8 @@ Slurm scheduling metadata describes the job allocation; it should not be confuse
 ## Per-step resource use
 
 Steps are reaped with `os.wait4`, so the manifest records each step's peak memory, CPU time and
-wall time. `metawrap2 calibrate <study>...` compares them with the built-in disk and memory
+wall time. Under `--executor slurm` the same keys come from `sacct` (`ElapsedRaw`, `UserCPU`,
+`SystemCPU` and the largest `MaxRSS` of the job's steps). `metawrap2 calibrate <study>...` compares them with the built-in disk and memory
 estimates.
 
 A step that used a GPU also records `peak_gpu_memory_bytes` and `gpu_devices`. `rusage` does not

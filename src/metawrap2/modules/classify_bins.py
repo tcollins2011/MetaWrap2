@@ -24,6 +24,7 @@ from ..io.seqio import contig_id, iter_fasta
 from ..scripts import classify_bins as _classify_helper
 from ..scripts import prune_blast_hits
 from ._common import (
+    ToolError,
     absolutize_paths,
     announcement,
     comm,
@@ -31,6 +32,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     list_bins,
     make_checkpoint,
@@ -75,6 +77,18 @@ GTDBTK = (
     "gtdbtk classify_wf --genome_dir {bins} --out_dir {out} -x "
     + BIN_EXTENSION.lstrip(".")
     + " --cpus {threads} --skip_ani_screen"
+)
+# GTDB-Tk logs this line once it has found its reference data. A failure after it is in the
+# environment, not the database.
+GTDBTK_DATA_LOADED = "Using GTDB-Tk reference data version"
+GTDBTK_DB_HINT = (
+    "GTDB-Tk needs its reference data: install it with `metawrap2 install-db gtdbtk`, which "
+    "sets GTDBTK_DATA_PATH in metawrap2.toml."
+)
+GTDBTK_ENV_HINT = (
+    "GTDB-Tk failed after loading its reference data, so this is not a database problem. "
+    "Rebuild its environment with `metawrap2 install-env gtdbtk --force`. GTDB-Tk 2.4.x needs "
+    "Python below 3.13 and numpy below 2; check with `mamba list -n metawrap2-gtdbtk`."
 )
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────────────
 TAXATOR_LCA_THRESHOLD = 0.3  # taxator -t (megan-lca support threshold)
@@ -136,6 +150,26 @@ def _write_mapping(pruned: str, mapping_out: str) -> None:
             out.write("%s\t%s\n" % (cols[4], cols[5]))
 
 
+def _gtdbtk_log(gtdb_out: str) -> str:
+    return os.path.join(gtdb_out, "gtdbtk.log")
+
+
+def _gtdbtk_hint(log_tail: str, gtdb_out: str, log_offset: int = 0) -> str:
+    """The hint for a failed classify_wf: the database hint, unless GTDB-Tk had loaded its data.
+
+    The error tail holds only the last lines of stderr, and a long traceback pushes the
+    reference-data line out of it, so GTDB-Tk's own log is read too, from *log_offset* (its size
+    before this run, since GTDB-Tk appends to it).
+    """
+    text = log_tail or ""
+    log = _gtdbtk_log(gtdb_out)
+    if os.path.isfile(log):
+        with open(log, "rb") as fh:
+            fh.seek(log_offset if log_offset <= os.path.getsize(log) else 0)
+            text += fh.read().decode("utf-8", errors="replace")
+    return GTDBTK_ENV_HINT if GTDBTK_DATA_LOADED in text else GTDBTK_DB_HINT
+
+
 def _classify_with_gtdbtk(args, settings, ckpt) -> None:
     """Classify bins with GTDB-Tk, writing the same bin_taxonomy.tab contract.
 
@@ -149,13 +183,18 @@ def _classify_with_gtdbtk(args, settings, ckpt) -> None:
     announcement("CLASSIFYING BINS WITH GTDB-TK")
     if ckpt.todo("gtdbtk"):
         comm("running gtdbtk classify_wf on %s" % args.bins)
-        run(
-            GTDBTK.format(bins=args.bins, out=gtdb_out, threads=args.threads),
-            env=env,
-            tool="gtdbtk",
-            hint="GTDB-Tk needs its reference data; set GTDBTK_DATA_PATH in the "
-            "metawrap2-gtdbtk env (gtdbtk download-db.sh).",
-        )
+        log = _gtdbtk_log(gtdb_out)
+        log_offset = os.path.getsize(log) if os.path.isfile(log) else 0
+        try:
+            run(
+                fill_command(GTDBTK, bins=args.bins, out=gtdb_out, threads=args.threads),
+                env=env,
+                tool="gtdbtk",
+                hint=GTDBTK_DB_HINT,
+            )
+        except ToolError as exc:
+            exc.hint = _gtdbtk_hint(exc.log_tail, gtdb_out, log_offset)
+            raise
         ckpt.done("gtdbtk")
     else:
         comm("skipping gtdbtk classify_wf (already done; --resume)")
@@ -269,7 +308,7 @@ def main(argv: List[str]) -> int:
                     "progress is written to %s" % (all_contigs, blastdb, raw)
                 )
                 run(
-                    BLASTN.format(threads=args.threads, blastdb=blastdb, query=all_contigs),
+                    fill_command(BLASTN, threads=args.threads, blastdb=blastdb, query=all_contigs),
                     env=env,
                     tool="blastn",
                     log_path=raw,
@@ -301,7 +340,8 @@ def main(argv: List[str]) -> int:
                 [
                     "bash",
                     "-c",
-                    TAXATOR.format(
+                    fill_command(
+                        TAXATOR,
                         taxdump=taxdump,
                         taxator_t=TAXATOR_LCA_THRESHOLD,
                         taxator_e=TAXATOR_MAX_EVALUE,
@@ -321,7 +361,8 @@ def main(argv: List[str]) -> int:
                 [
                     "bash",
                     "-c",
-                    BINNER.format(
+                    fill_command(
+                        BINNER,
                         taxdump=taxdump,
                         predictions=predictions,
                         genus_cutoff=BINNER_GENUS_CUTOFF,
@@ -339,7 +380,7 @@ def main(argv: List[str]) -> int:
                 [
                     "bash",
                     "-c",
-                    TAXKNIFE.format(taxdump=taxdump, binned=binned, output=contig_taxonomy),
+                    fill_command(TAXKNIFE, taxdump=taxdump, binned=binned, output=contig_taxonomy),
                 ],
                 env=env,
                 tool="taxknife",

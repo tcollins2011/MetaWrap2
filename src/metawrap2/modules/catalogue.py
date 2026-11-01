@@ -34,6 +34,7 @@ from ..config import MODULE_ENVS, load_settings
 from ..constants import TSV_SUFFIX
 from ..io.seqio import contig_id, iter_fasta
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     comm,
@@ -41,8 +42,10 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     make_checkpoint,
+    quoted_words,
     require_file,
     resolve_threads,
     run,
@@ -315,7 +318,7 @@ def _quantify(args, settings, catalogue_ffn: str, samples: List[Tuple[str, List[
     ensure_dir(work)
     index = os.path.join(work, "index")
     rc = run(
-        SALMON_INDEX.format(threads=args.threads, catalogue=catalogue_ffn, index=index),
+        fill_command(SALMON_INDEX, threads=args.threads, catalogue=catalogue_ffn, index=index),
         env=env,
         tool="salmon index",
         check=False,
@@ -328,9 +331,13 @@ def _quantify(args, settings, catalogue_ffn: str, samples: List[Tuple[str, List[
     mapping: Dict[str, Optional[float]] = {}
     for sample, reads in samples:
         out_dir = os.path.join(work, sample)
-        flags = "-1 %s -2 %s" % (reads[0], reads[1]) if len(reads) == 2 else "-r %s" % reads[0]
+        flags = Raw(
+            fill_command("-1 {r1} -2 {r2}", r1=reads[0], r2=reads[1])
+            if len(reads) == 2
+            else fill_command("-r {reads}", reads=reads[0])
+        )
         rc = run(
-            SALMON_QUANT.format(index=index, reads=flags, out=out_dir, threads=args.threads),
+            fill_command(SALMON_QUANT, index=index, reads=flags, out=out_dir, threads=args.threads),
             env=env,
             tool="salmon quant",
             check=False,
@@ -488,11 +495,12 @@ def main(argv: List[str]) -> int:
         if ckpt.todo("cluster"):
             for command, tool in (
                 (
-                    MMSEQS_CREATEDB.format(inputs=" ".join(prefixed_genes), db=db),
+                    fill_command(MMSEQS_CREATEDB, inputs=quoted_words(prefixed_genes), db=db),
                     "mmseqs createdb",
                 ),
                 (
-                    MMSEQS_LINCLUST.format(
+                    fill_command(
+                        MMSEQS_LINCLUST,
                         db=db,
                         clusters=clusters,
                         tmp=tmp,
@@ -502,7 +510,10 @@ def main(argv: List[str]) -> int:
                     ),
                     "mmseqs linclust",
                 ),
-                (MMSEQS_TSV.format(db=db, clusters=clusters, out=raw_members), "mmseqs createtsv"),
+                (
+                    fill_command(MMSEQS_TSV, db=db, clusters=clusters, out=raw_members),
+                    "mmseqs createtsv",
+                ),
             ):
                 if run(command, env=env, tool=tool, check=False) != 0:
                     error("%s failed; the catalogue cannot be built without it" % tool)

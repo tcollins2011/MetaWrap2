@@ -31,6 +31,7 @@ from ..constants import FASTA_EXTENSIONS, TSV_SUFFIX
 from ..io.seqio import contig_id, iter_fasta
 from ..progress import bar
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     check_fasta,
@@ -39,6 +40,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     list_bins,
     make_checkpoint,
@@ -289,7 +291,8 @@ def _hamronize(args, env, version: str, todo: List[Tuple[str, str]]) -> List[_am
             continue
         piece = os.path.join(work, "hamronized_%s%s" % (name, TSV_SUFFIX))
         rc = run(
-            HAMRONIZE.format(
+            fill_command(
+                HAMRONIZE,
                 tool_version=_amrfinder_version(env) or "unknown",
                 db_version=version,
                 genome=name,
@@ -315,7 +318,8 @@ def _hamronize(args, env, version: str, todo: List[Tuple[str, str]]) -> List[_am
                 continue
             piece = os.path.join(work, "hamronized_rgi_%s%s" % (name, TSV_SUFFIX))
             rc = run(
-                HAMRONIZE_RGI.format(
+                fill_command(
+                    HAMRONIZE_RGI,
                     tool_version=rgi_version,
                     db_version=card_version,
                     genome=name,
@@ -376,7 +380,7 @@ def _argnorm(args, env, harmonised: str) -> List[_amr.NormalisedCall]:
     """
     out_path = os.path.join(args.output, NORMALISED_TABLE)
     rc = run(
-        ARGNORM.format(input=harmonised, output=out_path),
+        fill_command(ARGNORM, input=harmonised, output=out_path),
         env=env,
         tool="argnorm",
         check=False,
@@ -472,7 +476,7 @@ def _run_rgi(args, settings, todo: List[Tuple[str, str]]) -> List[_amr.ArgCall]:
     ensure_dir(reports)
     comm("RGI against CARD %s" % version)
     rc = run(
-        RGI_LOAD.format(card_json=card_json),
+        fill_command(RGI_LOAD, card_json=card_json),
         env=env,
         tool="rgi load",
         check=False,
@@ -486,7 +490,7 @@ def _run_rgi(args, settings, todo: List[Tuple[str, str]]) -> List[_amr.ArgCall]:
     for name, path in bar(todo, desc="rgi", unit=" genome", total=len(todo)):
         prefix = os.path.join(reports, name)
         rc = run(
-            RGI_MAIN.format(genome=path, prefix=prefix, threads=args.threads),
+            fill_command(RGI_MAIN, genome=path, prefix=prefix, threads=args.threads),
             env=env,
             tool="rgi main",
             check=False,
@@ -545,12 +549,17 @@ def main(argv: List[str]) -> int:
                 "made, since only AMRFinderPlus reports them"
             )
         elif ckpt.todo("amrfinder"):
-            organism = " --organism %s" % args.organism if args.organism else ""
-            ident = " --ident_min %g" % args.min_identity if args.min_identity is not None else ""
+            organism = Raw(
+                fill_command(" --organism {o}", o=args.organism) if args.organism else ""
+            )
+            ident = Raw(
+                " --ident_min %g" % args.min_identity if args.min_identity is not None else ""
+            )
             for name, path in bar(todo, desc="screening", unit=" genome", total=len(todo)):
                 report = os.path.join(reports, name + TSV_SUFFIX)
                 rc = run(
-                    AMRFINDER.format(
+                    fill_command(
+                        AMRFINDER,
                         input=path,
                         db=db,
                         threads=args.threads,

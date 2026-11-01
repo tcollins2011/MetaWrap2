@@ -39,6 +39,7 @@ from ..limits import human
 from ..pyrun import PY
 from ..scripts import fix_megahit_contig_naming, rm_short_contigs, sort_contigs
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     check_disk_space,
@@ -50,11 +51,14 @@ from ._common import (
     error,
     expect_file,
     expect_produced,
+    fill_command,
     finish_run,
     fs_move,
     listdir,
     make_checkpoint,
     memory_arg,
+    output_existed,
+    quoted_words,
     require_file,
     resolve_memory_gb,
     resolve_threads,
@@ -218,15 +222,16 @@ def _run_metaspades(args, env, spades_out, settings):
     tmp = scratch_dir(settings, args.output, "metaspades")
     if not dry_run() and os.path.isfile(os.path.join(spades_out, "spades.log")):
         run(
-            METASPADES_RESTART.format(
-                out=spades_out, threads=args.threads, mem=args.memory, tmp=tmp
+            fill_command(
+                METASPADES_RESTART, out=spades_out, threads=args.threads, mem=args.memory, tmp=tmp
             ),
             env=env,
             tool="metaspades.py",
         )
     else:
         run(
-            METASPADES.format(
+            fill_command(
+                METASPADES,
                 tmp=tmp,
                 threads=args.threads,
                 mem=args.memory,
@@ -261,7 +266,7 @@ def _extract_unmapped(args, env, spades_out):
     aligner = ALIGNERS[args.aligner]
     index = index_path(long_scaffolds, args.aligner)
     run(
-        aligner["index_cmd"].format(assembly=long_scaffolds, index=index),
+        fill_command(aligner["index_cmd"], assembly=long_scaffolds, index=index),
         env=env,
         tool="%s index" % args.aligner,
     )
@@ -270,9 +275,16 @@ def _extract_unmapped(args, env, spades_out):
         [
             "bash",
             "-c",
-            EXTRACT_UNMAPPED.format(
-                align=aligner["paired"].format(
-                    threads=args.threads, index=index, r1=args.reads_1, r2=args.reads_2
+            fill_command(
+                EXTRACT_UNMAPPED,
+                align=Raw(
+                    fill_command(
+                        aligner["paired"],
+                        threads=args.threads,
+                        index=index,
+                        r1=args.reads_1,
+                        r2=args.reads_2,
+                    )
                 ),
                 fastq=unused_fastq,
             ),
@@ -301,8 +313,13 @@ def _run_megahit(args, env, megahit_out, spades_out, hybrid, settings):
         unused_fastq = os.path.join(args.output, "unused_by_metaspades.fastq")
         comm("assembling %s with megahit" % unused_fastq)
         run(
-            MEGAHIT_LEFTOVERS.format(
-                reads=unused_fastq, out=megahit_out, threads=args.threads, mem=mem, tmp=tmp
+            fill_command(
+                MEGAHIT_LEFTOVERS,
+                reads=unused_fastq,
+                out=megahit_out,
+                threads=args.threads,
+                mem=mem,
+                tmp=tmp,
             ),
             env=env,
             tool="megahit",
@@ -311,7 +328,8 @@ def _run_megahit(args, env, megahit_out, spades_out, hybrid, settings):
     else:
         comm("assembling %s and %s with megahit" % (args.reads_1, args.reads_2))
         run(
-            MEGAHIT_PAIRED.format(
+            fill_command(
+                MEGAHIT_PAIRED,
                 r1=args.reads_1,
                 r2=args.reads_2,
                 out=megahit_out,
@@ -370,9 +388,10 @@ def _run_flye(args, env, flye_out, settings):
         comm("-> %s" % report)
 
     run(
-        FLYE.format(
+        fill_command(
+            FLYE,
             flag=spec.flye_flag,
-            reads=" ".join(reads),
+            reads=quoted_words(reads),
             out=flye_out,
             threads=args.threads,
         ),
@@ -454,8 +473,10 @@ def _build_megahit_graph(
     # shows <sample>.bam).
     label = "<kmax>" if k is None else str(k)
     rc = run(
-        MEGAHIT_CONTIG2FASTG.format(
-            k=label, contigs=os.path.join(intermediates, "k%s.contigs.fa" % label)
+        fill_command(
+            MEGAHIT_CONTIG2FASTG,
+            k=label,
+            contigs=os.path.join(intermediates, "k%s.contigs.fa" % label),
         ),
         env=env,
         tool="megahit_toolkit contig2fastg",
@@ -637,7 +658,7 @@ def main(argv: List[str]) -> int:
     ckpt = make_checkpoint(args.output)
     try:
 
-        if os.path.isdir(args.output):
+        if output_existed():
             warning("%s already exists." % args.output)
         ensure_dir(args.output)
 
@@ -685,7 +706,8 @@ def main(argv: List[str]) -> int:
             announcement("RUNNING ASSEMBLY QC WITH QUAST")
             quast_out = os.path.join(args.output, "QUAST_out")
             run(
-                QUAST.format(
+                fill_command(
+                    QUAST,
                     threads=args.threads,
                     out=quast_out,
                     quast_min=QUAST_MIN_CONTIG,

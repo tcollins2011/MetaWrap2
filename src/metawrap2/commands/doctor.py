@@ -623,37 +623,36 @@ def repair(
     return rc or (1 if unfixable else 0)
 
 
-#: Database keys each module needs. A module with a healthy env still fails if its database is
-#: missing or incomplete.
-MODULE_DATABASES: Dict[str, List[str]] = {
-    "read_qc": ["BMTAGGER_DB"],
-    "kraken2": ["KRAKEN2_DB"],
-    "blobology": ["BLASTDB", "TAXDUMP"],
-    "classify_bins": ["BLASTDB", "TAXDUMP"],
-    # CheckM2 is the default scorer; CHECKM_DB (CheckM1) is only needed for --checkm1.
-    "bin_refinement": ["CHECKM2DB", "GUNC_DB"],
-    "reassemble_bins": ["CHECKM2DB"],
-    "binning": ["CHECKM2DB"],
-    "annotate_bins": [],
-    "assembly": [],
-    "quant_bins": [],
-}
+def _database_scope(modules: List[str], named: bool, every: bool) -> Tuple[List[str], str]:
+    """The modules whose databases to report, and a phrase naming that scope.
 
-
-def _report_databases(modules: List[str], config: Optional[str], verbose: bool = False) -> int:
-    """Print the state of every database the given modules need. Returns how many are unusable.
-
-    Optional databases (GTDB-Tk and Bakta, which a flag selects, and CheckM2's data when only the
-    binners are used) are reported but not counted as failures.
+    Named modules are reported as asked, ``--all`` reports every module's databases, and the
+    default is the default `run` pipeline's.
     """
-    from ..config import OPTIONAL_DB_KEYS, load_settings
+    if every:
+        return list(_module_names()), "every module; without --all, the default pipeline"
+    if named:
+        return list(modules), "for %s; --all for every module" % ", ".join(modules)
+    from .run import DEFAULT_STEPS
 
-    needed: List[str] = []
-    for module in modules:
-        for key in MODULE_DATABASES.get(module, []):
-            if key not in needed:
-                needed.append(key)
-    if not needed:
+    return list(DEFAULT_STEPS), "default pipeline; --all for every module"
+
+
+def _report_databases(
+    modules: List[str],
+    config: Optional[str],
+    verbose: bool = False,
+    scope: str = "",
+) -> int:
+    """Print the state of every database the given modules read. Returns how many are unusable.
+
+    A database the module has a flag to run without (see :data:`metawrap2.config.MODULE_DB_NEEDS`)
+    is reported but not counted as a failure.
+    """
+    from ..config import load_settings
+
+    keys = _dbcheck.keys_for(modules)
+    if not keys:
         return 0
 
     try:
@@ -662,22 +661,26 @@ def _report_databases(modules: List[str], config: Optional[str], verbose: bool =
         print("\nDatabases: could not read the config - %s" % exc)
         return 1
 
-    rows = _dbcheck.check(settings, sorted(needed))
-    print("\nDatabase status")
+    rows = _dbcheck.check(settings, keys)
+    print("\nDatabase status (%s)" % scope if scope else "\nDatabase status")
     print("=" * 74)
-    print("  %-18s %-11s %s" % ("database", "status", "detail"))
+    print("  %-19s %-11s %s" % ("database", "status", "detail"))
     print("  " + "-" * 70)
-    bad = 0
+    usable = bad = optional_missing = 0
     for key, status, detail in rows:
-        optional = key in OPTIONAL_DB_KEYS
-        shown = status if status == _dbcheck.OK or not optional else "%s (optional)" % status
-        print("  %-18s %-11s %s" % (key, shown, detail))
-        if status != _dbcheck.OK and not optional:
+        label = _dbcheck.label_for(key, modules)
+        print("  %-19s %-11s %s" % (key, status, detail))
+        if status == _dbcheck.OK:
+            usable += 1
+        elif label:
+            optional_missing += 1
+            print("  %-19s %-11s %s" % ("", "", label))
+        else:
             bad += 1
     print("  " + "-" * 70)
     print(
-        "  %d usable, %d unusable. Install with: metawrap2 install-db --list"
-        % (sum(1 for _k, st, _d in rows if st == _dbcheck.OK), bad)
+        "  %d of %d usable, %d required and unusable, %d optional and unusable. "
+        "Install with: metawrap2 install-db --list" % (usable, len(rows), bad, optional_missing)
     )
     if verbose:
         print(
@@ -697,6 +700,13 @@ def main(argv: List[str]) -> int:
         "--no-databases", action="store_true", help="skip checking the configured databases"
     )
     ap.add_argument("--config", help="config file to read database paths from")
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_databases",
+        help="report every module's databases (default: the default pipeline's, or the named "
+        "modules')",
+    )
     ap.add_argument("--verbose", action="store_true", help="list every tool and its version")
     ap.add_argument(
         "--fix",
@@ -768,7 +778,8 @@ def main(argv: List[str]) -> int:
 
     db_bad = 0
     if not args.tools_only and not args.no_databases:
-        db_bad = _report_databases(modules, args.config, verbose=args.verbose)
+        db_modules, scope = _database_scope(modules, bool(args.modules), args.all_databases)
+        db_bad = _report_databases(db_modules, args.config, verbose=args.verbose, scope=scope)
 
     if args.fix:
         # A default run's separate env (CheckM2) is rebuilt like a module env.

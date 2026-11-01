@@ -15,6 +15,8 @@ import os
 import shlex
 from typing import List, Optional, Tuple
 
+from _banner import unbanner
+
 from metawrap2.modules import assembly
 
 #: A MEGAHIT contig long enough to pass the module's 1 kb length filter, in MEGAHIT's header
@@ -156,7 +158,7 @@ def test_an_assembler_that_left_no_graph_is_reported_not_fatal(tmp_path, monkeyp
     # MEGAHIT produced contigs but no per-k intermediates, so there is nothing to convert.
     out, calls = _assemble(tmp_path, monkeypatch, "--keep-graph", intermediates=False)
     assert not os.path.exists(os.path.join(out, assembly.KEPT_GRAPHS["megahit"]))
-    printed = capsys.readouterr().out
+    printed = unbanner(capsys.readouterr().out)
     assert "no k*.contigs.fa" in printed
     assert os.path.getsize(os.path.join(out, "final_assembly.fasta"))
     assert [tool for _cmd, tool in calls if tool == "quast"]  # the run continued to the end

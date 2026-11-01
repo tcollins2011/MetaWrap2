@@ -18,6 +18,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import List, Optional, Tuple
 
@@ -49,6 +50,14 @@ def format_duration(seconds: float) -> str:
         return "%dm%02ds" % (minutes, secs)
     hours, minutes = divmod(minutes, 60)
     return "%dh%02dm" % (hours, minutes)
+
+
+def still_building_line(building: List[str], total: int) -> str:
+    """``  still building: annotate, learned (2 of 12)``, or ``""`` when none is building."""
+    if not building:
+        return ""
+    names = sorted(env.removeprefix("metawrap2-") for env in building)
+    return "  still building: %s (%d of %d)" % (", ".join(names), len(names), total)
 
 
 def envs_dir() -> str:
@@ -369,9 +378,17 @@ def main(argv: List[str]) -> int:
         print()
 
         total = len(todo)
+        #: Envs whose build has started and not finished, for the line printed after each one ends.
+        building: List[str] = []
+        building_lock = threading.Lock()
 
         def build(
-            position: int, module: str, env: str, yaml: str, lock: Optional[str]
+            position: int,
+            module: str,
+            env: str,
+            yaml: str,
+            lock: Optional[str],
+            rebuild: bool = False,
         ) -> Tuple[str, bool, str]:
             """Create one env, printing when it starts and how long it took.
 
@@ -382,7 +399,13 @@ def main(argv: List[str]) -> int:
             """
             print("  [%d/%d] %-22s solving..." % (position, total, env), flush=True)
             started = time.time()
-            result = _create_one(module, env, yaml, force, log_dir, lock)
+            with building_lock:
+                building.append(env)
+            try:
+                result = _create_one(module, env, yaml, force or rebuild, log_dir, lock)
+            finally:
+                with building_lock:
+                    building.remove(env)
             _m, ok, log = result
             if ok:
                 print(
@@ -398,21 +421,49 @@ def main(argv: List[str]) -> int:
                 )
             return result
 
+        def attempt(position: int, module: str, env: str, yaml: str, lock, rebuild=False) -> bool:
+            try:
+                return build(position, module, env, yaml, lock, rebuild)[1]
+            except Exception as exc:  # noqa: BLE001 - keep building the other envs
+                # build() did not print a result line in this case, so print one here.
+                print("  FAILED  %s   -> %s" % (env, exc))
+                return False
+
+        queue = list(enumerate(todo, start=1))
+        failed = []
+        if workers > 1 and len(queue) > 1:
+            # Parallel mamba processes share one package cache. The first build runs alone so the
+            # channel indexes are downloaded once, not written by several processes at once.
+            position, (m, e, y, lk) = queue.pop(0)
+            if not attempt(position, m, e, y, lk):
+                failed.append((position, (m, e, y, lk)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(build, i, m, e, y, lk): (m, e)
-                for i, (m, e, y, lk) in enumerate(todo, start=1)
+                pool.submit(attempt, i, m, e, y, lk): (i, (m, e, y, lk))
+                for i, (m, e, y, lk) in queue
             }
             for future in concurrent.futures.as_completed(futures):
-                module, env = futures[future]
-                try:
-                    _m, ok, _log = future.result()
-                except Exception as exc:  # noqa: BLE001 - keep building the other envs
-                    # build() did not print a result line in this case, so print one here.
-                    print("  FAILED  %s   -> %s" % (env, exc))
-                    ok = False
-                if not ok:
-                    rc = 1
+                if not future.result():
+                    failed.append(futures[future])
+                with building_lock:
+                    line = still_building_line(building, total)
+                if line:
+                    print(line, flush=True)
+
+        if failed and workers > 1:
+            # Concurrent downloads into the shared package cache can leave a truncated index or a
+            # missing archive; the same env usually builds when retried on its own.
+            print(
+                "\nRetrying %d environment(s) one at a time; builds running in parallel can "
+                "collide in conda's package cache." % len(failed)
+            )
+            retried = []
+            for position, (m, e, y, lk) in sorted(failed):
+                if not attempt(position, m, e, y, lk, rebuild=env_prefix(e) is not None):
+                    retried.append((position, (m, e, y, lk)))
+            failed = retried
+        if failed:
+            rc = 1
 
     if not args.no_test:
         # Verify only names that resolved; otherwise `doctor` reports an unknown name as a

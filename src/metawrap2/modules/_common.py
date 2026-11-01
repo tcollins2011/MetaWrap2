@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import re
 import resource
@@ -27,6 +28,7 @@ from .. import scratch as _scratch
 from .. import usage as _usage
 from .. import validate as _validate
 from ..checkpoint import make_checkpoint
+from ..cmdtemplate import Raw, fill_command, quoted_words  # re-exported for modules
 from ..command import ToolError, run, runner  # re-exported for modules
 from ..config import MODULE_ENVS, OPTIONAL_ENVS, Settings, conda_env_exists
 from ..constants import FASTA_EXTENSIONS
@@ -69,6 +71,7 @@ error = _log.error
 
 __all__ = [
     "DRIVEN_BY_RUN_ENV",
+    "Raw",
     "ToolError",
     "absolutize_paths",
     "add_checkm2_only_args",
@@ -87,6 +90,7 @@ __all__ = [
     "expect_file",
     "expect_produced",
     "file_size",
+    "fill_command",
     "finish_run",
     "force",
     "fs_copy",
@@ -97,6 +101,8 @@ __all__ = [
     "make_checkpoint",
     "memory_arg",
     "optional_env_for",
+    "output_existed",
+    "quoted_words",
     "read_layout",
     "require_databases",
     "require_file",
@@ -333,10 +339,14 @@ def start_run(
     ``finally`` so even a failed run leaves a record.
     """
     output = getattr(args, "output", None)
-    # Refuse to overwrite a previous MetaWrap2 run unless --force/--resume (or --dry-run).
+    # Decided before this run writes its own log into the folder.
+    global _output_preexisted
+    _output_preexisted = _has_prior_output(output) if output else False
+    # Refuse to overwrite a previous MetaWrap2 run unless --force/--resume (or --dry-run). A
+    # --dry-run's record does not count, so a preview can be followed by the real run.
     if (
         output
-        and os.path.isfile(os.path.join(output, "run_config.json"))
+        and _real_run_recorded(output)
         and not _cmd.runner.force
         and not _cmd.runner.resume
         and not _cmd.runner.dry_run
@@ -395,8 +405,9 @@ def start_run(
         stdout_log = os.path.join(output, "run.stdout")
         stderr_log = os.path.join(output, "run.stderr")
         # The logs are appended to within a run (one section per command), and across runs only
-        # with --resume. A fresh run truncates them so they describe only this run.
-        if not _cmd.runner.resume:
+        # with --resume. A fresh run truncates them so they describe only this run. A dry run
+        # runs no tools, so it leaves them as they are.
+        if not _cmd.runner.resume and not _cmd.runner.dry_run:
             for path in (stdout_log, stderr_log):
                 try:
                     open(path, "w").close()
@@ -448,6 +459,80 @@ def start_run(
             conda_env=env,
         )
     return rec
+
+
+#: Whether the current run's ``-o`` held anything before the run started; see
+#: :func:`output_existed`.
+_output_preexisted = False
+
+#: Files every run writes into its output folder, which say nothing about earlier results.
+_OWN_FILES = (
+    _log.RUN_LOG_NAME,
+    "run.stdout",
+    "run.stderr",
+    _runlock.LOCK_NAME,
+    ".metawrap2",
+)
+
+#: The provenance files ``finish_run`` writes, also under ``--dry-run``.
+_RECORD_FILES = ("run_config.json", "run_commands.txt", "provenance.txt")
+
+
+def _mark_dry_run(output: str) -> None:
+    """Add ``"dry_run": true`` to the run_config.json a ``--dry-run`` just wrote."""
+    path = os.path.join(output, "run_config.json")
+    try:
+        with open(path) as fh:
+            config = json.load(fh)
+        config["dry_run"] = True
+        with open(path, "w") as fh:
+            json.dump(config, fh, indent=2)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _recorded_dry_run(output: str) -> bool:
+    """True if *output* holds the record of a ``--dry-run`` (which ran nothing)."""
+    try:
+        with open(os.path.join(output, "run_config.json")) as fh:
+            config = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    command_line = config.get("command_line")
+    return config.get("dry_run") is True or (
+        isinstance(command_line, list) and "--dry-run" in command_line
+    )
+
+
+def _real_run_recorded(output: str) -> bool:
+    """True if *output* holds the record of a MetaWrap2 run that was not a ``--dry-run``."""
+    return os.path.isfile(os.path.join(output, "run_config.json")) and not _recorded_dry_run(output)
+
+
+def _has_prior_output(output: str) -> bool:
+    """True if *output* holds anything besides MetaWrap2's own logs and a dry run's record."""
+    if not os.path.isdir(output):
+        return False
+    ignored = set(_OWN_FILES)
+    if _recorded_dry_run(output):
+        ignored.update(_RECORD_FILES)
+    for entry in os.listdir(output):
+        # The run log rotates to metawrap2.log.1, .2, ...
+        if entry in ignored or entry.startswith(_log.RUN_LOG_NAME + "."):
+            continue
+        return True
+    return False
+
+
+def output_existed() -> bool:
+    """True if the current run's output folder held earlier results when the run started.
+
+    Decided in :func:`start_run` before the run writes its log there, so a module that warns about
+    an existing folder does not warn about the one it has just created.
+    """
+    return _output_preexisted
 
 
 def _start_disk_monitor(
@@ -532,7 +617,15 @@ def finish_run(
     if status is None:
         status = _outcome_from_context()
     try:
-        rec.finalize(output_dir, input_paths=inputs, capture_versions=not _cmd.runner.dry_run)
+        # A dry run records its plan, but never over the record of a run that did the work.
+        if not _cmd.runner.dry_run:
+            # Measured before the tool-version probes in finalize, which would add to it.
+            rec.finalize(
+                output_dir, input_paths=inputs, capture_versions=True, usage=self_usage(rec)
+            )
+        elif output_dir and not _real_run_recorded(output_dir):
+            rec.finalize(output_dir, input_paths=inputs, capture_versions=False)
+            _mark_dry_run(output_dir)
     finally:
         # Print the run's cost line for a standalone module (under `run` the driver prints it),
         # e.g. to show "24 threads granted, 1.0 core busy". Printed whatever the outcome, and
@@ -543,7 +636,16 @@ def finish_run(
             _active_gpu_watcher.stop()
         if not os.environ.get(DRIVEN_BY_RUN_ENV) and _cost_reported_for != rec.run_id:
             _cost_reported_for = rec.run_id
-            comm("%s used %s" % (rec.module, _usage.summarise(self_usage(rec))))
+            threads = rec.parameters.get("threads")
+            comm(
+                "%s used %s"
+                % (
+                    rec.module,
+                    _usage.summarise(
+                        self_usage(rec), threads=threads if isinstance(threads, int) else None
+                    ),
+                )
+            )
         if not _cmd.runner.dry_run:
             _history.record(
                 rec.module,
@@ -577,8 +679,9 @@ def _warn_odd_paths(paths: List[str]) -> None:
     for p in paths:
         if p and _ODD_PATH.search(p):
             warning(
-                "Path contains characters that can break some tools (spaces or shell "
-                "metacharacters): %s. Consider renaming to [A-Za-z0-9._/-]." % p
+                "Path contains a space or shell metacharacter: %s. MetaWrap2 passes it to each "
+                "tool as one argument, but some tools and wrapper scripts still split such paths. "
+                "If a step fails on it, rename the path to use only [A-Za-z0-9._/-]." % p
             )
 
 
@@ -609,10 +712,20 @@ def read_layout(args) -> _reads.ReadSet:
         error("--single-end and --interleaved are mutually exclusive.")
     files = [f for f in (getattr(args, "reads_1", None), getattr(args, "reads_2", None)) if f]
     try:
-        return _reads.classify(files, interleaved=interleaved, single=single)
+        layout = _reads.classify(files, interleaved=interleaved, single=single)
     except ValueError as exc:
         error(str(exc))
         raise  # unreachable: error() exits, but this tells the type checker so
+    # Interleaved data run as single-end doubles the read count and loses the pairing. The flag is
+    # obeyed, since the user gave it, but the likely mistake is named.
+    if single and _reads.looks_interleaved(layout.files[0]):
+        warning(
+            "%s looks interleaved: its first reads come in mate pairs (the same name, or /1 and "
+            "/2). It is processed as single-end because --single-end was given, which treats "
+            "each mate as a separate read. If it holds paired reads, re-run with --interleaved "
+            "instead." % layout.files[0]
+        )
+    return layout
 
 
 def resolve_threads(args, settings: Settings) -> int:
@@ -1093,7 +1206,7 @@ def align_read_sets(
         index_cmd = index_cmd.replace(
             "-x sr", "-x %s" % _long.resolve(long_read_type).minimap2_preset
         )
-    command = index_cmd.format(assembly=reference, index=index)
+    command = fill_command(index_cmd, assembly=reference, index=index)
     if _cmd.runner.dry_run:
         run(command, env=env, tool="%s index" % aligner)
     else:
@@ -1116,14 +1229,15 @@ def align_read_sets(
             continue
         comm("Aligning and sorting %s reads back to assembly" % sample)
         if single_end:
-            align = spec["single"].format(threads=threads, index=index, reads=entry[1])
+            align = fill_command(spec["single"], threads=threads, index=index, reads=entry[1])
         elif interleaved:
-            align = spec["interleaved"].format(threads=threads, index=index, reads=entry[1])
+            align = fill_command(spec["interleaved"], threads=threads, index=index, reads=entry[1])
         else:
             _s, r1, r2 = entry
-            align = spec["paired"].format(threads=threads, index=index, r1=r1, r2=r2)
+            align = fill_command(spec["paired"], threads=threads, index=index, r1=r1, r2=r2)
+        script = fill_command(ALIGN_SORT, align=Raw(align), tmp=tmp, threads=sort_threads, bam=bam)
         run(
-            ["bash", "-c", ALIGN_SORT.format(align=align, tmp=tmp, threads=sort_threads, bam=bam)],
+            ["bash", "-c", script],
             env=env,
             tool="%s | samtools sort" % aligner,
         )

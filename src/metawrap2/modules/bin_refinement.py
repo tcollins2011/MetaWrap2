@@ -51,6 +51,7 @@ from ..pyrun import PY
 from ..utils import strip_trailing_slash
 from ..validate import check_fasta
 from ._common import (
+    Raw,
     absolutize_paths,
     add_scorer_args,
     announcement,
@@ -59,12 +60,14 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     force,
     fs_replace_dir,
     listdir,
     make_checkpoint,
     memory_arg,
+    quoted_words,
     require_nonempty_dir,
     resolve_memory_gb,
     resolve_threads,
@@ -192,6 +195,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="don't run GUNC on the final bins. This skips the chimerism check, which CheckM "
         "does not do, and the need for the GUNC database",
     )
+    # `score` spells it --no-gunc; accept that here too.
+    p.add_argument("--no-gunc", dest="run_gunc", action="store_false", help=argparse.SUPPRESS)
     p.add_argument(
         "--skip-consolidation",
         dest="consolidate",
@@ -540,7 +545,8 @@ def _run_dastool(args, env: Optional[str], out: str, labels: Sequence[str]) -> N
     prefix = os.path.join(work, "dastool", "DASTool")
     ensure_dir(os.path.dirname(prefix))
     run(
-        DAS_TOOL.format(
+        fill_command(
+            DAS_TOOL,
             tables=",".join(tables),
             labels=",".join(labels),
             assembly=assembly,
@@ -593,12 +599,14 @@ def _refine(out: str, env: Optional[str], inputs: Sequence[str], dest: str) -> N
     """
     refined = "Refined_" + dest[len("bins") :]  # binsAB -> Refined_AB
     if len(inputs) == 2:
-        cmd = BINNING_REFINER.format(b1=inputs[0], b2=inputs[1], out=refined)
+        cmd = fill_command(BINNING_REFINER, b1=inputs[0], b2=inputs[1], out=refined)
     elif len(inputs) == 3:
-        cmd = BINNING_REFINER_3.format(b1=inputs[0], b2=inputs[1], b3=inputs[2], out=refined)
+        cmd = fill_command(BINNING_REFINER_3, b1=inputs[0], b2=inputs[1], b3=inputs[2], out=refined)
     else:
-        cmd = BINNING_REFINER_N.format(
-            bins=" ".join("-i %s" % shlex.quote(b) for b in inputs), out=refined
+        cmd = fill_command(
+            BINNING_REFINER_N,
+            bins=Raw(" ".join("-i %s" % shlex.quote(b) for b in inputs)),
+            out=refined,
         )
     run(cmd, env=None, tool="binning_refiner", cwd=out)
     produced = os.path.join(out, refined, "Refined")
@@ -1268,7 +1276,7 @@ def main(argv: List[str]) -> int:
                 comm("making completion and contamination ranking plots of final outputs")
                 # Runs with cwd=out (the plot is written to the working directory), so paths must
                 # be absolute; a relative -o resolved to out/out/binsA.stats.
-                stats_files = " ".join(
+                stats_files = quoted_words(
                     sorted(
                         os.path.abspath(os.path.join(out, f))
                         for f in os.listdir(out)
@@ -1277,7 +1285,7 @@ def main(argv: List[str]) -> int:
                 )
                 ensure_dir(os.path.join(out, "figures"))
                 run(
-                    PLOT_BINNING.format(comp=int(comp), cont=int(cont), stats=stats_files),
+                    fill_command(PLOT_BINNING, comp=int(comp), cont=int(cont), stats=stats_files),
                     env=None,
                     tool="plot_binning_results",
                     cwd=out,
@@ -1347,8 +1355,11 @@ def main(argv: List[str]) -> int:
             if args.run_checkm:
                 ensure_dir(os.path.join(out, "figures"))
                 run(
-                    PLOT_BINNING.format(
-                        comp=int(comp), cont=int(cont), stats=os.path.join(out, "<bin-set>.stats")
+                    fill_command(
+                        PLOT_BINNING,
+                        comp=int(comp),
+                        cont=int(cont),
+                        stats=os.path.join(out, "<bin-set>.stats"),
                     ),
                     env=None,
                     tool="plot_binning_results",

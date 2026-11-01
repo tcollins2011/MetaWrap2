@@ -19,3 +19,5 @@ dependencies:
   - ncbi-amrfinderplus >=4.0
   - hamronization >=1.1
   - argnorm >=0.6
+  # argNorm fails on pandas 3 (in Index.get_loc), and its conda package does not cap pandas.
+  - pandas <3

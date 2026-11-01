@@ -1,6 +1,7 @@
 import os
 
 import pytest
+from _banner import unbanner
 
 from metawrap2.modules import reassemble_bins
 
@@ -107,7 +108,7 @@ def test_checkm1_is_refused_with_one_sentence(capsys):
     reassemble = ["-b", "b", "-o", "o", "-1", "r1", "-2", "r2"]
     with pytest.raises(SystemExit):
         reassemble_bins._parse_args(reassemble + ["--checkm1"])
-    err = capsys.readouterr().err
+    err = unbanner(capsys.readouterr().err)
     assert "reassemble_bins scores bins with CheckM2 only" in err
 
 

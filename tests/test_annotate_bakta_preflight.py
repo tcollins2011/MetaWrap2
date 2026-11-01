@@ -18,6 +18,7 @@ import os
 from typing import List
 
 import pytest
+from _banner import unbanner
 
 from metawrap2.modules import annotate
 
@@ -73,7 +74,7 @@ def test_bakta_without_a_database_fails_before_launching_anything(tmp_path, comm
     with pytest.raises(SystemExit) as stopped:
         annotate.main(argv)
     assert stopped.value.code == 1
-    out = capsys.readouterr().out
+    out = unbanner(capsys.readouterr().out)
     assert "--bakta needs BAKTA_DB" in out
     assert "bakta_db download" in out, "the message has to name the way out"
     assert commands == [], "nothing may be launched before the database is checked"
@@ -96,7 +97,7 @@ def test_bakta_failing_on_every_bin_fails_the_step(tmp_path, monkeypatch, capsys
     with pytest.raises(SystemExit) as stopped:
         annotate.main(argv)
     assert stopped.value.code == 1
-    out = capsys.readouterr().out
+    out = unbanner(capsys.readouterr().out)
     assert "Bakta failed on 3 of 3 bins" in out
     assert "no Bakta output was produced" in out
     assert "SUCCESSFULLY FINISHED" not in out
@@ -123,7 +124,7 @@ def test_one_bin_failing_out_of_several_still_finishes(tmp_path, monkeypatch, ca
         _config(str(tmp_path / "metawrap2.toml"), BAKTA_DB=str(db)),
     ]
     assert annotate.main(argv) == 0
-    out = capsys.readouterr().out
+    out = unbanner(capsys.readouterr().out)
     assert "Bakta failed on" in out, "the one failure is still reported"
     assert "of 3 bins" not in out, "one failure of three is not a failed step"
     assert "SUCCESSFULLY FINISHED" in out
@@ -147,6 +148,6 @@ def test_dbcan_failing_on_every_genome_fails_the_step(tmp_path, monkeypatch, cap
     with pytest.raises(SystemExit) as stopped:
         annotate.main(argv)
     assert stopped.value.code == 1
-    out = capsys.readouterr().out
+    out = unbanner(capsys.readouterr().out)
     assert "dbCAN failed on 2 of 2 bins" in out
     assert "SUCCESSFULLY FINISHED" not in out

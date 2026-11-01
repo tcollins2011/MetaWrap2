@@ -90,10 +90,14 @@ jobs:
         if: steps.plan.outputs.missing == ''
         run: |
           cat > sheet.toml <<'TOML'
-          # The committed fixture, one paired sample. No [modules] section, so the modules run
-          # with their defaults, as for a user.
+          # The committed fixture, one paired sample. Modules run with their defaults, except
+          # that read_qc skips host removal: the runner has no host index, and the reads are
+          # simulated.
           [settings]
           coassemble = true
+
+          [modules]
+          read_qc = "--skip-bmtagger"
 
           [[samples]]
           name = "tiny"

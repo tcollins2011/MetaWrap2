@@ -27,6 +27,7 @@ from ..config import MODULE_ENVS, load_settings
 from ..constants import BIN_EXTENSION, FASTA_EXTENSIONS, STATS_SUFFIX, TSV_SUFFIX
 from ..utils import bin_name_from_filename, quality_score
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     comm,
@@ -34,6 +35,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     list_bins,
     make_checkpoint,
@@ -473,13 +475,14 @@ def main(argv: List[str]) -> int:
                 % (args.ani, args.min_aligned_fraction)
             )
             run(
-                SKANI_TRIANGLE.format(
+                fill_command(
+                    SKANI_TRIANGLE,
                     genome_list=genome_list,
                     output=ani_table,
                     threads=args.threads,
                     screen=SKANI_SCREEN,
                     min_af=args.min_aligned_fraction,
-                    preset=_preset_flag(args.preset),
+                    preset=Raw(_preset_flag(args.preset)),
                 ),
                 env=env,
                 tool="skani",

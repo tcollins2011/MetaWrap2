@@ -9,7 +9,7 @@ the measured effect of each addition. metaWRAP 1.3.0 is the baseline throughout.
 | cross-sample coverage | none | `coverage`: one depth table, N alignments instead of N² |
 | dereplication | none | `dereplicate`: a cohort's bins collapsed to organisms |
 | binners | metaBAT2, MaxBin2, CONCOCT | those three plus SemiBin2, VAMB, COMEBin, GPU-capable |
-| which binners run | one fixed set | four `--preset` tiers, 35 to 177 clean MAGs |
+| which binners run | one fixed set | `--preset default` or `deep`, 114 and 177 clean MAGs |
 | depth table | `jgi_summarize_bam_contig_depths` | own implementation; identity floor measured and moved |
 | chimera detection | none | GUNC on every final bin set, on by default |
 | consolidation | CheckM on every combination | same, minus repeat and ruled-out calls |
@@ -120,34 +120,33 @@ selects it.
 
 | arm | high-quality | clean | CPU-h *(binning + refinement)* | GPU-h |
 |---|---|---|---|---|
-| `--preset very-fast` | 39 | 36 | **8.8** | - |
-| `--preset fast` | 45 | 41 | 13.8 | - |
 | **metaWRAP 1.3.0** | **52** | **48** | **52.5** | - |
 | `--preset default` | 56 | **53** | **43.8** | 0.6 |
-| `--preset gpu` | 64 | **60** | 120.7 | 2.4 |
+| `--preset deep` | 64 | **60** | 120.7 | 2.4 |
 
-All tiers share the same assemblies (83 CPU-hours, excluded; including them would reduce a 14× spread
-to 2.2×). GPU-hours are the wall time of binners run with `--device cuda`; the CPU-hours for `default`
-and `gpu` assume a GPU.
+All arms share the same assemblies (83 CPU-hours, excluded; including them would reduce the 2.8×
+spread between `default` and `deep` to 1.6×). GPU-hours are the wall time of binners run with
+`--device cuda`; the CPU-hours for `default` and `deep` assume a GPU.
 
 - `default`: 10% more clean MAGs than metaWRAP 1 for 17% less CPU. Default tier since 2026-10-09.
-- `fast`, the previous default: 15% fewer clean MAGs for 74% less CPU.
-- `gpu`: 25% more clean MAGs for 130% more CPU. Three bin sets give 7 hybrid combinations to
-  refine, against `default`'s 3.
+- `deep`: 25% more clean MAGs for 130% more CPU, with SemiBin2 and COMEBin on a GPU (2.4
+  GPU-hours). Three bin sets give 7 hybrid combinations to refine, against `default`'s 3.
 
-A plain `metawrap2 run` needs `metawrap2-learned` (~1.5 GB of pytorch), which `quickstart` builds;
-`--preset fast` runs without it.
+The former `fast` and `very-fast` presets (metaBAT2 + MaxBin2, and metaBAT2 alone) returned 41 and
+36 clean MAGs for 13.8 and 8.8 CPU-hours, fewer than metaWRAP 1, and are no longer documented.
 
-These costs are for CAMI2 (3 samples, 17-63k contigs). MaxBin2, almost all of `fast`'s cost, slows
-with more contigs and samples: on a 418k-contig co-assembly of 36 samples one EM iteration took about
-53 minutes, so the default 50 iterations take about 40 hours. `--maxbin2-max-iteration` sets the
+A plain `metawrap2 run` needs `metawrap2-learned` (~1.5 GB of pytorch), which `quickstart` builds.
+
+These costs are for CAMI2 (3 samples, 17-63k contigs). MaxBin2 slows with more contigs and samples:
+on a 418k-contig co-assembly of 36 samples one EM iteration took about 53 minutes, so the default
+50 iterations take about 40 hours. `--maxbin2-max-iteration` sets the
 limit.
 
 ![Cost per step](figures/mw1_steps.png)
 
-metaWRAP 1's binning costs 38.4 CPU-hours against 1.8 for MetaWrap2 `--preset fast` (minimap2
-instead of bwa, two binners instead of three).
-Refinement scores 3 combinations with CheckM instead of 7.
+metaWRAP 1's binning costs 38.4 CPU-hours against 32.5 for MetaWrap2 default (minimap2 instead of
+bwa; metaBAT2 + SemiBin2, with SemiBin2 on a GPU, instead of three binners).
+Refinement of two bin sets scores 3 combinations instead of 7.
 
 ![Share of CPU by step](figures/cost_landscape.png)
 
@@ -167,8 +166,7 @@ by a few genera.
 | oral | 45 clean (49 HQ) | **51 clean** (57 HQ) | +13% | 172.6 vs 184.9 |
 | skin | 41 clean (48 HQ) | **50 clean** (57 HQ) | +22% | 136.2 vs 200.2 |
 
-All six counts use the per-bin CheckM2 ∩ GUNC join. The figure adds `--preset fast` and
-`--preset gpu`, with a binning-plus-refinement cost panel.
+All six counts use the per-bin CheckM2 ∩ GUNC join. The figure adds `--preset deep`, with a binning-plus-refinement cost panel.
 
 Per sample, `default` wins five of the six oral and skin samples and ties one (oral 20/17, 13/10,
 18/18; skin 14/10, 17/16, 19/15 clean).
@@ -181,23 +179,20 @@ more expensive on skin (9 more clean MAGs for 64 more CPU-hours).
 ### 2.2 Presets on CAMI2 oral
 
 Same scoring. Cost is binning plus refinement on the `default` arm's assemblies. `default` ran
-SemiBin2 on CPU and `gpu` on a GPU, so only `fast` and `default` are comparable on cost; likewise in
-§2.3.
+SemiBin2 on CPU and `deep` on a GPU, so their costs are not comparable; likewise in §2.3.
 
 ![Binning presets on CAMI2 oral](figures/oral_tiers.png)
 
 | arm | binners | device | clean | HQ | CPU-h *(binning + refinement)* |
 |---|---|---|---:|---:|---:|
-| `--preset fast` | metaBAT2 + MaxBin2 | cpu | 39 | 50 | **9.4** |
 | **metaWRAP 1.3.0** | metaBAT2 + MaxBin2 + CONCOCT | cpu | **45** | 49 | 123.4 |
 | `--preset default` | metaBAT2 + SemiBin2 | cpu | 51 | 57 | 132.8 |
-| `--preset gpu` | + COMEBin | cuda | **59** | 63 | 80.3 |
+| `--preset deep` | + COMEBin | cuda | **59** | 63 | 80.3 |
 
-- `gpu` recovers 16% more clean MAGs than `default` (13% on gastrointestinal, 60 vs 53) and wins on
+- `deep` recovers 16% more clean MAGs than `default` (13% on gastrointestinal, 60 vs 53) and wins on
   each sample (23/20, 15/13, 21/18). A user-testing run on MetaHIT reads gave +58%.
-- `fast` recovers fewer clean MAGs than metaWRAP 1 (39 against 45) for 7% of its compute.
 
-`gpu`'s cost with SemiBin2 and COMEBin on CPU has not been measured.
+`deep`'s cost with SemiBin2 and COMEBin on CPU has not been measured.
 
 ### 2.3 Presets on CAMI2 skin
 
@@ -205,15 +200,13 @@ SemiBin2 on CPU and `gpu` on a GPU, so only `fast` and `default` are comparable 
 
 | arm | binners | device | clean | HQ | CPU-h *(binning + refinement)* |
 |---|---|---|---:|---:|---:|
-| `--preset fast` | metaBAT2 + MaxBin2 | cpu | 35 | 41 | **10.7** |
 | **metaWRAP 1.3.0** | metaBAT2 + MaxBin2 + CONCOCT | cpu | **41** | 48 | 81.0 |
 | `--preset default` | metaBAT2 + SemiBin2 | cpu | 50 | 57 | 147.7 |
-| `--preset gpu` | + COMEBin | cuda | **54** | 59 | 122.3 |
+| `--preset deep` | + COMEBin | cuda | **54** | 59 | 122.3 |
 
-- `gpu` recovers 8% more clean MAGs than `default`, against 16% on oral and 13% on gastrointestinal.
+- `deep` recovers 8% more clean MAGs than `default`, against 16% on oral and 13% on gastrointestinal.
   Per sample it wins two and ties one (15/14, 17/17, 22/19); on the tie it made one more high-quality
   bin, which GUNC failed.
-- `fast` recovers fewer clean MAGs than metaWRAP 1 (35 against 41) for 13% of its compute.
 
 On sample_17, CheckM1 inside `bin_refinement` needed `--reduced_tree` for COMEBin's bin set, so that
 sample's hybrid choice used a slightly different scorer; the counts still come from the CheckM2 ∩
@@ -235,25 +228,25 @@ duplicated markers, and cannot exceed 100%.
 Bins by truth-based quality (CAMI3 against its prokaryote-only truth, since its gold standard also
 holds the human host and fungi):
 
-| | metaWRAP 1 | `very-fast` | `fast` | default | `gpu` |
-|---|---:|---:|---:|---:|---:|
-| gastrointestinal, ≥90% / ≤5% | 115 | 84 | 109 | 135 | 179 |
-| gastrointestinal, ≥70% / ≤10% | 134 | 99 | 130 | 157 | 196 |
-| oral, ≥90% / ≤5% | 146 | 96 | 134 | 156 | 247 |
-| oral, ≥70% / ≤10% | 175 | 115 | 167 | 191 | 291 |
-| skin, ≥90% / ≤5% | 101 | 82 | 100 | 135 | 197 |
-| skin, ≥70% / ≤10% | 139 | 105 | 132 | 186 | 258 |
-| CAMI3 toy, ≥90% / ≤5% | 175 | 124 | 166 | 161 | 215 |
-| CAMI3 toy, ≥70% / ≤10% | 238 | 174 | 223 | 233 | 273 |
+| | metaWRAP 1 | default | `deep` |
+|---|---:|---:|---:|
+| gastrointestinal, ≥90% / ≤5% | 115 | 135 | 179 |
+| gastrointestinal, ≥70% / ≤10% | 134 | 157 | 196 |
+| oral, ≥90% / ≤5% | 146 | 156 | 247 |
+| oral, ≥70% / ≤10% | 175 | 191 | 291 |
+| skin, ≥90% / ≤5% | 101 | 135 | 197 |
+| skin, ≥70% / ≤10% | 139 | 186 | 258 |
+| CAMI3 toy, ≥90% / ≤5% | 175 | 161 | 215 |
+| CAMI3 toy, ≥70% / ≤10% | 238 | 233 | 273 |
 
 bp-weighted F1:
 
-| | metaWRAP 1 | `very-fast` | `fast` | default | `gpu` |
-|---|---:|---:|---:|---:|---:|
-| CAMI2 gastrointestinal | 0.67 | 0.54 | 0.67 | 0.75 | 0.85 |
-| CAMI2 oral | 0.36 | 0.25 | 0.35 | 0.39 | 0.53 |
-| CAMI2 skin | 0.38 | 0.30 | 0.36 | 0.47 | 0.59 |
-| CAMI3 toy | 0.21 | 0.16 | 0.21 | 0.23 | 0.23 |
+| | metaWRAP 1 | default | `deep` |
+|---|---:|---:|---:|
+| CAMI2 gastrointestinal | 0.67 | 0.75 | 0.85 |
+| CAMI2 oral | 0.36 | 0.39 | 0.53 |
+| CAMI2 skin | 0.38 | 0.47 | 0.59 |
+| CAMI3 toy | 0.21 | 0.23 | 0.23 |
 
 Purity is 0.98-1.00 throughout, so F1 follows completeness. Wall-clock time (binners one after
 another, plus refinement) is in the figure and the README.
@@ -274,10 +267,8 @@ per dataset are shared by all arms.
 | Clean MAGs (wall-clock time) | Gut, 50 samples | Water, 36 samples | Gut, 1 sample | Gut, 3 samples |
 |---|---:|---:|---:|---:|
 | metaWRAP 1 | 94 (36.5 h) | 183 (98.5 h) | 158 (15.4 h) | 72 (5.0 h) |
-| MetaWrap2 `very-fast` | 91 (7 min) | 162 (14 min) | 154 (1.2 h)* | 52 (1.3 h)* |
-| MetaWrap2 `fast` | 85 (19.6 h) | 182 (45.3 h) | 169 (6.2 h) | 56 (2.3 h) |
 | MetaWrap2 default | 110 (1.5 h) | 184 (2.7 h) | 207 (3.0 h) | 78 (2.2 h) |
-| MetaWrap2 `gpu` | 125 (6.4 h) | 197 (13.3 h) | 250 (9.5 h) | 111 (4.7 h) |
+| MetaWrap2 `deep` | 125 (6.4 h) | 197 (13.3 h) | 250 (9.5 h) | 111 (4.7 h) |
 
 Notes on the one- and three-sample runs:
 
@@ -286,12 +277,9 @@ Notes on the one- and three-sample runs:
 - metaWRAP 1 aligned the reads itself with bwa instead of reusing MetaWrap2's minimap2 alignments.
   With metaBAT2 on the same three-sample assembly, bwa alignments gave 269 bins and minimap2 gave 288
   (592 and 587 on the single sample).
-- `very-fast` is metaBAT2 alone, and its bins are byte-identical to the metaBAT2 bins of the other
-  arms, so those were reused and only its refinement was run. Its time (marked *) comes from the
-  `fast` arm's step timestamps: alignment and depth table 53.8 and 66.6 minutes, metaBAT2 3.8 and
-  0.7 minutes (single sample and three samples), plus `very-fast`'s refinement, 16.7 and 10.5
-  minutes. Alignment per sample was longer on the single sample (53.8 minutes, against 22 per sample
-  on three) because its library is much deeper.
+- Alignment and the depth table took 53.8 minutes on the single sample and 66.6 on three samples.
+  Alignment per sample was longer on the single sample (53.8 minutes, against 22 per sample on
+  three) because its library is much deeper.
 - MaxBin2 inside metaWRAP 1 ran single-threaded for several hours on the single sample. metaWRAP 1
   binning took 14.1 hours there.
 - Arms sometimes ran at the same time on one machine, so wall-clock times include some contention.
@@ -319,12 +307,13 @@ Gold-assembly arms (long, clean contigs), every count after refinement.
 
 ![Binner sets](figures/binner_sets.png)
 
-The figure has fourteen arms; metaWRAP 1's trio ranks in the middle. `gpu` recovers 1.55× the clean MAGs of `default`
+The figure has fourteen arms; metaWRAP 1's trio ranks in the middle. `deep` recovers 1.55× the clean MAGs of `default`
 here and 1.13× end to end (§2).
 
 ![Single binners](figures/binners_alone.png)
 
-Against the truth table, both learned binners score above all three of metaWRAP 1's. CONCOCT is
+Against the truth table, all three learned binners (VAMB 0.82, SemiBin2 0.78, COMEBin 0.77 F1)
+score above all three of metaWRAP 1's (CONCOCT 0.72, metaBAT2 0.64, MaxBin2 0.43). CONCOCT is
 third and costs more than all others combined, so it is opt-in.
 
 ### `--preset`
@@ -333,14 +322,9 @@ third and costs more than all others combined, so it is opt-in.
 
 | tier | binners | clean MAGs, end to end | clean MAGs, gold assembly | extra install |
 |---|---|---|---|---|
-| `very-fast` | metaBAT2 | 36 | 35 | - |
-| `fast` | metaBAT2 + MaxBin2 | 41 | 59 | - |
 | `default` | metaBAT2 + SemiBin2 | **53** | 114 | `install-env learned` |
-| `gpu` | metaBAT2 + SemiBin2 + COMEBin | **60** | **177** | `install-env learned` |
+| `deep` | metaBAT2 + SemiBin2 + COMEBin | **60** | **177** | `install-env learned` |
 
-- Clean MAGs rise with each tier in both designs; `gpu` gives 3× `fast` on the gold assembly and
-  about 1.4× end to end.
-- Only `fast` runs MaxBin2, which has the lowest GUNC pass rate measured (37.7% of its bins).
 - In `default`, metaBAT2 reuses SemiBin2's depth table and costs ~1.3 CPU-hours. On the gold assembly
   the pair gives 114 clean MAGs against SemiBin2's own 116.
 - A preset never overrides a binner named explicitly.
@@ -364,7 +348,7 @@ sequence, and unions were taken over pairs and trios.
 COMEBin finds most of what the others find. The best pair is COMEBin + SemiBin2 at 181 genomes. The
 best trio is COMEBin + SemiBin2 + MaxBin2 (182); COMEBin + SemiBin2 + metaBAT2 reaches 181.
 
-`gpu` uses the trio with metaBAT2, one genome short of the best trio. Of the trios within one genome
+`deep` uses the trio with metaBAT2, one genome short of the best trio. Of the trios within one genome
 of the best it is cheaper by an order of magnitude: metaBAT2 costs ~1.5 CPU-hours, against VAMB's 4.9 GPU-hours, MaxBin2's 24.5 CPU-hours and CONCOCT's
 238. It covers three algorithm families: contrastive (COMEBin), self-supervised (SemiBin2) and
 composition-plus-coverage (metaBAT2).
@@ -377,8 +361,8 @@ genomes generalise is untested beyond this dataset.
 ![GPU arms](figures/gpu_arms.png)
 
 One switch covers all three learned binners; `auto` asks each environment whether torch sees a
-device. The default `cpu` gives the same MAGs on any hardware. On a GPU, COMEBin's run on the gold assembly took 40 CPU-hours;
-on a CPU it did not finish.
+device. The default `cpu` gives the same MAGs on any hardware. On a GPU, COMEBin's run on the gold
+assembly took 39.6 CPU-hours and 66 minutes of wall time; on a CPU it did not finish.
 
 Run GPU arms with `metawrap2 --gpu-strict benchmark ...` or `[limits] gpu_strict = true`. A step that
 shares a card has an inflated wall time and a GPU trace that covers both jobs, so its own GPU cost
@@ -481,7 +465,7 @@ Pipeline:
 - With one input bin set nothing applied the quality thresholds: refining a single COMEBin run left 376
   bins in `metawrap_70_10_bins`, of which 178 pass.
 - `reassemble_bins` recruited reads that are not reads and scored unknowns as perfect.
-- A study sheet selecting any `--preset` but `fast` failed at refinement: the driver resolved binner
+- A study sheet selecting any `--preset` without MaxBin2 failed at refinement: the driver resolved binner
   flags but not presets, and passed refinement two directories that were never created.
 
 Harness:

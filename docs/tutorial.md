@@ -230,8 +230,8 @@ done
 Outputs:
 
 - `ANNOTATION/sample_$S/genes.tsv`: every called gene. `kos.tsv`: the KEGG ortholog per gene, with
-  the evidence for it. On one CAMI2 sample's refined bins, `annotate` called 14,171 genes and 5,827
-  took a curated KO, 2,008 of them distinct ([2.1.2 release notes](https://github.com/ursky/MetaWrap2/blob/main/releases/2.1.2.md) §1).
+  the evidence for it. On five development bins from one CAMI2 sample, `annotate` called 14,171
+  genes and 5,827 took a curated KO, 2,008 of them distinct ([2.1.2 release notes](https://github.com/ursky/MetaWrap2/blob/main/releases/2.1.2.md) §1).
 - `PATHWAYS/sample_$S/modules.tsv`: KEGG module completeness per genome, under both the `pathwise`
   and `stepwise` definitions, with seven flags for known cases where completeness is misleading.
   `-a` weights the per-genome rows by abundance into a community profile, so `quant_bins` must run
@@ -306,8 +306,8 @@ done
 
 The loop prints one count per sample. The sum is comparable with 53 if:
 
-- The samples are 0, 1 and 10 and the preset is `--preset default`. Other presets give 36
-  (`very-fast`), 41 (`fast`) and 60 (`gpu`) (§2).
+- The samples are 0, 1 and 10 and the preset is `--preset default`. `--preset deep` gives
+  60 (§2).
 - Bins are scored with CheckM2 (the default), as the committed counts were. CheckM1 (`--checkm1`)
   reports different completeness for the same genome ([Benchmarks](benchmarks.md), Methods).
 - The count is summed over the three samples. The same organism binned in two samples is two bins

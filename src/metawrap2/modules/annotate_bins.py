@@ -22,6 +22,7 @@ from ..constants import FASTA_EXTENSIONS
 from ..progress import bar
 from ..scripts import shorten_contig_names
 from ._common import (
+    Raw,
     absolutize_paths,
     announcement,
     comm,
@@ -29,6 +30,7 @@ from ._common import (
     ensure_dir,
     env_for,
     error,
+    fill_command,
     finish_run,
     list_bins,
     make_checkpoint,
@@ -95,10 +97,14 @@ def _annotate_one(
     args, tool: str, env, outdir: str, prefix: str, tmp_bin: str, bakta_db: str
 ) -> int:
     if tool == "bakta":
-        db = "--db %s" % bakta_db if bakta_db else ""
-        cmd = BAKTA.format(threads=args.threads, outdir=outdir, prefix=prefix, db=db, input=tmp_bin)
+        db = Raw(fill_command("--db {db}", db=bakta_db) if bakta_db else "")
+        cmd = fill_command(
+            BAKTA, threads=args.threads, outdir=outdir, prefix=prefix, db=db, input=tmp_bin
+        )
     else:
-        cmd = PROKKA.format(threads=args.threads, outdir=outdir, prefix=prefix, input=tmp_bin)
+        cmd = fill_command(
+            PROKKA, threads=args.threads, outdir=outdir, prefix=prefix, input=tmp_bin
+        )
     return run(cmd, env=env, tool=tool, check=False)
 
 

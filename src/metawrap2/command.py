@@ -9,6 +9,8 @@ Everything about executing a tool goes through :class:`CommandRunner`:
   screen output is never blocked or interleaved into one stream);
 * redirecting a command's stdout to a data file when that stdout *is* the output
   (``stdout_path=`` - e.g. ``bwa mem > x.sam``), keeping stderr separate;
+* passing the configured database paths a tool reads from its environment (``GTDBTK_DATA_PATH``
+  and others; see :data:`metawrap2.config.DB_ENV_VARS`);
 * recording each command into the active provenance recorder;
 * checking the exit code and raising a clear :class:`ToolError` on failure;
 * cleaning up the child process group on Ctrl-C.
@@ -155,6 +157,35 @@ def configured_heartbeat_seconds() -> float:
     return _CONFIGURED_HEARTBEAT
 
 
+_CONFIGURED_DATABASES: Optional[Dict[str, str]] = None
+
+
+def configured_databases() -> Dict[str, str]:
+    """``[databases]`` from the config file, read once per process. Empty if it cannot be read."""
+    global _CONFIGURED_DATABASES
+    if _CONFIGURED_DATABASES is None:
+        from .config import load_settings
+
+        try:
+            _CONFIGURED_DATABASES = dict(load_settings(strict=False).databases)
+        except Exception:  # noqa: BLE001 - config errors are reported when the run loads it
+            _CONFIGURED_DATABASES = {}
+    return _CONFIGURED_DATABASES
+
+
+def database_env(databases: Dict[str, str]) -> Dict[str, str]:
+    """The environment variables tools read their databases from, set from *databases*.
+
+    Mapped by :data:`metawrap2.config.DB_ENV_VARS` (GTDB-Tk reads GTDBTK_DATA_PATH, CheckV
+    CHECKVDB, ...). Passing them on every call means a rebuilt conda env, which loses its
+    ``conda env config vars``, still finds its database. A configured value replaces the same
+    variable in the user's shell, because the config is what `check` and `doctor` report.
+    """
+    from .config import DB_ENV_VARS
+
+    return {var: databases[key] for key, var in DB_ENV_VARS.items() if databases.get(key)}
+
+
 def _beat(heartbeat: Heartbeat, screen: Optional[TextIO], stop: threading.Event) -> None:
     """Print *heartbeat* lines to *screen* until *stop* is set.
 
@@ -226,6 +257,9 @@ class CommandRunner:
     #: Seconds of silence before a progress heartbeat is printed; 0 turns them off. None uses the
     #: config file. Set it to override the config, as tests do.
     heartbeat_seconds: Optional[float] = None
+    #: Database paths (config key -> path) to hand to tools as environment variables; see
+    #: :func:`database_env`. None uses the running module's config, read by ``start_run``.
+    databases: Optional[Dict[str, str]] = None
 
     # -- configuration --------------------------------------------------------------------
 
@@ -307,15 +341,29 @@ class CommandRunner:
         it.) Commands without an env are left alone, since a tool pip-installed into ``~/.local``
         is then the one the user meant.
 
-        *extra* is for a tool that needs a variable set for it specifically; see THREAD_LIMITS.
+        Every tool also gets the configured database paths it reads from the environment (see
+        :func:`database_env`). *extra* is for a tool that needs a variable set for it
+        specifically; see THREAD_LIMITS. It is applied last, so it wins.
         """
-        if not isolate_user_site and not extra:
+        databases = database_env(self._databases())
+        if not isolate_user_site and not extra and not databases:
             return None
         child = dict(os.environ)
+        child.update(databases)
         if isolate_user_site:
             child["PYTHONNOUSERSITE"] = "1"
         child.update(extra or {})
         return child
+
+    def _databases(self) -> Dict[str, str]:
+        """The database paths: set on the runner, else the running module's, else the config's."""
+        if self.databases is not None:
+            return self.databases
+        recorded = getattr(self.recorder, "databases", None)
+        if isinstance(recorded, dict):
+            # start_run records the module's resolved config, including a --config file.
+            return recorded
+        return configured_databases()
 
     def _execute(
         self,
@@ -360,6 +408,10 @@ class CommandRunner:
                 stderr=subprocess.PIPE,
                 cwd=cwd,
                 text=True,
+                # A tool that prints one byte that is not UTF-8 must not stop the run with a
+                # UnicodeDecodeError in a reader thread; the byte is shown as U+FFFD instead.
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=self._child_env(isolate_user_site, extra_env),
                 start_new_session=True,  # own process group, so Ctrl-C can kill the tree

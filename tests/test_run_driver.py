@@ -4,6 +4,8 @@
 which module, previously done by hand from the tutorial) can be asserted directly.
 """
 
+import pytest
+
 from metawrap2.commands import run as driver
 
 
@@ -98,7 +100,7 @@ def test_resume_skips_a_step_whose_outputs_are_intact(tmp_path):
 # --- the driver divides the resource budget between steps ---------------------------------
 
 
-def _run_main(tmp_path, monkeypatch, extra_argv=(), limits_toml=""):
+def _run_main(tmp_path, monkeypatch, extra_argv=(), limits_toml="", cohort=False):
     """Run the driver far enough to see what it resolved, without executing any step."""
     config = tmp_path / "metawrap2.toml"
     config.write_text(limits_toml)
@@ -106,25 +108,16 @@ def _run_main(tmp_path, monkeypatch, extra_argv=(), limits_toml=""):
     seen = {}
 
     def fake_execute(
-        steps,
-        layout,
-        study,
-        threads,
-        jobs,
-        config_,
-        flags,
-        state,
-        dry,
-        memory_gb=None,
-        executor="local",
-        settings=None,
-        cli_overrides=None,
+        steps, layout, study, threads, jobs, config_, flags, state, dry, memory_gb=None, gpus=0
     ):
-        seen.update(threads=threads, jobs=jobs, memory_gb=memory_gb)
+        seen.update(threads=threads, jobs=jobs, memory_gb=memory_gb, flags=list(flags), steps=steps)
         return 0
 
     monkeypatch.setattr(driver, "execute", fake_execute)
-    rc = driver.main([sheet, "-o", str(tmp_path / "out"), "--config", str(config), *extra_argv])
+    # No databases are installed here; tests/test_database_preflight.py covers the check.
+    monkeypatch.setattr(driver, "preflight_databases", lambda *args: None)
+    argv = [sheet, "-o", str(tmp_path / "out"), "--config", str(config), *extra_argv]
+    rc = driver.main(argv, cohort=cohort)
     assert rc == 0
     return seen
 
@@ -209,3 +202,26 @@ def test_the_default_binners_are_the_pair_the_benchmark_chose():
     shipped = [v for v in variants if v.default]
     assert len(shipped) == 1, "exactly one binner_set variant may be the default"
     assert tuple(shipped[0].args) == driver.DEFAULT_BINNERS
+
+
+@pytest.mark.parametrize("cohort", [False, True])
+def test_global_flags_before_cohort_reach_every_step(tmp_path, monkeypatch, cohort):
+    """`metawrap2 --max-disk-fraction 0.9 --skip-space-check cohort ...` passes both to the steps.
+
+    Both entry points are checked, and the flags must come before the module name in a step's
+    command (from the tests of pull request #7).
+    """
+    from metawrap2 import cli, command, limits
+
+    try:
+        cli._apply_global_flags(["--max-disk-fraction", "0.9", "--skip-space-check", "run"])
+        seen = _run_main(tmp_path, monkeypatch, cohort=cohort)
+    finally:
+        limits.clear_overrides()
+        command.set_skip_space_check(False)
+    assert "--skip-space-check" in seen["flags"]
+    assert seen["flags"][seen["flags"].index("--max-disk-fraction") + 1] == "0.9"
+    read_qc = next(step for step in seen["steps"] if step.module == "read_qc")
+    argv = read_qc.command(16, None, seen["flags"])
+    module = argv.index("read_qc")
+    assert argv.index("--max-disk-fraction") < module and argv.index("--skip-space-check") < module

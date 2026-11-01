@@ -14,6 +14,7 @@ import shlex
 from typing import Dict, List, Tuple
 
 import pytest
+from _banner import unbanner
 
 from metawrap2 import checkm as checkm_mod
 from metawrap2 import config as config_mod
@@ -180,14 +181,21 @@ def _fake_scorers(monkeypatch) -> Calls:
     return calls
 
 
-def _score(tmp_path, monkeypatch, *bin_dirs, extra=(), out="SCORED", use_conda_envs=True):
+def _score(
+    tmp_path, monkeypatch, *bin_dirs, extra=(), out="SCORED", use_conda_envs=True, exit_code=0
+):
     """One ``metawrap2 score`` run. Returns the output directory and the recorded calls."""
     calls = _fake_scorers(monkeypatch)
     monkeypatch.setenv("METAWRAP2_HISTORY", str(tmp_path / "history.jsonl"))
     output = str(tmp_path / out)
     argv = ["-o", output, "-t", "1", "-m", "8", "--config", _config(tmp_path, use_conda_envs)]
     argv += list(extra) + list(bin_dirs)
-    assert score_cmd.main(argv) == 0
+    if exit_code:
+        with pytest.raises(SystemExit) as stopped:
+            score_cmd.main(argv)
+        assert stopped.value.code == exit_code
+    else:
+        assert score_cmd.main(argv) == 0
     return output, calls
 
 
@@ -329,9 +337,18 @@ def test_a_missing_gunc_database_stops_the_run_before_checkm(tmp_path, monkeypat
     monkeypatch.setenv("METAWRAP2_HISTORY", str(tmp_path / "history.jsonl"))
     config = tmp_path / "no_db.toml"
     config.write_text("[settings]\nuse_conda_envs = true\n")
+    said: List[str] = []
+
+    def stop(message):
+        said.append(message)
+        raise SystemExit(1)
+
+    monkeypatch.setattr(score_cmd, "error", stop)
     with pytest.raises(SystemExit):
         score_cmd.main(["-o", str(tmp_path / "out"), "-t", "1", "--config", str(config), bins])
     assert calls.tools() == []
+    # The hint names this command's flag only.
+    assert "--no-gunc" in said[0] and "--skip-gunc" not in said[0]
 
 
 # ── the extension ────────────────────────────────────────────────────────────────────────────
@@ -350,12 +367,34 @@ def test_a_non_default_extension_is_honoured(tmp_path, monkeypatch):
     )
 
 
-def test_the_default_extension_finds_nothing_in_a_metawrap1_bin_set(tmp_path, monkeypatch):
-    """Without ``-x``, a ``.fa`` bin set is scored as empty and nothing runs."""
+def test_the_default_extension_finds_nothing_in_a_metawrap1_bin_set(tmp_path, monkeypatch, capsys):
+    """Without ``-x``, a ``.fa`` bin set is scored as empty, nothing runs, and the run exits 1."""
     bins = _bin_set(tmp_path / "metawrap1_bins", extension=".fa")
-    scored, calls = _score(tmp_path, monkeypatch, bins)
+    scored, calls = _score(tmp_path, monkeypatch, bins, exit_code=1)
     assert calls.tools() == []
     assert _rows(os.path.join(scored, "metawrap1_bins.stats.tsv")) == []
+    printed = unbanner(capsys.readouterr().out)
+    assert "SCORING FINISHED WITH NOTHING TO DO - 0 genomes found in 1 bin set(s)" in printed
+    assert "FINISHED SUCCESSFULLY" not in printed
+
+
+@pytest.mark.parametrize("value", ["10", "5.5", ".10"])
+def test_a_number_after_x_points_to_contamination(tmp_path, capsys, value):
+    """``-x 10`` is bin_refinement's contamination ceiling, not an extension."""
+    bins = _bin_set(tmp_path / "bins")
+    with pytest.raises(SystemExit) as stopped:
+        score_cmd.main(["-o", str(tmp_path / "out"), "-x", value, bins])
+    assert stopped.value.code == 2
+    err = capsys.readouterr().err
+    assert "-x takes a FASTA extension here, not a contamination ceiling" in err
+    assert "did you mean --contamination %s?" % value in err
+
+
+def test_skip_gunc_is_accepted_as_in_bin_refinement(tmp_path, monkeypatch):
+    """bin_refinement's ``--skip-gunc`` works here as ``--no-gunc``."""
+    bins = _bin_set(tmp_path / "bins")
+    _scored, calls = _score(tmp_path, monkeypatch, bins, extra=["--skip-gunc"])
+    assert "gunc" not in calls.tools()
 
 
 def test_an_extension_without_its_dot_is_the_same_answer():
@@ -380,7 +419,7 @@ def test_an_empty_directory_is_reported_not_fatal(tmp_path, monkeypatch, capsys)
     assert _header(table) == score_cmd.stats_columns()
     assert _rows(table) == []
     assert len(_rows(os.path.join(scored, "full_bins.stats.tsv"))) == len(SCORES)
-    printed = capsys.readouterr().out
+    printed = unbanner(capsys.readouterr().out)
     assert "nothing to score" in printed
     # The warning mentions -x.
     assert "-x" in printed

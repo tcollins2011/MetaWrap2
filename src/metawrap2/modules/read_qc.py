@@ -17,7 +17,6 @@ import argparse
 import glob
 import os
 import re
-import shlex
 import shutil
 from typing import List, NamedTuple, Optional, Tuple
 
@@ -38,10 +37,13 @@ from ._common import (
     error,
     expect_produced,
     file_size,
+    fill_command,
     finish_run,
     fs_move,
     fs_remove,
     make_checkpoint,
+    output_existed,
+    quoted_words,
     read_layout,
     resolve_threads,
     run,
@@ -203,11 +205,17 @@ def _is_ours(path: str, out_dir: str) -> bool:
 
 
 def _decompress(path: str, out_dir: str) -> str:
-    """If *path* is gzipped, decompress it into *out_dir* and return the plain path."""
+    """If *path* is gzipped, decompress it into *out_dir* and return the plain path.
+
+    Under --dry-run nothing is written; the path the copy would have is returned.
+    """
     if not path.endswith(".gz"):
         return path
-    comm("Decompressing %s" % path)
     dest = os.path.join(out_dir, os.path.basename(path)[:-3])
+    if dry_run():
+        comm("(dry run) would decompress %s to %s" % (path, dest))
+        return dest
+    comm("Decompressing %s" % path)
     try:
         with smart_open(path, "rb") as fin, open(dest, "wb") as fout:
             shutil.copyfileobj(fin, fout)
@@ -218,12 +226,14 @@ def _decompress(path: str, out_dir: str) -> str:
 
 def _fastqc_report(args, env, name: str, files: List[str]) -> None:
     outdir = os.path.join(args.output, name)
-    ensure_dir(outdir)
+    if not dry_run():
+        ensure_dir(outdir)
     run(
-        FASTQC.format(
+        fill_command(
+            FASTQC,
             threads=min(args.threads, FASTQC_MAX_THREADS),
             outdir=outdir,
-            files=" ".join(shlex.quote(f) for f in files),
+            files=quoted_words(files),
         ),
         env=env,
         tool="fastqc",
@@ -238,8 +248,12 @@ def _run_trim_galore(args, env, streams: List[str], paired: bool) -> List[str]:
     trim_threads = min(args.threads, TRIM_GALORE_MAX_THREADS)
     if paired:
         run(
-            TRIM_GALORE.format(
-                outdir=args.output, r1=streams[0], r2=streams[1], trim_threads=trim_threads
+            fill_command(
+                TRIM_GALORE,
+                outdir=args.output,
+                r1=streams[0],
+                r2=streams[1],
+                trim_threads=trim_threads,
             ),
             env=env,
             tool="trim_galore",
@@ -251,7 +265,9 @@ def _run_trim_galore(args, env, streams: List[str], paired: bool) -> List[str]:
             for i in range(2)
         ]
     run(
-        TRIM_GALORE_SINGLE.format(outdir=args.output, reads=streams[0], trim_threads=trim_threads),
+        fill_command(
+            TRIM_GALORE_SINGLE, outdir=args.output, reads=streams[0], trim_threads=trim_threads
+        ),
         env=env,
         tool="trim_galore",
     )
@@ -272,7 +288,8 @@ def _run_fastp(args, env, streams: List[str], trimmed: List[str], paired: bool) 
     extra = " " + FASTP_QUALITY_TRIM if args.fastp_quality_trim else ""
     if paired:
         run(
-            FASTP.format(
+            fill_command(
+                FASTP,
                 r1=streams[0],
                 r2=streams[1],
                 o1=trimmed[0],
@@ -287,7 +304,8 @@ def _run_fastp(args, env, streams: List[str], trimmed: List[str], paired: bool) 
         )
         return [trimmed[0], trimmed[1]]
     run(
-        FASTP_SINGLE.format(
+        fill_command(
+            FASTP_SINGLE,
             reads=streams[0],
             o1=trimmed[0],
             trim_threads=trim_threads,
@@ -407,8 +425,9 @@ def _retention_advice(trimmer: str) -> str:
     if trimmer == "fastp":
         return (
             "By default fastp removes a read when more than 40% of its bases are below Q15 and "
-            "does no quality trimming, so these reads were discarded, not shortened. On older or "
-            "lower-quality data (for example 75 bp reads from around 2010), use --trimmer "
+            "does no quality trimming, so these reads were discarded, not shortened. This is "
+            "common on longer reads (2x150 bp and above), where quality decays along the read and "
+            "a low-quality tail can exceed 40% of the bases, and on older data. Use --trimmer "
             "trim-galore, which trims low-quality tails and keeps the shorter read, or keep "
             "fastp and add --fastp-quality-trim. A loss this large affects every coverage, "
             "diversity and sequencing-effort estimate computed from these reads."
@@ -511,7 +530,7 @@ def main(argv: List[str]) -> int:
             if not (bmtagger_db and os.path.isfile(bitmask)):
                 error("%s file doesnt exist. Please configure your bmtagger genome index" % bitmask)
 
-        if os.path.isdir(args.output):
+        if output_existed():
             warning("%s already exists." % args.output)
         ensure_dir(args.output)
 
@@ -575,13 +594,15 @@ def main(argv: List[str]) -> int:
         if do_bmtagger and ckpt.todo("host_removal"):
             announcement("REMOVING HOST SEQUENCES WITH BMTAGGER")
             tmpdir = os.path.join(args.output, "bmtagger_tmp")
-            ensure_dir(tmpdir)
+            if not dry_run():
+                ensure_dir(tmpdir)
             bitmask = os.path.join(bmtagger_db, args.host + ".bitmask")
             srprism = os.path.join(bmtagger_db, args.host + ".srprism")
             listfile = os.path.join(args.output, "%s.bmtagger.list" % sample)
             comm("running bmtagger with %s %s indexes..." % (bitmask, srprism))
             if paired:
-                cmd = BMTAGGER.format(
+                cmd = fill_command(
+                    BMTAGGER,
                     bitmask=bitmask,
                     srprism=srprism,
                     tmpdir=tmpdir,
@@ -590,7 +611,8 @@ def main(argv: List[str]) -> int:
                     listfile=listfile,
                 )
             else:
-                cmd = BMTAGGER_SINGLE.format(
+                cmd = fill_command(
+                    BMTAGGER_SINGLE,
                     bitmask=bitmask,
                     srprism=srprism,
                     tmpdir=tmpdir,
